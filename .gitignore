@@ -1,0 +1,26 @@
+.env
+.env.local
+
+# Production deployment files — copied from *.sample on the prod host and
+# filled with real secrets/domain. Never track these; a pull/agent edit
+# must never overwrite the operator's live prod config. Only the committed
+# *.sample files are the source of truth.
+.env.prod
+compose.prod.yaml
+traefik/acme.json
+traefik/*.local.*
+letsencrypt/
+.state/
+.dev/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+.playwright/
+test-results/
+.DS_Store
+*.log
+.gstack/

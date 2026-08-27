@@ -1,0 +1,137 @@
+/*
+ * HoodMint Radar design tokens (PRD §5.4 + DESIGN.md).
+ * Hex maps live in theme.ts — keep this file in lockstep.
+ * Dark is default. [data-theme="light"] remaps the same roles for AA text.
+ */
+
+@theme {
+  --color-base: #070908;
+  --color-base-raised: #0d100e;
+  --color-base-overlay: #121613;
+  --color-line: #1e2420;
+  --color-line-strong: #2c352e;
+
+  --color-ink: #e8ede9;
+  --color-ink-muted: #9aa69e;
+  --color-ink-faint: #6b756e;
+
+  --color-acid: #b8ff2e;
+  --color-acid-dim: #86c214;
+  --color-cyan: #4fd8e8;
+  --color-cyan-dim: #2b93a3;
+  --color-magenta: #ff4fa3;
+  --color-amber: #ffc247;
+
+  --color-ok: var(--color-acid);
+  --color-info: var(--color-cyan);
+  --color-warn: var(--color-amber);
+  --color-crit: var(--color-magenta);
+
+  --font-display: "Space Grotesk", "Space Grotesk Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, "SF Mono", monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+
+  --motion-fast: 120ms;
+  --motion-base: 160ms;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-base: #070908;
+  --color-base-raised: #0d100e;
+  --color-base-overlay: #121613;
+  --color-line: #1e2420;
+  --color-line-strong: #2c352e;
+  --color-ink: #e8ede9;
+  --color-ink-muted: #9aa69e;
+  --color-ink-faint: #6b756e;
+  --color-acid: #b8ff2e;
+  --color-acid-dim: #86c214;
+  --color-cyan: #4fd8e8;
+  --color-cyan-dim: #2b93a3;
+  --color-magenta: #ff4fa3;
+  --color-amber: #ffc247;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-base: #f3f6f1;
+  --color-base-raised: #ffffff;
+  --color-base-overlay: #e7ece4;
+  --color-line: #d4dcd2;
+  --color-line-strong: #b7c2b4;
+  --color-ink: #121613;
+  --color-ink-muted: #4d5751;
+  --color-ink-faint: #6b756e;
+  --color-acid: #3f6d00;
+  --color-acid-dim: #5a9208;
+  --color-cyan: #0a6d78;
+  --color-cyan-dim: #1591a0;
+  --color-magenta: #c0166a;
+  --color-amber: #9a6200;
+}
+
+/* Subtle grid texture for the main canvas (kept extremely low contrast). */
+.hood-grid {
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--color-line) 32%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--color-line) 32%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 28px 28px;
+}
+
+/* Live pulse dot — animation disabled under reduced motion; color + label
+   always accompany it so no meaning is motion-only. */
+.hood-pulse {
+  position: relative;
+}
+.hood-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  opacity: 0.6;
+  animation: hood-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@keyframes hood-ping {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.7;
+  }
+  80%,
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hood-pulse::after {
+    animation: none;
+    opacity: 0.25;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Focus ring visible on both themes for keyboard navigation. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-acid);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}

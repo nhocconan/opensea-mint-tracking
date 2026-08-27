@@ -1,0 +1,24 @@
+{
+  "name": "@hoodmint/providers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config ../../vitest.package.config.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hoodmint/core": "workspace:*",
+    "@hoodmint/db": "workspace:*",
+    "@hoodmint/observability": "workspace:*",
+    "viem": "2.55.16",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  }
+}

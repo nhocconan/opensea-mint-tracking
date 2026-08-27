@@ -1,0 +1,4 @@
+{
+  "accessToken": "jwt-eyJhbGciOiJFUzI1NiJ9.test.sig",
+  "expiresIn": 43200
+}

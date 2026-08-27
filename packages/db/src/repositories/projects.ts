@@ -1,0 +1,775 @@
+/**
+ * Project persistence: identity merge, provenance, and feed queries.
+ *
+ * Identity (PRD §7.2): canonical key is (chainId, contractAddress); until a
+ * contract is known, a source-scoped alias keys the row and merges later,
+ * transactionally, without creating duplicate user-visible projects.
+ */
+
+import {
+  type Confidence,
+  coerceDate,
+  computeLifecycle,
+  type LifecycleStatus,
+  type StageKind,
+} from "@hoodmint/core";
+import type { SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
+import type { Db, Tx } from "../client.ts";
+import {
+  dropStages,
+  evidence as evidenceTable,
+  mintAggregates,
+  mintEvents,
+  projectAliases,
+  projectFields,
+  projects,
+  providers,
+  supplySnapshots,
+} from "../schema.ts";
+import { ensureProvider, type ProviderKind } from "./providers.ts";
+
+export interface StageUpsert {
+  readonly providerStageId: string;
+  readonly label: string;
+  readonly kind: StageKind;
+  readonly priceWei: string | null;
+  readonly currency: string | null;
+  readonly maxPerWallet: number | null;
+  readonly startsAt: Date;
+  readonly endsAt: Date | null;
+  readonly paused: boolean;
+}
+
+export interface SupplyUpsert {
+  readonly minted: bigint | null;
+  readonly maxSupply: bigint | null;
+  readonly verified: boolean;
+  readonly source: string;
+}
+
+export interface ProjectUpsert {
+  readonly providerKind: ProviderKind;
+  readonly externalId: string;
+  readonly chainId: number;
+  readonly contractAddress: string | null;
+  readonly name: string;
+  readonly slug: string | null;
+  readonly imageUrl: string | null;
+  readonly confidence: Confidence;
+  readonly stages: readonly StageUpsert[];
+  readonly supply: SupplyUpsert | null;
+  readonly evidence: {
+    readonly kind: string;
+    readonly fetchedAt: Date;
+    readonly contentHash: string;
+    readonly sanitizedPayload: unknown;
+  } | null;
+  readonly now: Date;
+}
+
+export interface UpsertResult {
+  readonly projectId: string;
+  readonly created: boolean;
+  /** True when a conflicting contract identity was withheld (on-chain wins). */
+  readonly contractConflict: boolean;
+}
+
+export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Promise<UpsertResult> {
+  return db.transaction(async (tx) => {
+    const provider = await ensureProvider(tx, input.providerKind);
+
+    // 1. Resolve identity: contract first, alias second (PRD §7.2).
+    let existing: { id: string; contractAddress: string | null } | undefined;
+    if (input.contractAddress !== null) {
+      const rows = await tx
+        .select({ id: projects.id, contractAddress: projects.contractAddress })
+        .from(projects)
+        .where(
+          and(
+            eq(projects.chainId, input.chainId),
+            eq(projects.contractAddress, input.contractAddress.toLowerCase()),
+          ),
+        )
+        .limit(1);
+      existing = rows[0];
+    }
+    if (existing === undefined) {
+      const rows = await tx
+        .select({ id: projects.id, contractAddress: projects.contractAddress })
+        .from(projects)
+        .innerJoin(projectAliases, eq(projectAliases.projectId, projects.id))
+        .where(
+          and(
+            eq(projectAliases.providerId, provider.id),
+            eq(projectAliases.externalId, input.externalId),
+          ),
+        )
+        .limit(1);
+      existing = rows[0];
+    }
+
+    let contractConflict = false;
+    let projectId: string;
+
+    if (existing === undefined) {
+      const inserted = await tx
+        .insert(projects)
+        .values({
+          chainId: input.chainId,
+          contractAddress: input.contractAddress?.toLowerCase() ?? null,
+          name: input.name,
+          slug: input.slug,
+          imageUrl: input.imageUrl,
+          confidence: input.confidence,
+          firstSeenAt: input.now,
+          lastSeenAt: input.now,
+        })
+        .returning({ id: projects.id });
+      projectId = inserted[0]?.id as string;
+    } else {
+      projectId = existing.id;
+      // Contract identity conflicts: on-chain state wins; record the loser
+      // as provenance instead of silently overwriting (PRD §7.2).
+      if (
+        input.contractAddress !== null &&
+        existing.contractAddress !== null &&
+        existing.contractAddress !== input.contractAddress.toLowerCase()
+      ) {
+        contractConflict = true;
+        await tx.insert(projectFields).values({
+          projectId,
+          field: "contractAddress",
+          valueJson: { value: input.contractAddress.toLowerCase(), provider: input.providerKind },
+          providerId: provider.id,
+          observedAt: input.now,
+          isWinner: false,
+        });
+      } else if (input.contractAddress !== null && existing.contractAddress === null) {
+        await tx
+          .update(projects)
+          .set({ contractAddress: input.contractAddress.toLowerCase() })
+          .where(eq(projects.id, projectId));
+      }
+      await tx
+        .update(projects)
+        .set({
+          name: input.name,
+          ...(input.slug !== null ? { slug: input.slug } : {}),
+          ...(input.imageUrl !== null ? { imageUrl: input.imageUrl } : {}),
+          confidence: input.confidence,
+          lastSeenAt: input.now,
+        })
+        .where(eq(projects.id, projectId));
+    }
+
+    // 2. Alias upsert — source-scoped external id (idempotent re-discovery).
+    await tx
+      .insert(projectAliases)
+      .values({
+        projectId,
+        providerId: provider.id,
+        externalId: input.externalId,
+        firstSeenAt: input.now,
+        lastSeenAt: input.now,
+      })
+      .onConflictDoUpdate({
+        target: [projectAliases.providerId, projectAliases.externalId],
+        set: { projectId, lastSeenAt: input.now },
+      });
+
+    // 3. Evidence row (sanitized payload only, PRD §11).
+    let evidenceId: string | null = null;
+    if (input.evidence !== null) {
+      const ev = await tx
+        .insert(evidenceTable)
+        .values({
+          providerId: provider.id,
+          kind: input.evidence.kind,
+          fetchedAt: input.evidence.fetchedAt,
+          contentHash: input.evidence.contentHash,
+          sanitizedPayload: input.evidence.sanitizedPayload as Record<string, unknown>,
+        })
+        .returning({ id: evidenceTable.id });
+      evidenceId = ev[0]?.id ?? null;
+    }
+
+    // 4. Stages: version bumps only on material change.
+    for (const stage of input.stages) {
+      const currentRows = await tx
+        .select()
+        .from(dropStages)
+        .where(
+          and(
+            eq(dropStages.projectId, projectId),
+            eq(dropStages.providerStageId, stage.providerStageId),
+          ),
+        )
+        .limit(1);
+      const current = currentRows[0];
+      const materialChange =
+        current === undefined ||
+        current.label !== stage.label ||
+        current.type !== stage.kind ||
+        current.priceWei !== stage.priceWei ||
+        current.maxPerWallet !== stage.maxPerWallet ||
+        current.startsAt.getTime() !== stage.startsAt.getTime() ||
+        (current.endsAt?.getTime() ?? null) !== (stage.endsAt?.getTime() ?? null) ||
+        current.paused !== stage.paused;
+
+      if (current === undefined) {
+        await tx.insert(dropStages).values({
+          projectId,
+          providerStageId: stage.providerStageId,
+          version: 1,
+          label: stage.label,
+          type: stage.kind,
+          priceWei: stage.priceWei,
+          currency: stage.currency,
+          maxPerWallet: stage.maxPerWallet,
+          startsAt: stage.startsAt,
+          endsAt: stage.endsAt,
+          paused: stage.paused,
+          rawEvidenceId: evidenceId,
+        });
+      } else if (materialChange) {
+        await tx
+          .update(dropStages)
+          .set({
+            version: current.version + 1,
+            label: stage.label,
+            type: stage.kind,
+            priceWei: stage.priceWei,
+            currency: stage.currency,
+            maxPerWallet: stage.maxPerWallet,
+            startsAt: stage.startsAt,
+            endsAt: stage.endsAt,
+            paused: stage.paused,
+            rawEvidenceId: evidenceId,
+            updatedAt: input.now,
+          })
+          .where(eq(dropStages.id, current.id));
+      }
+    }
+
+    // 5. Supply snapshot with provenance.
+    if (input.supply !== null && input.supply.minted !== null) {
+      await tx.insert(supplySnapshots).values({
+        projectId,
+        minted: input.supply.minted,
+        maxSupply: input.supply.maxSupply,
+        observedAt: input.now,
+        source: input.supply.source,
+        verified: input.supply.verified,
+        blockNumber: null,
+      });
+    }
+
+    // 6. Recompute lifecycle (domain purity: status lives in core, PRD §6).
+    const stageRows = await tx
+      .select()
+      .from(dropStages)
+      .where(eq(dropStages.projectId, projectId))
+      .orderBy(asc(dropStages.startsAt));
+    const latestSupply = await latestSupplyFor(tx, projectId);
+    const isoNow = input.now.toISOString();
+    const lifecycle = computeLifecycle({
+      stages: stageRows.map((s) => ({
+        label: s.label,
+        kind: s.type,
+        startsAt: s.startsAt.toISOString(),
+        endsAt: s.endsAt?.toISOString() ?? null,
+        paused: s.paused,
+      })),
+      isoNow,
+      paused: stageRows.some((s) => s.paused) ? true : null,
+      supply: {
+        minted: latestSupply?.minted ?? null,
+        maxSupply: latestSupply?.maxSupply ?? null,
+        verified: latestSupply?.verified ?? false,
+      },
+    });
+    const nextStart = stageRows
+      .map((s) => s.startsAt)
+      .filter((t) => t.getTime() > input.now.getTime())
+      .sort((a, b) => a.getTime() - b.getTime())[0];
+
+    await tx
+      .update(projects)
+      .set({ lifecycleStatus: lifecycle, nextStageStart: nextStart ?? null })
+      .where(eq(projects.id, projectId));
+
+    return { projectId, created: existing === undefined, contractConflict };
+  });
+}
+
+async function latestSupplyFor(
+  tx: Tx,
+  projectId: string,
+): Promise<{ minted: bigint; maxSupply: bigint | null; verified: boolean } | undefined> {
+  const rows = await tx
+    .select()
+    .from(supplySnapshots)
+    .where(eq(supplySnapshots.projectId, projectId))
+    .orderBy(desc(supplySnapshots.observedAt))
+    .limit(1);
+  const row = rows[0];
+  return row === undefined
+    ? undefined
+    : { minted: row.minted, maxSupply: row.maxSupply, verified: row.verified };
+}
+
+/* ── Feed queries ─────────────────────────────────────────────────────────── */
+
+export type FeedView = "all" | "live" | "next" | "latest" | "eligible" | "watchlist";
+
+export type FeedSort = "recent" | "starting" | "velocity" | "minted" | "name" | "discovered";
+
+export interface FeedFilters {
+  readonly view: FeedView;
+  readonly userId?: string | undefined;
+  readonly search?: string | undefined;
+  readonly status?: LifecycleStatus | undefined;
+  readonly source?: string | undefined;
+  readonly confidence?: Confidence | undefined;
+  readonly price?: "free" | "paid" | undefined;
+  readonly eligibility?: string | undefined;
+  readonly watchedBy?: string | undefined;
+  readonly firstSeenFrom?: Date | undefined;
+  readonly firstSeenTo?: Date | undefined;
+  readonly sort?: FeedSort | undefined;
+  readonly limit?: number | undefined;
+  /** Opaque keyset cursor from the previous page's meta.nextCursor. */
+  readonly cursor?: string | undefined;
+}
+
+export interface FeedRow {
+  readonly id: string;
+  readonly chainId: number;
+  readonly contractAddress: string | null;
+  readonly name: string;
+  readonly slug: string | null;
+  readonly imageUrl: string | null;
+  readonly confidence: Confidence;
+  readonly lifecycleStatus: LifecycleStatus;
+  readonly nextStageStart: Date | null;
+  readonly firstSeenAt: Date;
+  readonly lastSeenAt: Date;
+  readonly minted: string | null;
+  readonly maxSupply: string | null;
+  readonly supplyVerified: boolean;
+  readonly velocity1h: number;
+  readonly uniqueMinters1h: number;
+  readonly stageLabel: string | null;
+  readonly stageKind: StageKind | null;
+  readonly stagePriceWei: string | null;
+  readonly stageStartsAt: Date | null;
+  readonly stageEndsAt: Date | null;
+}
+
+export interface FeedPage {
+  readonly rows: FeedRow[];
+  readonly nextCursor: string | null;
+}
+
+interface DecodedCursor {
+  readonly v: string;
+  readonly id: string;
+}
+
+function encodeCursor(row: FeedRow, sort: FeedSort): string | null {
+  // Every timestamptz field on a query result is a string at runtime
+  // regardless of what FeedRow's type claims (found live via a production
+  // load test, not typecheck, 2026-08-22) — coerceDate before any Date
+  // method, on every branch, not just the ones this session load-tested.
+  let v: string;
+  if (sort === "name") {
+    v = row.name;
+  } else if (sort === "starting" || sort === "velocity") {
+    v = row.nextStageStart !== null ? coerceDate(row.nextStageStart).toISOString() : "infinity";
+  } else if (sort === "discovered") {
+    v = coerceDate(row.firstSeenAt).toISOString();
+  } else if (sort === "minted") {
+    v =
+      row.maxSupply !== null && row.supplyVerified && row.minted !== null && row.maxSupply !== "0"
+        ? `${(Number(BigInt(row.minted)) / Number(BigInt(row.maxSupply))).toFixed(6)}`
+        : "";
+  } else {
+    v = coerceDate(row.lastSeenAt).toISOString();
+  }
+  return Buffer.from(JSON.stringify({ v, id: row.id } satisfies DecodedCursor)).toString(
+    "base64url",
+  );
+}
+
+function decodeCursor(raw: string): DecodedCursor | undefined {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, "base64url").toString("utf8"),
+    ) as Partial<DecodedCursor>;
+    if (typeof parsed.v === "string" && typeof parsed.id === "string") {
+      return { v: parsed.v, id: parsed.id };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage> {
+  const limit = Math.min(Math.max(filters.limit ?? 50, 1), 100);
+  const sort =
+    filters.sort ??
+    (filters.view === "latest" ? "discovered" : filters.view === "next" ? "starting" : "recent");
+
+  const latestMinted = sql<string | null>`
+    (select s.minted::text from supply_snapshots s
+      where s.project_id = ${projects.id}
+      order by s.observed_at desc limit 1)`;
+  const latestMaxSupply = sql<string | null>`
+    (select s.max_supply::text from supply_snapshots s
+      where s.project_id = ${projects.id}
+      order by s.observed_at desc limit 1)`;
+  const latestVerified = sql<boolean>`
+    coalesce((select s.verified from supply_snapshots s
+      where s.project_id = ${projects.id}
+      order by s.observed_at desc limit 1), false)`;
+
+  const velocity1h = sql<number>`
+    coalesce((select sum(a.quantity)::int
+       from mint_aggregates a
+      where a.project_id = ${projects.id}
+        and a.bucket_size = '1h'
+        and a.bucket_start > now() - interval '1 hour'), 0)`;
+
+  const uniqueMinters1h = sql<number>`
+    coalesce((select count(distinct m.recipient)::int
+       from mint_events m
+      where m.project_id = ${projects.id}
+        and m.observed_at > now() - interval '1 hour'), 0)`;
+
+  const conditions: SQL[] = [];
+
+  switch (filters.view) {
+    case "live":
+      conditions.push(eq(projects.lifecycleStatus, "LIVE"));
+      break;
+    case "next":
+      conditions.push(eq(projects.lifecycleStatus, "NEXT"));
+      break;
+    case "latest":
+      break;
+    case "eligible": {
+      conditions.push(
+        sql`exists (select 1 from eligibility_checks ec
+               where ec.project_id = ${projects.id}
+                 and ec.status = 'ELIGIBLE_RESTRICTED')`,
+      );
+      break;
+    }
+    case "watchlist": {
+      if (filters.userId === undefined) {
+        return { rows: [], nextCursor: null };
+      }
+      conditions.push(
+        sql`exists (select 1 from watchlist_entries we
+               where we.project_id = ${projects.id} and we.user_id = ${filters.userId})`,
+      );
+      break;
+    }
+    case "all":
+      break;
+  }
+
+  if (filters.status !== undefined) {
+    conditions.push(eq(projects.lifecycleStatus, filters.status));
+  }
+  if (filters.confidence !== undefined) {
+    conditions.push(eq(projects.confidence, filters.confidence));
+  }
+  if (filters.source !== undefined) {
+    conditions.push(
+      sql`exists (select 1 from project_aliases pa join providers pr on pr.id = pa.provider_id
+             where pa.project_id = ${projects.id} and pr.kind = ${filters.source})`,
+    );
+  }
+  if (filters.search !== undefined && filters.search.trim() !== "") {
+    const q = `%${filters.search.trim()}%`;
+    const exact = filters.search.trim().toLowerCase();
+    const searchCond = or(
+      ilike(projects.name, q),
+      ilike(projects.slug, q),
+      eq(projects.contractAddress, exact),
+    );
+    if (searchCond !== undefined) {
+      conditions.push(searchCond);
+    }
+  }
+  if (filters.firstSeenFrom !== undefined) {
+    conditions.push(gte(projects.firstSeenAt, filters.firstSeenFrom));
+  }
+  if (filters.firstSeenTo !== undefined) {
+    conditions.push(lte(projects.firstSeenAt, filters.firstSeenTo));
+  }
+  if (filters.price === "free") {
+    conditions.push(sql`not exists (
+      select 1 from drop_stages ds
+       where ds.project_id = ${projects.id} and ds.price_wei is not null and ds.price_wei <> '0')`);
+  } else if (filters.price === "paid") {
+    conditions.push(sql`exists (
+      select 1 from drop_stages ds
+       where ds.project_id = ${projects.id} and ds.price_wei is not null and ds.price_wei <> '0')`);
+  }
+  if (filters.watchedBy !== undefined) {
+    conditions.push(
+      sql`exists (select 1 from watchlist_entries we
+             where we.project_id = ${projects.id} and we.user_id = ${filters.watchedBy})`,
+    );
+  }
+  if (filters.eligibility !== undefined && filters.view !== "eligible") {
+    conditions.push(
+      sql`exists (select 1 from eligibility_checks ec
+             where ec.project_id = ${projects.id} and ec.status = ${filters.eligibility})`,
+    );
+  }
+
+  // Keyset cursor: (sortValue, id) strictly after the last row of the page.
+  if (filters.cursor !== undefined) {
+    const decoded = decodeCursor(filters.cursor);
+    if (decoded !== undefined) {
+      const descSort = sort !== "starting" && sort !== "name";
+      let sortExpr: SQL;
+      let cursorValue: SQL;
+      if (sort === "name") {
+        sortExpr = sql`${projects.name}`;
+        cursorValue = sql`${decoded.v}::text`;
+      } else if (sort === "starting" || sort === "velocity") {
+        sortExpr = sql`coalesce(${projects.nextStageStart}, 'infinity'::timestamptz)`;
+        cursorValue =
+          decoded.v === "infinity" ? sql`'infinity'::timestamptz` : sql`${decoded.v}::timestamptz`;
+      } else if (sort === "discovered") {
+        sortExpr = sql`${projects.firstSeenAt}`;
+        cursorValue = sql`${decoded.v}::timestamptz`;
+      } else if (sort === "minted") {
+        sortExpr = sql`coalesce((select case when s.verified and s.max_supply is not null and s.max_supply > 0
+              then (s.minted::numeric / s.max_supply::numeric) else null end
+            from supply_snapshots s where s.project_id = ${projects.id}
+            order by s.observed_at desc limit 1), -1)`;
+        cursorValue = decoded.v === "" ? sql`-1::numeric` : sql`${decoded.v}::numeric`;
+      } else {
+        sortExpr = sql`${projects.lastSeenAt}`;
+        cursorValue = sql`${decoded.v}::timestamptz`;
+      }
+      const comparison = descSort
+        ? sql`(${sortExpr}, ${projects.id}) < (${cursorValue}, ${decoded.id}::uuid)`
+        : sql`(${sortExpr}, ${projects.id}) > (${cursorValue}, ${decoded.id}::uuid)`;
+      conditions.push(comparison);
+    }
+  }
+
+  const orderBy =
+    sort === "name"
+      ? [asc(projects.name), asc(projects.id)]
+      : sort === "starting" || sort === "velocity"
+        ? [
+            asc(sql`coalesce(${projects.nextStageStart}, 'infinity'::timestamptz)`),
+            asc(projects.id),
+          ]
+        : sort === "discovered"
+          ? [desc(projects.firstSeenAt), desc(projects.id)]
+          : sort === "minted"
+            ? [
+                desc(sql`coalesce((select case when s.verified and s.max_supply is not null and s.max_supply > 0
+                      then (s.minted::numeric / s.max_supply::numeric) else null end
+                    from supply_snapshots s where s.project_id = ${projects.id}
+                    order by s.observed_at desc limit 1), -1)`),
+                desc(projects.id),
+              ]
+            : [desc(projects.lastSeenAt), desc(projects.id)];
+
+  // Scalar per-column subqueries: Postgres has no tuple-projection syntax
+  // for correlated subqueries; each field repeats the (cheap, indexed) lookup.
+  const currentStageCol = (col: string): SQL =>
+    sql`(select ds.${sql.raw(col)} from drop_stages ds
+      where ds.project_id = ${projects.id}
+        and ds.starts_at <= now()
+        and (ds.ends_at is null or ds.ends_at > now())
+      order by ds.starts_at asc limit 1)`;
+
+  const rows = await db
+    .select({
+      id: projects.id,
+      chainId: projects.chainId,
+      contractAddress: projects.contractAddress,
+      name: projects.name,
+      slug: projects.slug,
+      imageUrl: projects.imageUrl,
+      confidence: projects.confidence,
+      lifecycleStatus: projects.lifecycleStatus,
+      nextStageStart: projects.nextStageStart,
+      firstSeenAt: projects.firstSeenAt,
+      lastSeenAt: projects.lastSeenAt,
+      minted: latestMinted,
+      maxSupply: latestMaxSupply,
+      supplyVerified: latestVerified,
+      velocity1h,
+      uniqueMinters1h,
+      stageLabel: sql<string | null>`${currentStageCol("label")}`,
+      stageKind: sql<StageKind | null>`${currentStageCol("type")}`,
+      stagePriceWei: sql<string | null>`${currentStageCol("price_wei")}`,
+      stageStartsAt: sql<Date | null>`${currentStageCol("starts_at")}`,
+      stageEndsAt: sql<Date | null>`${currentStageCol("ends_at")}`,
+    })
+    .from(projects)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(...orderBy)
+    .limit(limit + 1);
+
+  const page = rows.slice(0, limit);
+  const lastRow = page[page.length - 1];
+  return {
+    rows: page as FeedRow[],
+    nextCursor:
+      rows.length > limit && lastRow !== undefined ? encodeCursor(lastRow as FeedRow, sort) : null,
+  };
+}
+
+/* ── Detail ───────────────────────────────────────────────────────────────── */
+
+export interface ProjectDetail {
+  readonly project: typeof projects.$inferSelect;
+  readonly stages: (typeof dropStages.$inferSelect)[];
+  readonly supply: (typeof supplySnapshots.$inferSelect)[] | [];
+  readonly aliases: { providerKind: string; externalId: string; lastSeenAt: Date }[];
+  readonly conflicts: {
+    field: string;
+    valueJson: unknown;
+    providerKind: string | null;
+    observedAt: Date;
+  }[];
+  readonly evidenceRows: { id: string; kind: string; fetchedAt: Date; contentHash: string }[];
+}
+
+export async function getProjectDetail(db: Db, id: string): Promise<ProjectDetail | undefined> {
+  const rows = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+  const project = rows[0];
+  if (project === undefined) {
+    return undefined;
+  }
+  const [stages, supply, aliases, conflicts, evidenceRows] = await Promise.all([
+    db
+      .select()
+      .from(dropStages)
+      .where(eq(dropStages.projectId, id))
+      .orderBy(asc(dropStages.startsAt)),
+    db
+      .select()
+      .from(supplySnapshots)
+      .where(eq(supplySnapshots.projectId, id))
+      .orderBy(desc(supplySnapshots.observedAt))
+      .limit(20),
+    db
+      .select({
+        providerKind: providers.kind,
+        externalId: projectAliases.externalId,
+        lastSeenAt: projectAliases.lastSeenAt,
+      })
+      .from(projectAliases)
+      .innerJoin(providers, eq(providers.id, projectAliases.providerId))
+      .where(eq(projectAliases.projectId, id)),
+    db
+      .select({
+        field: projectFields.field,
+        valueJson: projectFields.valueJson,
+        providerKind: providers.kind,
+        observedAt: projectFields.observedAt,
+      })
+      .from(projectFields)
+      .leftJoin(providers, eq(providers.id, projectFields.providerId))
+      .where(and(eq(projectFields.projectId, id), eq(projectFields.isWinner, false)))
+      .orderBy(desc(projectFields.observedAt))
+      .limit(20),
+    db
+      .select({
+        id: evidenceTable.id,
+        kind: evidenceTable.kind,
+        fetchedAt: evidenceTable.fetchedAt,
+        contentHash: evidenceTable.contentHash,
+      })
+      .from(evidenceTable)
+      .orderBy(desc(evidenceTable.fetchedAt))
+      .limit(10),
+  ]);
+
+  return { project, stages, supply: supply, aliases, conflicts, evidenceRows };
+}
+
+export async function recentMintEvents(
+  db: Db,
+  projectId: string,
+  limit = 25,
+): Promise<(typeof mintEvents.$inferSelect)[]> {
+  return db
+    .select()
+    .from(mintEvents)
+    .where(eq(mintEvents.projectId, projectId))
+    .orderBy(desc(mintEvents.blockNumber))
+    .limit(limit);
+}
+
+export async function velocitySeries(
+  db: Db,
+  projectId: string,
+): Promise<{ bucketStart: Date; quantity: number; uniqueRecipients: number }[]> {
+  return db
+    .select({
+      bucketStart: mintAggregates.bucketStart,
+      quantity: mintAggregates.quantity,
+      uniqueRecipients: mintAggregates.uniqueRecipients,
+    })
+    .from(mintAggregates)
+    .where(and(eq(mintAggregates.projectId, projectId), eq(mintAggregates.bucketSize, "5m")))
+    .orderBy(desc(mintAggregates.bucketStart))
+    .limit(48);
+}
+
+export async function countProjects(db: Db): Promise<number> {
+  const rows = await db.select({ count: sql<number>`count(*)::int` }).from(projects);
+  return rows[0]?.count ?? 0;
+}
+
+export async function projectsWithContract(
+  db: Db,
+  chainId: number,
+): Promise<{ id: string; contractAddress: string | null }[]> {
+  return db
+    .select({ id: projects.id, contractAddress: projects.contractAddress })
+    .from(projects)
+    .where(and(eq(projects.chainId, chainId), sql`${projects.contractAddress} is not null`));
+}
+
+export async function dueEligibilityCandidates(
+  db: Db,
+  now: Date,
+  limit: number,
+): Promise<{ projectId: string; slug: string | null }[]> {
+  return db
+    .select({ projectId: projects.id, slug: projects.slug })
+    .from(projects)
+    .where(
+      and(
+        inArray(projects.lifecycleStatus, ["LIVE", "NEXT", "UNKNOWN"]),
+        gt(projects.lastSeenAt, new Date(now.getTime() - 7 * 24 * 3600 * 1000)),
+      ),
+    )
+    .orderBy(asc(sql`coalesce(${projects.nextStageStart}, 'infinity'::timestamptz)`))
+    .limit(limit);
+}
+
+export async function findProjectBySlugOrId(
+  db: Db,
+  key: string,
+): Promise<typeof projects.$inferSelect | undefined> {
+  const bySlug = await db.select().from(projects).where(eq(projects.slug, key)).limit(1);
+  return bySlug[0];
+}

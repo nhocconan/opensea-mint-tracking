@@ -1,0 +1,63 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Slow-network resilience (pnpm 11 reads settings here, top-level):
+# large platform binaries (next/swc, biome) can take minutes on constrained
+# links; the 60s default aborts them mid-download.
+fetchTimeout: 900000
+fetchRetries: 5
+fetchRetryMintimeout: 30000
+networkConcurrency: 3
+
+onlyBuiltDependencies:
+  - "@biomejs/biome"
+  - esbuild
+  - sharp
+  - unrs-resolver
+  - msgpackr-extract
+
+# Supply-chain hardening (verified against pnpm.io/settings/dependency-resolution,
+# 2026-08-22, against the pinned pnpm@11.8.0 — `pnpm --version`):
+#   - blockExoticSubdeps already defaults to true on pnpm 11+; pinned explicitly
+#     so a future pnpm downgrade can't silently revert to the permissive v10
+#     default (transitive deps installable from git/tarball URLs).
+#   - minimumReleaseAge already defaults to 1440 min (24h) on pnpm 11+; raised
+#     to 7 days here — a well-established supply-chain practice (a malicious
+#     npm publish is usually caught and unpublished within days) that trades
+#     a week of latency on picking up brand-new releases, including patched
+#     CVEs, for meaningfully reducing exposure to a freshly-published
+#     compromised package. minimumReleaseAgeExclude below is what that 7-day
+#     window is actually excepting now that the base setting is explicit.
+#   - trustPolicy: off is pnpm's actual default (no-downgrade is opt-in) —
+#     this was a real gap, not just an unpinned default; verified `pnpm
+#     install` still succeeds clean with it enabled (2026-08-22).
+blockExoticSubdeps: true
+minimumReleaseAge: 10080
+trustPolicy: no-downgrade
+
+minimumReleaseAgeExclude:
+  - bullmq@6.1.2
+  # Transitive WebAuthn/JOSE deps of @better-auth/passkey (added this
+  # session) — all published within the 7-day cutoff above as of
+  # 2026-08-22 (confirmed by `pnpm install` failing without this exclude
+  # list, then re-passing with it). PeculiarVentures (@peculiar/*) and
+  # panva/jose are both established, widely-depended-on maintainers, not
+  # unknown publishers — excluding these exact already-integrated versions
+  # from the stricter global policy, not the package names going forward.
+  - "@peculiar/asn1-android@2.9.4"
+  - "@peculiar/asn1-cms@2.9.4"
+  - "@peculiar/asn1-csr@2.9.4"
+  - "@peculiar/asn1-ecc@2.9.4"
+  - "@peculiar/asn1-pfx@2.9.4"
+  - "@peculiar/asn1-pkcs8@2.9.4"
+  - "@peculiar/asn1-pkcs9@2.9.4"
+  - "@peculiar/asn1-rsa@2.9.4"
+  - "@peculiar/asn1-schema@2.9.4"
+  - "@peculiar/asn1-x509-attr@2.9.4"
+  - "@peculiar/asn1-x509@2.9.4"
+  - jose@6.2.9
+
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: true

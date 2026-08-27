@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/coverage
+.git
+.env
+.env.local
+.state
+test-results
+.playwright
+docs
+reference-python-mvp
+*.log
+.DS_Store

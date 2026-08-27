@@ -1,0 +1,110 @@
+name: hoodmint-radar
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: infra/docker/app.Dockerfile
+  init: true
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://hoodmint:hoodmint@postgres:5432/hoodmint
+    VALKEY_URL: redis://valkey:6379/0
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: hoodmint
+      POSTGRES_PASSWORD: hoodmint
+      POSTGRES_DB: hoodmint
+    volumes:
+      # PG 18 official image stores data under /var/lib/postgresql/<ver>/docker.
+      - postgres-data:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:3961:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hoodmint -d hoodmint"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:3962:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    <<: *app-base
+    restart: "no"
+    entrypoint: ["node", "migrate.mjs"]
+
+  web:
+    <<: *app-base
+    working_dir: /app/web
+    command: ["node", "apps/web/server.js"]
+    ports:
+      - "3960:3960"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://hoodmint:hoodmint@postgres:5432/hoodmint
+      VALKEY_URL: redis://valkey:6379/0
+      PORT: "3960"
+      HOSTNAME: "0.0.0.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3960/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  worker:
+    <<: *app-base
+    command: ["node", "worker.mjs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://hoodmint:hoodmint@postgres:5432/hoodmint
+      VALKEY_URL: redis://valkey:6379/0
+      WORKER_HEALTH_PORT: "3963"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3963/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  postgres-data:

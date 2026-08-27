@@ -1,0 +1,44 @@
+{
+  "name": "@hoodmint/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p ${PORT:-3960}",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3960}",
+    "test": "vitest run --config ../../vitest.package.config.ts",
+    "typecheck-build": "next typecheck",
+    "typecheck": "next typegen && tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@better-auth/passkey": "1.6.29",
+    "@hoodmint/auth": "workspace:*",
+    "@hoodmint/config": "workspace:*",
+    "@hoodmint/core": "workspace:*",
+    "@hoodmint/db": "workspace:*",
+    "@hoodmint/notifications": "workspace:*",
+    "@hoodmint/observability": "workspace:*",
+    "@hoodmint/providers": "workspace:*",
+    "@hoodmint/queues": "workspace:*",
+    "@hoodmint/secrets": "workspace:*",
+    "@hoodmint/signing": "workspace:*",
+    "@hoodmint/ui": "workspace:*",
+    "better-auth": "1.6.29",
+    "ioredis": "6.0.0",
+    "lucide-react": "1.31.0",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "3.10.1",
+    "zod": "4.4.3",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "tailwindcss": "4.3.3",
+    "vitest": "4.1.10",
+    "@tailwindcss/postcss": "4.3.3"
+  }
+}

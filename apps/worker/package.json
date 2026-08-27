@@ -1,0 +1,36 @@
+{
+  "name": "@hoodmint/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "vitest run --config ../../vitest.package.config.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hoodmint/auth": "workspace:*",
+    "@hoodmint/config": "workspace:*",
+    "@hoodmint/core": "workspace:*",
+    "@hoodmint/db": "workspace:*",
+    "@hoodmint/execution": "workspace:*",
+    "@hoodmint/notifications": "workspace:*",
+    "@hoodmint/observability": "workspace:*",
+    "@hoodmint/providers": "workspace:*",
+    "@hoodmint/queues": "workspace:*",
+    "@hoodmint/secrets": "workspace:*",
+    "@hoodmint/signals": "workspace:*",
+    "@hoodmint/signing": "workspace:*",
+    "bullmq": "6.1.2",
+    "ioredis": "6.0.0",
+    "tsx": "4.23.12",
+    "viem": "2.55.16",
+    "zod": "4.4.3",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  }
+}

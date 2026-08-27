@@ -1,0 +1,21 @@
+# Production posture overlay: no published database/queue ports, resource
+# limits, read-only app filesystems. Usage:
+#   scripts/start-prod.sh
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d
+services:
+  postgres:
+    ports: !reset []
+  valkey:
+    ports: !reset []
+  web:
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+  worker:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M

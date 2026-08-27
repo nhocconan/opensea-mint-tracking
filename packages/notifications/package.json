@@ -1,0 +1,25 @@
+{
+  "name": "@hoodmint/notifications",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config ../../vitest.package.config.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hoodmint/core": "workspace:*",
+    "@hoodmint/db": "workspace:*",
+    "@hoodmint/secrets": "workspace:*",
+    "@hoodmint/observability": "workspace:*",
+    "web-push": "3.6.7"
+  },
+  "devDependencies": {
+    "@types/web-push": "3.6.4",
+    "vitest": "4.1.10"
+  }
+}

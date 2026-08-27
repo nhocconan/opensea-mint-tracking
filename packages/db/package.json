@@ -1,0 +1,29 @@
+{
+  "name": "@hoodmint/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config ../../vitest.package.config.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "migration:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "test:integration": "vitest run --config ../../vitest.integration.config.ts tests/integration.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hoodmint/core": "workspace:*",
+    "@hoodmint/secrets": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "drizzle-kit": "0.31.10",
+    "tsx": "4.23.12",
+    "vitest": "4.1.10"
+  }
+}

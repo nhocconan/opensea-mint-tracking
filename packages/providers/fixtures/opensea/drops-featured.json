@@ -1,0 +1,23 @@
+{
+  "drops": [
+    {
+      "chain": "robinhood",
+      "collection_slug": "live-mint-now",
+      "contract_address": "0x7777777777777777777777777777777777777777",
+      "collection_name": "Live Mint Now",
+      "is_minting": true,
+      "drop_type": "featured",
+      "active_stage": {
+        "uuid": "44444444-4444-4444-8444-444444444444",
+        "stage_type": "public_sale",
+        "start_time": "2026-08-16T10:00:00Z",
+        "end_time": "2026-08-16T22:00:00Z",
+        "price": "0",
+        "price_currency_address": "0x0000000000000000000000000000000000000000",
+        "max_per_wallet": "3",
+        "label": "Free Public"
+      }
+    }
+  ],
+  "next": null
+}

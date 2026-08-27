@@ -1,0 +1,163 @@
+# ─────────────────────────────────────────────────────────────────────────
+# SELF-CONTAINED PRODUCTION STACK — HoodMint Radar, behind Traefik + TLS.
+#
+# This is the ONLY file production runs from (not an overlay on compose.yaml).
+# It is committed as a *sample*. On the prod host:
+#   1.  cp compose.prod.yaml.sample compose.prod.yaml
+#   2.  cp .env.prod.sample .env.prod   (fill in real domain, email, secrets)
+#   3.  touch traefik/acme.json && chmod 600 traefik/acme.json
+#   4.  docker compose -f compose.prod.yaml --env-file .env.prod up -d
+# compose.prod.yaml, .env.prod, and traefik/acme.json are gitignored so a
+# later `git pull` / agent edit can NEVER overwrite your real prod config.
+#
+# CO-LOCATION MATTERS MORE THAN ANY CODE HERE (see docs/deployment.md):
+# Robinhood Chain is a single-sequencer FIFO L2 — winning a contested FCFS
+# mint is purely a latency race to that sequencer. Deploy this on a host as
+# network-close to the sequencer as you can (measure it, don't trust region
+# labels — see docs/deployment.md for how). No amount of the precision-fire
+# code beats a competitor 20ms physically closer.
+# ─────────────────────────────────────────────────────────────────────────
+name: hoodmint-radar-prod
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: infra/docker/app.Dockerfile
+  init: true
+  restart: unless-stopped
+  env_file: .env.prod
+  environment:
+    DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
+    VALKEY_URL: redis://valkey:6379/0
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Redirect all plain HTTP to HTTPS.
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/acme/acme.json"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./traefik/acme.json:/acme/acme.json"
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: hoodmint
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hoodmint
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    # No published ports in prod — reachable only on the internal network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hoodmint -d hoodmint"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    <<: *app-base
+    restart: "no"
+    entrypoint: ["node", "migrate.mjs"]
+
+  web:
+    <<: *app-base
+    working_dir: /app/web
+    command: ["node", "apps/web/server.js"]
+    # No host port — Traefik is the only ingress.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
+      VALKEY_URL: redis://valkey:6379/0
+      PORT: "3960"
+      HOSTNAME: "0.0.0.0"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hoodmint.rule=Host(`${APP_DOMAIN}`)"
+      - "traefik.http.routers.hoodmint.entrypoints=websecure"
+      - "traefik.http.routers.hoodmint.tls.certresolver=le"
+      - "traefik.http.services.hoodmint.loadbalancer.server.port=3960"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3960/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+
+  worker:
+    <<: *app-base
+    command: ["node", "worker.mjs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
+      VALKEY_URL: redis://valkey:6379/0
+      WORKER_HEALTH_PORT: "3963"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3963/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  postgres-data:

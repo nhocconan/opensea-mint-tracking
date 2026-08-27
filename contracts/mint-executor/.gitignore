@@ -1,0 +1,7 @@
+# Foundry build artifacts — reproducible from source, never worth tracking.
+out/
+cache/
+# Deployment broadcast logs contain the deployer address and tx receipts
+# for every run, including against local/test chains — noisy, regenerable,
+# and not something to accumulate in git history.
+broadcast/
