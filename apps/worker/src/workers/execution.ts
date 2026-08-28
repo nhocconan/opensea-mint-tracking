@@ -18,20 +18,27 @@ import {
   CHAIN_CLOCK_OFFSET_SETTING_KEY,
   coerceDate,
   computeFirePhase,
+  decidePresign,
   isAppError,
+  isStalePresignError,
 } from "@hoodmint/core";
 import {
+  armedManagedPlansForPresign,
   armedPlansWithStageStart,
   claimArmedMintPlan,
+  clearPresignedTx,
   expireStaleMintPlans,
   failMintPlanExecution,
   getCredentialSecret,
   getSetting,
+  getWalletSigningKeySealed,
   markMintPlanExecuted,
+  mintPlans as mintPlansTable,
   projects as projectsTable,
   publishEvent,
   recordExecutionAttempt,
   releaseMintPlanToArmed,
+  savePresignedTx,
   signers as signersTable,
   wallets as walletsTable,
 } from "@hoodmint/db";
@@ -98,6 +105,12 @@ export async function runMintHotLoop(ctx: WorkerContext): Promise<HotLoopSummary
     return { candidates: 0, fired: false };
   }
   const clockOffsetMs = (await getSetting<number>(db, CHAIN_CLOCK_OFFSET_SETTING_KEY)) ?? 0;
+  // ADR 0009 fast path: keep managed-wallet plans PRE-SIGNED inside the
+  // lead window so the fire instant is one sendRawTransaction. Runs on
+  // every tick but is a cheap no-op outside the window / when fresh.
+  await runPresignPass(ctx, now, clockOffsetMs).catch((error: unknown) => {
+    ctx.log.warn({ err: error }, "presign pass failed (fire path still has full fallback)");
+  });
   const dueCount = candidates.filter(
     (plan) =>
       computeFirePhase({
@@ -123,6 +136,149 @@ export async function runMintHotLoop(ctx: WorkerContext): Promise<HotLoopSummary
     Array.from({ length: Math.min(dueCount, MAX_PARALLEL_FIRES) }, () => runMintExecutionPass(ctx)),
   );
   return { candidates: candidates.length, fired: true };
+}
+
+/**
+ * Pre-sign pass (ADR 0009 fast path). For every armed plan on a managed
+ * wallet whose stage start is inside MINT_PRESIGN_LEAD_MS, build the exact
+ * raw tx (cached calldata + this wallet's pending nonce + current fees +
+ * signature) and store it on the plan row, so `runManagedFire` can broadcast
+ * it with zero build/sign work at T-0. Re-signs on nonce advance or TTL.
+ *
+ * Deliberately does NOT simulate: eth_estimateGas reverts before a stage
+ * opens ("stage not active"), so a pre-open simulation would always fail —
+ * the blob uses MINT_PRESIGN_GAS_LIMIT. The plan's per-plan ceiling is still
+ * enforced here (value ≤ ceiling) and LIVE_EXECUTION_ENABLED gates signing
+ * entirely (shadow mode never signs anything).
+ *
+ * Key handling: the sealed key is fetched per plan, decrypted into a
+ * function-scoped local, handed to the signing chokepoint, and dropped.
+ */
+async function runPresignPass(
+  ctx: WorkerContext,
+  localNowMs: number,
+  clockOffsetMs: number,
+): Promise<void> {
+  const { db, config, log } = ctx;
+  if (!config.LIVE_EXECUTION_ENABLED) {
+    return;
+  }
+  const candidates = await armedManagedPlansForPresign(db, new Date(localNowMs));
+  if (candidates.length === 0) {
+    return;
+  }
+  const rpcUrl = await resolveBestRpcUrl(db, config.ROBINHOOD_CHAIN_ID, config.RPC_URL);
+  if (!rpcUrl) {
+    return;
+  }
+  for (const plan of candidates) {
+    const presignedAtMs = plan.presignedAt === null ? null : coerceDate(plan.presignedAt).getTime();
+    // First decision is nonce-agnostic (no RPC yet) — only pay for a nonce
+    // read once we're inside the window.
+    const pre = decidePresign({
+      stageStartChainMs: plan.stageStartMs,
+      clockOffsetMs,
+      localNowMs,
+      leadMs: config.MINT_PRESIGN_LEAD_MS,
+      ttlMs: config.MINT_PRESIGN_TTL_MS,
+      continueForMs: config.MINT_FIRE_CONTINUE_MS,
+      presignedAtMs,
+      presignedNonce: plan.presignedNonce,
+    });
+    if (pre.action === "wait" || pre.action === "expired") {
+      continue;
+    }
+    // Need calldata; the pre-build pass normally has it cached. If not,
+    // build it now (one OpenSea round-trip, well before the open).
+    const cachedFresh =
+      plan.cachedTx !== null &&
+      plan.cachedTxAt !== null &&
+      Date.now() - coerceDate(plan.cachedTxAt).getTime() < CACHE_TTL_MS;
+    let tx = cachedFresh ? plan.cachedTx : null;
+    try {
+      const fees = await fetchFeeContext(rpcUrl, plan.walletAddress);
+      const decision = decidePresign({
+        stageStartChainMs: plan.stageStartMs,
+        clockOffsetMs,
+        localNowMs,
+        leadMs: config.MINT_PRESIGN_LEAD_MS,
+        ttlMs: config.MINT_PRESIGN_TTL_MS,
+        continueForMs: config.MINT_FIRE_CONTINUE_MS,
+        presignedAtMs,
+        presignedNonce: plan.presignedNonce,
+        currentNonce: fees.nonce,
+      });
+      if (decision.action !== "sign") {
+        continue;
+      }
+      if (tx === null) {
+        const [project] = await db
+          .select()
+          .from(projectsTable)
+          .where(eq(projectsTable.id, (await claimlessPlanProject(db, plan.planId)) ?? ""));
+        if (project === undefined || project.slug === null) {
+          continue;
+        }
+        const built = await buildOpenSeaMintTx(ctx, {
+          slug: project.slug,
+          chainId: project.chainId,
+          minter: plan.walletAddress,
+          quantity: plan.quantity,
+        });
+        tx = { to: built.to, data: built.data, valueWei: built.valueWei, chainId: built.chainId };
+      }
+      // Ceiling policy (ADR 0004): never pre-sign a value above the plan cap.
+      if (BigInt(tx.valueWei) > BigInt(plan.perPlanCeilingWei)) {
+        log.warn({ planId: plan.planId }, "presign skipped: mint value exceeds per-plan ceiling");
+        continue;
+      }
+      const sealed = await getWalletSigningKeySealed(db, plan.walletId);
+      if (sealed === undefined) {
+        continue;
+      }
+      const privateKeyHex = openSecret(
+        JSON.parse(sealed) as SealedSecret,
+        config.APP_ENCRYPTION_KEY,
+      );
+      const signed = await signManagedMintTransaction(
+        {
+          chainId: tx.chainId,
+          to: tx.to,
+          data: tx.data,
+          valueWei: tx.valueWei,
+          nonce: fees.nonce,
+          maxFeePerGasWei: fees.maxFeePerGasWei,
+          maxPriorityFeePerGasWei: fees.maxPriorityFeePerGasWei,
+          gas: BigInt(config.MINT_PRESIGN_GAS_LIMIT),
+        },
+        privateKeyHex,
+      );
+      await savePresignedTx(db, plan.planId, {
+        rawTx: signed.rawTx,
+        nonce: fees.nonce,
+        txHash: signed.txHash,
+      });
+      log.info(
+        { planId: plan.planId, reason: decision.reason, nonce: fees.nonce },
+        "pre-signed mint tx ready (fast path armed)",
+      );
+    } catch (error) {
+      log.warn(
+        { planId: plan.planId, err: error },
+        "presign failed (fire path will build+sign at T-0 as fallback)",
+      );
+    }
+  }
+}
+
+/** projectId for a plan without claiming it (presign is read-only on status). */
+async function claimlessPlanProject(db: WorkerContext["db"], planId: string) {
+  const [row] = await db
+    .select({ projectId: mintPlansTable.projectId })
+    .from(mintPlansTable)
+    .where(eq(mintPlansTable.id, planId))
+    .limit(1);
+  return row?.projectId;
 }
 
 export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExecutionSummary> {
@@ -511,6 +667,51 @@ async function runManagedFire(
     await record("failed", { errorCode: "managed_key_missing" });
     await failMintPlanExecution(db, plan.id);
     return;
+  }
+  // ── FAST PATH (ADR 0009): a pre-signed blob exists → ONE network call. ──
+  // No build, no simulate, no nonce/fee fetch, no signing at T-0. If the RPC
+  // rejects it as stale (nonce moved), fall through to the full path below
+  // in this same pass so the burst isn't lost.
+  const [fresh] = await db
+    .select({
+      presignedRawTx: mintPlansTable.presignedRawTx,
+      presignedTxHash: mintPlansTable.presignedTxHash,
+    })
+    .from(mintPlansTable)
+    .where(eq(mintPlansTable.id, plan.id))
+    .limit(1);
+  if (fresh?.presignedRawTx) {
+    try {
+      const broadcast = await broadcastRawTransaction(rpcUrl, fresh.presignedRawTx);
+      await record("broadcast", { txHash: broadcast.txHash });
+      await clearPresignedTx(db, plan.id);
+      await markMintPlanExecuted(db, plan.id);
+      log.info(
+        { planId: plan.id, walletId: wallet.id, txHash: broadcast.txHash, fastPath: true },
+        "managed-key mint broadcast (pre-signed fast path)",
+      );
+      await publishEvent(db, {
+        type: "execution.broadcast",
+        projectId: plan.projectId,
+        at: new Date().toISOString(),
+      });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await clearPresignedTx(db, plan.id);
+      if (!isStalePresignError(message)) {
+        // Real failure (e.g. insufficient funds, reverted): record + retry
+        // within the window via the normal release path.
+        await record("failed", { errorCode: message.slice(0, 200) });
+        await releaseMintPlanToArmed(db, plan.id, new Date());
+        return;
+      }
+      log.warn(
+        { planId: plan.id },
+        "pre-signed tx stale (nonce moved) — falling back to live sign",
+      );
+      // fall through to full path
+    }
   }
   try {
     // Simulate the REAL direct mint tx from the burner wallet — same bytes,

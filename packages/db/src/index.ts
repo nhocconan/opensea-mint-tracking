@@ -3,6 +3,7 @@ export * from "./client.ts";
 export * from "./repositories/credentials.ts";
 export * from "./repositories/eligibility.ts";
 export * from "./repositories/execution.ts";
+export * from "./repositories/key-hygiene.ts";
 export * from "./repositories/onchain.ts";
 export * from "./repositories/ops.ts";
 export * from "./repositories/outbox.ts";

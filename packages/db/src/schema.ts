@@ -693,6 +693,14 @@ export const mintPlans = pgTable(
     /** TTL anchor for cachedTx — a stale cache (stage/price/proof may have
      *  changed) is rebuilt fresh at claim time, same as if no cache existed. */
     cachedTxAt: timestamp("cached_tx_at", { withTimezone: true }),
+    /** Pre-signed raw tx (managed_wallet_key plans only, ADR 0009 fast path):
+     *  signed during the pre-warm window so the fire instant is ONE
+     *  sendRawTransaction. Spend-capable artifact — short TTL, purged on key
+     *  revoke / wallet delete / terminal plan state, never logged. */
+    presignedRawTx: text("presigned_raw_tx"),
+    presignedNonce: integer("presigned_nonce"),
+    presignedTxHash: text("presigned_tx_hash"),
+    presignedAt: timestamp("presigned_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

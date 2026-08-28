@@ -10,6 +10,7 @@ export * from "./errors.ts";
 export * from "./execution.ts";
 export * from "./fire-schedule.ts";
 export * from "./holders.ts";
+export * from "./presign.ts";
 export * from "./quota.ts";
 export * from "./rarity.ts";
 export * from "./schedule.ts";

@@ -139,6 +139,17 @@ export const envSchema = z.object({
   /** Keep re-firing this many ms past stage open before giving up — the
    *  "chạy liên tục để compete" burst on a FIFO chain. */
   MINT_FIRE_CONTINUE_MS: positiveInt.default(4_000),
+  /** ADR 0009 fast path (managed_wallet_key): pre-sign the raw tx this far
+   *  before the clock-corrected stage open so the fire instant is a single
+   *  sendRawTransaction. 45s covers nonce/fee fetch + sign with margin. */
+  MINT_PRESIGN_LEAD_MS: positiveInt.default(45_000),
+  /** Re-sign a pre-signed blob older than this (fees/nonce drift). */
+  MINT_PRESIGN_TTL_MS: positiveInt.default(90_000),
+  /** Gas limit for a pre-signed mint. eth_estimateGas reverts BEFORE a stage
+   *  opens ("stage not active"), so the fast path can't estimate at sign
+   *  time; SeaDrop mintPublic qty 1 is ~135k — 300k is safe headroom and the
+   *  unused portion is refunded on an L2. */
+  MINT_PRESIGN_GAS_LIMIT: positiveInt.default(300_000),
 
   /** ADR 0007: hard default OFF. X's free API tier was retired Feb 2026 —
    *  this is metered pay-per-use, so nothing may call it without both an

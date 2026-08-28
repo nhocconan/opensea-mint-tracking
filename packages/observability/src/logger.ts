@@ -44,6 +44,11 @@ export function createLogger(options: LoggerOptions): Logger {
         // log field, same posture as the session key above.
         "encryptedSigningKey",
         "encrypted_signing_key",
+        // A pre-signed raw tx is a spend-capable artifact (ADR 0009 fast
+        // path) — never let a plan row carrying one reach a log line.
+        "presignedRawTx",
+        "presigned_raw_tx",
+        "rawTx",
         "*.authorization",
         "*.apiKey",
         "*.token",

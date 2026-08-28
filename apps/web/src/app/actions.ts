@@ -5,6 +5,8 @@ import {
   activateSigner,
   alertChannels,
   armMintPlan,
+  cancelOpenPlansForWallet,
+  clearPresignedForWallet,
   clearWalletSigningKey,
   consumeBootstrapToken,
   createCredential,
@@ -29,6 +31,7 @@ import {
   recordAudit,
   revokeCredential,
   revokeSigner as revokeSignerRepo,
+  scrubKeyTracesForAddress,
   setAlertChannelEnabled,
   setRpcEndpointEnabled,
   setSetting,
@@ -42,6 +45,7 @@ import {
   updateProvider,
   updateWallet,
   user as userTable,
+  wallets as walletsTable,
 } from "@hoodmint/db";
 import {
   createDiscordAdapter,
@@ -411,7 +415,9 @@ export async function importWalletKeyAction(input: {
     targetType: "wallet",
     targetId: address,
     result: "success",
-    metadata: { address, fingerprint: fingerprint(key) },
+    // Address only (public). No key-derived value — not even a fingerprint —
+    // so revoking/deleting the wallet leaves nothing key-related behind.
+    metadata: { address },
   });
   revalidatePath("/admin/wallets");
   return { ok: true, message: "Signing key imported and encrypted. Wallet is now managed." };
@@ -430,9 +436,20 @@ export async function revokeWalletKeyAction(walletId: string): Promise<ActionSta
   if (!/^[0-9a-f-]{36}$/i.test(walletId)) {
     return { ok: false, message: "Invalid wallet." };
   }
+  const [walletRow] = await db
+    .select({ address: walletsTable.address })
+    .from(walletsTable)
+    .where(eq(walletsTable.id, walletId))
+    .limit(1);
   const cleared = await clearWalletSigningKey(db, walletId);
   if (!cleared) {
     return { ok: false, message: "Wallet not found." };
+  }
+  // No-trace hygiene: purge any pre-signed (spend-capable) blobs on this
+  // wallet's plans and scrub key-derived values from its audit rows.
+  await clearPresignedForWallet(db, walletId);
+  if (walletRow !== undefined) {
+    await scrubKeyTracesForAddress(db, walletRow.address);
   }
   await recordAudit(db, {
     actorUserId: actor,
@@ -509,6 +526,20 @@ export async function deleteWalletAction(id: string): Promise<ActionState> {
   }
   if (!isUuid(id)) {
     return { ok: false, message: "Invalid wallet." };
+  }
+  // No-trace hygiene BEFORE the row goes (plans keep a null wallet_id after
+  // delete, so their pre-signed blobs must be purged now, and nothing on a
+  // deleted wallet may ever fire): purge pre-signed txs, cancel open plans,
+  // scrub key-derived audit metadata. The sealed key dies with the row.
+  const [walletRow] = await db
+    .select({ address: walletsTable.address })
+    .from(walletsTable)
+    .where(eq(walletsTable.id, id))
+    .limit(1);
+  await clearPresignedForWallet(db, id);
+  await cancelOpenPlansForWallet(db, id);
+  if (walletRow !== undefined) {
+    await scrubKeyTracesForAddress(db, walletRow.address);
   }
   const deleted = await deleteWallet(db, id);
   if (!deleted) {

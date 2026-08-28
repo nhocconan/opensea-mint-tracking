@@ -22,6 +22,7 @@ import {
   mintPlans,
   type Signer,
   signers,
+  wallets,
 } from "../schema.ts";
 
 export interface CreateSignerInput {
@@ -264,6 +265,126 @@ export async function listMintPlans(db: Db, limit = 100): Promise<MintPlan[]> {
  * deleting an armed plan out from under the worker's execution loop would be
  * a correctness and audit hazard. Returns true only when a draft row matched.
  */
+/* ── Pre-signed fast path (ADR 0009, managed_wallet_key) ─────────────────── */
+
+export interface PresignCandidate {
+  readonly planId: string;
+  readonly walletId: string;
+  readonly walletAddress: string;
+  readonly stageStartMs: number;
+  readonly presignedAt: Date | string | null;
+  readonly presignedNonce: number | null;
+  readonly cachedTx: { to: string; data: string; valueWei: string; chainId: number } | null;
+  readonly cachedTxAt: Date | string | null;
+  readonly perPlanCeilingWei: string;
+  readonly quantity: number;
+}
+
+/**
+ * Armed, in-window plans on MANAGED wallets (those with a sealed signing
+ * key) whose stage has a known start — the pre-sign pass's candidate list.
+ * Never selects the key blob; the worker fetches it per plan at sign time.
+ */
+export async function armedManagedPlansForPresign(db: Db, now: Date): Promise<PresignCandidate[]> {
+  const rows = await db
+    .select({
+      planId: mintPlans.id,
+      walletId: wallets.id,
+      walletAddress: wallets.address,
+      startsAt: dropStages.startsAt,
+      presignedAt: mintPlans.presignedAt,
+      presignedNonce: mintPlans.presignedNonce,
+      cachedTx: mintPlans.cachedTx,
+      cachedTxAt: mintPlans.cachedTxAt,
+      perPlanCeilingWei: mintPlans.perPlanCeilingWei,
+      quantity: mintPlans.quantity,
+    })
+    .from(mintPlans)
+    .innerJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
+    .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
+    .where(
+      and(
+        eq(mintPlans.status, "armed"),
+        sql`${mintPlans.armedUntil} > ${now.toISOString()}`,
+        sql`${wallets.encryptedSigningKey} is not null`,
+        eq(wallets.enabled, true),
+      ),
+    );
+  return rows.map((r) => ({
+    planId: r.planId,
+    walletId: r.walletId,
+    walletAddress: r.walletAddress,
+    stageStartMs: r.startsAt.getTime(),
+    presignedAt: r.presignedAt,
+    presignedNonce: r.presignedNonce,
+    cachedTx: r.cachedTx,
+    cachedTxAt: r.cachedTxAt,
+    perPlanCeilingWei: r.perPlanCeilingWei,
+    quantity: r.quantity,
+  }));
+}
+
+export async function savePresignedTx(
+  db: Db,
+  planId: string,
+  input: { rawTx: string; nonce: number; txHash: string },
+): Promise<void> {
+  await db
+    .update(mintPlans)
+    .set({
+      presignedRawTx: input.rawTx,
+      presignedNonce: input.nonce,
+      presignedTxHash: input.txHash,
+      presignedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(mintPlans.id, planId));
+}
+
+export async function clearPresignedTx(db: Db, planId: string): Promise<void> {
+  await db
+    .update(mintPlans)
+    .set({
+      presignedRawTx: null,
+      presignedNonce: null,
+      presignedTxHash: null,
+      presignedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(mintPlans.id, planId));
+}
+
+/** Purge every pre-signed blob for a wallet (key revoke / wallet delete). */
+export async function clearPresignedForWallet(db: Db, walletId: string): Promise<number> {
+  const rows = await db
+    .update(mintPlans)
+    .set({
+      presignedRawTx: null,
+      presignedNonce: null,
+      presignedTxHash: null,
+      presignedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(mintPlans.walletId, walletId))
+    .returning({ id: mintPlans.id });
+  return rows.length;
+}
+
+/** Cancel every non-terminal plan on a wallet (wallet deleted → nothing may fire). */
+export async function cancelOpenPlansForWallet(db: Db, walletId: string): Promise<number> {
+  const rows = await db
+    .update(mintPlans)
+    .set({ status: "cancelled", updatedAt: new Date() })
+    .where(
+      and(
+        eq(mintPlans.walletId, walletId),
+        inArray(mintPlans.status, ["draft", "armed", "executing"]),
+      ),
+    )
+    .returning({ id: mintPlans.id });
+  return rows.length;
+}
+
 export async function deleteMintPlan(db: Db, id: string): Promise<boolean> {
   const rows = await db
     .delete(mintPlans)
