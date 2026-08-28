@@ -136,6 +136,14 @@ export function enqueueDiscovery(
 export function enqueueDetail(url: string, data: DetailJobData): Promise<Job<DetailJobData>> {
   return queues(url).details.add("detail", data, {
     jobId: jobIdFor.detail("opensea", data.slug, data.freshnessBucket),
+    // Deterministic ids dedupe CONCURRENT duplicates (waiting/active), which
+    // is what we want — but BullMQ also refuses to re-add an id that sits in
+    // the completed/failed sets, which silently turned every periodic
+    // re-fetch (delisting / freshness re-check) into a no-op for any slug
+    // fetched once before (found live 2026-08-28: a hidden drop stayed LIVE).
+    // Drop finished jobs immediately so the same id can run again later.
+    removeOnComplete: true,
+    removeOnFail: true,
   });
 }
 
