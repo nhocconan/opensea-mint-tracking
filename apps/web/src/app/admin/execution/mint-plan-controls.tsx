@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { armMintPlanAction, disarmMintPlanAction } from "@/app/actions.ts";
+import { armMintPlanAction, deleteMintPlanAction, disarmMintPlanAction } from "@/app/actions.ts";
+import { ConfirmDialog } from "@/components/confirm-dialog.tsx";
 import { authClient } from "@/lib/auth-client.ts";
 
 /**
@@ -57,6 +58,26 @@ export function ArmControls({ id }: { id: string }) {
         </span>
       ) : null}
     </div>
+  );
+}
+
+/** Delete a DRAFT plan (draft rows only) behind a confirm. */
+export function DeleteDraftPlanControl({ id }: { id: string }) {
+  return (
+    <ConfirmDialog
+      triggerLabel="Delete"
+      triggerAriaLabel="Delete draft mint plan"
+      triggerClassName="rounded-xs border border-line px-2 py-0.5 text-[11px] text-ink-faint hover:border-magenta/40 hover:text-magenta disabled:opacity-50"
+      title="Delete draft mint plan"
+      confirmLabel="Delete draft"
+      consequence={
+        <p>
+          This permanently removes this draft mint plan. Only draft plans can be deleted — armed,
+          executing, and executed plans are part of the live execution and audit trail.
+        </p>
+      }
+      onConfirm={() => deleteMintPlanAction(id)}
+    />
   );
 }
 

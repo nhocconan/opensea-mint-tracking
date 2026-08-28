@@ -1,22 +1,26 @@
 "use client";
 
-import { useTransition } from "react";
 import { revokeSignerAction } from "@/app/actions.ts";
+import { ConfirmDialog } from "@/components/confirm-dialog.tsx";
 
 export function SignerRowActions({ id, status }: { id: string; status: string }) {
-  const [pending, startTransition] = useTransition();
   if (status === "revoked") {
     return <span className="text-[11px] text-ink-faint">revoked</span>;
   }
   return (
-    <button
-      type="button"
-      disabled={pending}
-      aria-label="Revoke signer"
-      onClick={() => startTransition(async () => void (await revokeSignerAction(id)))}
-      className="rounded-xs border border-magenta/40 px-2 py-0.5 text-[11px] text-magenta hover:bg-magenta/10 disabled:opacity-50"
-    >
-      {pending ? "…" : "Revoke"}
-    </button>
+    <ConfirmDialog
+      triggerLabel="Revoke"
+      triggerAriaLabel="Revoke signer"
+      title="Revoke signer"
+      confirmLabel="Revoke signer"
+      consequence={
+        <p>
+          This permanently revokes the signer. Any mint plan referencing it can no longer be armed
+          or fired with it, and (for a custom_executor) the worker will stop treating it as capable.
+          This cannot be undone — re-onboard to get a new signer.
+        </p>
+      }
+      onConfirm={() => revokeSignerAction(id)}
+    />
   );
 }

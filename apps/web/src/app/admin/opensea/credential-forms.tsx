@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useTransition } from "react";
+import { useActionState } from "react";
 import { type ActionState, revokeCredentialAction, saveCredentialAction } from "@/app/actions.ts";
+import { ConfirmDialog } from "@/components/confirm-dialog.tsx";
 
 const initial: ActionState = { ok: false, message: "" };
 
@@ -55,15 +56,19 @@ export function CredentialForm({
 }
 
 export function RevokeButton({ id }: { id: string }) {
-  const [pending, startTransition] = useTransition();
   return (
-    <button
-      type="button"
-      disabled={pending}
-      onClick={() => startTransition(async () => void (await revokeCredentialAction(id)))}
-      className="rounded-xs border border-magenta/40 px-2 py-0.5 text-[11px] text-magenta hover:bg-magenta/10 disabled:opacity-50"
-    >
-      {pending ? "…" : "Revoke"}
-    </button>
+    <ConfirmDialog
+      triggerLabel="Revoke"
+      triggerAriaLabel="Revoke credential"
+      title="Revoke credential"
+      confirmLabel="Revoke credential"
+      consequence={
+        <p>
+          This permanently deletes the stored (encrypted) credential. Any scan or feature relying on
+          it stops working until a new one is saved. This cannot be undone.
+        </p>
+      }
+      onConfirm={() => revokeCredentialAction(id)}
+    />
   );
 }

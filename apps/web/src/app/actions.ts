@@ -13,7 +13,10 @@ import {
   createSigner as createSignerRepo,
   createWallet as createWalletRepo,
   type Db,
+  deleteAlertChannel,
+  deleteMintPlan,
   deleteRpcEndpoint,
+  deleteWallet,
   disarmMintPlan,
   ensureProvider,
   findCredentialByType,
@@ -25,6 +28,7 @@ import {
   recordAudit,
   revokeCredential,
   revokeSigner as revokeSignerRepo,
+  setAlertChannelEnabled,
   setRpcEndpointEnabled,
   setSetting,
   setSignerDelegateContract,
@@ -35,6 +39,7 @@ import {
   unwrapRows,
   updateCredentialSecret,
   updateProvider,
+  updateWallet,
   user as userTable,
 } from "@hoodmint/db";
 import {
@@ -61,6 +66,7 @@ import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { isUuid } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
 import { getSessionUser, requireApi, requireFreshStepUp } from "@/lib/session.ts";
 
@@ -394,6 +400,86 @@ export async function revokeWalletKeyAction(walletId: string): Promise<ActionSta
   });
   revalidatePath("/admin/wallets");
   return { ok: true, message: "Signing key removed. Wallet is no longer managed." };
+}
+
+/**
+ * Update a tracked wallet's label and/or enabled flag (operator+). Never
+ * touches the managed signing key — that flows only through the step-up-gated
+ * import/revoke actions above. `enabled = false` keeps the address on file
+ * (and its managed key, if any) but drops it from eligibility scans.
+ */
+export async function updateWalletAction(input: {
+  id: string;
+  label?: string;
+  enabled?: boolean;
+}): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("wallets:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!isUuid(input.id)) {
+    return { ok: false, message: "Invalid wallet." };
+  }
+  const patch: { label?: string; enabled?: boolean } = {};
+  if (input.label !== undefined) {
+    patch.label = input.label.trim();
+  }
+  if (input.enabled !== undefined) {
+    patch.enabled = input.enabled;
+  }
+  if (patch.label === undefined && patch.enabled === undefined) {
+    return { ok: false, message: "Nothing to update." };
+  }
+  const updated = await updateWallet(db, input.id, patch);
+  if (updated === undefined) {
+    return { ok: false, message: "Wallet not found." };
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "wallet.update",
+    targetType: "wallet",
+    targetId: updated.address,
+    result: "success",
+    metadata: patch,
+  });
+  revalidatePath("/admin/wallets");
+  return { ok: true, message: "Wallet updated." };
+}
+
+/**
+ * Permanently delete a tracked wallet (operator+). If the wallet holds a
+ * managed encrypted signing key, that ciphertext is destroyed with the row —
+ * the confirm dialog spells this out and requires typing the address.
+ */
+export async function deleteWalletAction(id: string): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("wallets:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!isUuid(id)) {
+    return { ok: false, message: "Invalid wallet." };
+  }
+  const deleted = await deleteWallet(db, id);
+  if (!deleted) {
+    return { ok: false, message: "Wallet not found." };
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "wallet.delete",
+    targetType: "wallet",
+    targetId: id,
+    result: "success",
+  });
+  revalidatePath("/admin/wallets");
+  return { ok: true, message: "Wallet deleted." };
 }
 
 /** Store an OpenSea API key / PAT encrypted at rest (admin only). */
@@ -1127,6 +1213,75 @@ export async function testChannelAction(channelId: string): Promise<ActionState>
   return { ok: result.ok, message: result.ok ? "Test delivered." : `Failed: ${result.errorCode}` };
 }
 
+/** Enable/disable an alert channel without destroying its credential (admin only). */
+export async function setAlertChannelEnabledAction(
+  id: string,
+  enabled: boolean,
+): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("alerts:configure");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!isUuid(id)) {
+    return { ok: false, message: "Invalid channel." };
+  }
+  const changed = await setAlertChannelEnabled(db, id, enabled);
+  if (!changed) {
+    return { ok: false, message: "Channel not found." };
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "alert_channel.toggle",
+    targetType: "alert_channel",
+    targetId: id,
+    result: "success",
+    metadata: { enabled },
+  });
+  revalidatePath("/admin/alerts");
+  return { ok: true, message: enabled ? "Channel enabled." : "Channel disabled." };
+}
+
+/**
+ * Delete an alert channel and revoke its linked secret (admin only). The
+ * channel's encrypted credential (bot token / webhook URL) is revoked in the
+ * same action so no orphaned secret is left behind; a `web_push` channel has
+ * no separate credential (its subscription lives inline and goes with the row).
+ */
+export async function deleteAlertChannelAction(id: string): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("alerts:configure");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!isUuid(id)) {
+    return { ok: false, message: "Invalid channel." };
+  }
+  const deleted = await deleteAlertChannel(db, id);
+  if (deleted === undefined) {
+    return { ok: false, message: "Channel not found." };
+  }
+  if (deleted.credentialId !== null) {
+    await revokeCredential(db, deleted.credentialId);
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "alert_channel.delete",
+    targetType: "alert_channel",
+    targetId: id,
+    result: "success",
+    metadata: { kind: deleted.kind },
+  });
+  revalidatePath("/admin/alerts");
+  return { ok: true, message: "Channel deleted." };
+}
+
 /** Toggle a provider source on/off (admin only). */
 export async function toggleProviderAction(kind: string, enabled: boolean): Promise<ActionState> {
   const { db } = container();
@@ -1769,6 +1924,39 @@ export async function disarmMintPlanAction(id: string): Promise<ActionState> {
   });
   revalidatePath("/admin/execution");
   return { ok: true, message: "Disarmed." };
+}
+
+/**
+ * Delete a DRAFT mint plan (execution:operate). Refuses anything past draft
+ * both here and in the repo's WHERE clause — an armed/executing/executed plan
+ * is part of the live execution + audit trail and is never deletable. Disarm
+ * first, then delete, if a plan is armed.
+ */
+export async function deleteMintPlanAction(id: string): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("execution:operate");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!isUuid(id)) {
+    return { ok: false, message: "Invalid mint plan." };
+  }
+  const deleted = await deleteMintPlan(db, id);
+  if (!deleted) {
+    return { ok: false, message: "Only draft plans can be deleted — disarm it first if armed." };
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "execution.mint_plan.delete",
+    targetType: "mint_plan",
+    targetId: id,
+    result: "success",
+  });
+  revalidatePath("/admin/execution");
+  return { ok: true, message: "Draft mint plan deleted." };
 }
 
 /**

@@ -1,16 +1,40 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, ilike, or, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import { wallets } from "../schema.ts";
+
+export interface ListWalletsOptions {
+  readonly enabledOnly?: boolean;
+  /** Case-insensitive substring match on address OR label. */
+  readonly search?: string;
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+function walletFilters(options: ListWalletsOptions) {
+  const clauses = [];
+  if (options.enabledOnly === true) {
+    clauses.push(eq(wallets.enabled, true));
+  }
+  const search = options.search?.trim();
+  if (search !== undefined && search !== "") {
+    const term = `%${search}%`;
+    clauses.push(or(ilike(wallets.address, term), ilike(wallets.label, term)));
+  }
+  return clauses.length === 0 ? undefined : and(...clauses);
+}
 
 /**
  * Wallet rows for display. Deliberately projects explicit columns and NEVER
  * the `encrypted_signing_key` blob — a managed key must not reach a
  * client-facing payload. `hasSigningKey` + fingerprint are the safe signals
  * the admin UI shows. The worker reads the blob via its own `select *`.
+ *
+ * Optional `search`/`limit`/`offset` back the admin list's server-side
+ * pagination + search; omitted, behavior is unchanged for the worker and
+ * eligibility callers that just want every enabled wallet.
  */
-export async function listWallets(db: Db, options: { enabledOnly?: boolean } = {}) {
-  const conditions = options.enabledOnly === true ? and(eq(wallets.enabled, true)) : undefined;
-  return db
+export async function listWallets(db: Db, options: ListWalletsOptions = {}) {
+  const base = db
     .select({
       id: wallets.id,
       address: wallets.address,
@@ -25,7 +49,18 @@ export async function listWallets(db: Db, options: { enabledOnly?: boolean } = {
     })
     .from(wallets)
     .orderBy(wallets.createdAt)
-    .where(conditions);
+    .where(walletFilters(options));
+  const limited = options.limit !== undefined ? base.limit(options.limit) : base;
+  return options.offset !== undefined ? limited.offset(options.offset) : limited;
+}
+
+/** Total wallets matching the same filters — for pagination page counts. */
+export async function countWallets(db: Db, options: ListWalletsOptions = {}): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(wallets)
+    .where(walletFilters(options));
+  return rows[0]?.count ?? 0;
 }
 
 /** Seal + attach a managed signing key to a wallet (import). */

@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, or, sql } from "drizzle-orm";
 import { type Db, unwrapRows } from "../client.ts";
 import { auditLogs, bootstrapTokens, chainCheckpoints, scanRuns, settings } from "../schema.ts";
 
@@ -142,6 +142,49 @@ export async function recentAuditLogs(
   limit = 50,
 ): Promise<(typeof auditLogs.$inferSelect)[]> {
   return db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(limit);
+}
+
+export interface ListAuditOptions {
+  readonly limit?: number;
+  readonly offset?: number;
+  /** Case-insensitive substring on actor id, action, target type, or target id. */
+  readonly search?: string;
+}
+
+function auditFilters(options: ListAuditOptions) {
+  const search = options.search?.trim();
+  if (search === undefined || search === "") {
+    return undefined;
+  }
+  const term = `%${search}%`;
+  return or(
+    ilike(auditLogs.actorUserId, term),
+    ilike(auditLogs.action, term),
+    ilike(auditLogs.targetType, term),
+    ilike(auditLogs.targetId, term),
+  );
+}
+
+/** Paginated + searchable audit log (admin list-quality pass). */
+export async function listAuditLogs(
+  db: Db,
+  options: ListAuditOptions = {},
+): Promise<(typeof auditLogs.$inferSelect)[]> {
+  const base = db
+    .select()
+    .from(auditLogs)
+    .where(auditFilters(options))
+    .orderBy(desc(auditLogs.createdAt))
+    .limit(options.limit ?? 50);
+  return options.offset !== undefined ? base.offset(options.offset) : base;
+}
+
+export async function countAuditLogs(db: Db, options: ListAuditOptions = {}): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(auditLogs)
+    .where(auditFilters(options));
+  return rows[0]?.count ?? 0;
 }
 
 /* ── Settings ─────────────────────────────────────────────────────────────── */

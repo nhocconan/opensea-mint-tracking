@@ -258,6 +258,21 @@ export async function listMintPlans(db: Db, limit = 100): Promise<MintPlan[]> {
 }
 
 /**
+ * Delete a mint plan — DRAFT status ONLY. The `status = 'draft'` guard is in
+ * the WHERE clause, not just the action layer, so an armed/executing/executed
+ * plan can never be removed even if a stale UI or a race presents its id:
+ * deleting an armed plan out from under the worker's execution loop would be
+ * a correctness and audit hazard. Returns true only when a draft row matched.
+ */
+export async function deleteMintPlan(db: Db, id: string): Promise<boolean> {
+  const rows = await db
+    .delete(mintPlans)
+    .where(and(eq(mintPlans.id, id), eq(mintPlans.status, "draft")))
+    .returning({ id: mintPlans.id });
+  return rows.length > 0;
+}
+
+/**
  * Armed, in-window plans that have a linked stage with a known start time —
  * the precision hot-loop's candidate list (packages/core/fire-schedule.ts).
  * Returns the stage start in epoch ms so the worker can compute the exact

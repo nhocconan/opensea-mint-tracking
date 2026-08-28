@@ -12,7 +12,7 @@ import { formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
 import { requirePage } from "@/lib/session.ts";
 import { BrowserSignPrompt } from "./browser-sign-prompt.tsx";
 import { ExecutorOnboarding } from "./executor-onboarding.tsx";
-import { ArmControls, DisarmControl } from "./mint-plan-controls.tsx";
+import { ArmControls, DeleteDraftPlanControl, DisarmControl } from "./mint-plan-controls.tsx";
 import { MintPlanForm } from "./mint-plan-form.tsx";
 import { PasskeyRegistration } from "./passkey-registration.tsx";
 import { RpcEndpointForm } from "./rpc-endpoint-form.tsx";
@@ -174,7 +174,12 @@ export default async function AdminExecutionPage() {
                     </td>
                     <td className="py-1">{e.priority}</td>
                     <td className="py-1">
-                      <RpcEndpointRowActions id={e.id} chainId={e.chainId} enabled={e.enabled} />
+                      <RpcEndpointRowActions
+                        id={e.id}
+                        chainId={e.chainId}
+                        label={e.label}
+                        enabled={e.enabled}
+                      />
                     </td>
                   </tr>
                 );
@@ -301,7 +306,12 @@ export default async function AdminExecutionPage() {
                 <td className="py-1">{formatDateTimeUtc(p.armedUntil)}</td>
                 <td className="py-1 text-ink-faint">{formatDateTimeUtc(p.createdAt)}</td>
                 <td className="py-1">
-                  {p.status === "draft" ? <ArmControls id={p.id} /> : null}
+                  {p.status === "draft" ? (
+                    <span className="flex items-center gap-1.5">
+                      <ArmControls id={p.id} />
+                      <DeleteDraftPlanControl id={p.id} />
+                    </span>
+                  ) : null}
                   {p.status === "armed" ? <DisarmControl id={p.id} /> : null}
                 </td>
               </tr>

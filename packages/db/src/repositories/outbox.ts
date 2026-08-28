@@ -10,6 +10,43 @@ import { and, asc, eq, lte, sql } from "drizzle-orm";
 import { type Db, unwrapRows } from "../client.ts";
 import { alertChannels, notificationAttempts, notificationOutbox } from "../schema.ts";
 
+/**
+ * Toggle a channel's `enabled` flag (admin alert-channel CRUD). A disabled
+ * channel is skipped by the outbox dispatcher's `enabled = true` filter, so
+ * this is the pause switch that doesn't destroy the (encrypted) credential.
+ * Returns true when a row matched.
+ */
+export async function setAlertChannelEnabled(
+  db: Db,
+  id: string,
+  enabled: boolean,
+): Promise<boolean> {
+  const rows = await db
+    .update(alertChannels)
+    .set({ enabled, updatedAt: new Date() })
+    .where(eq(alertChannels.id, id))
+    .returning({ id: alertChannels.id });
+  return rows.length > 0;
+}
+
+/**
+ * Delete an alert channel row. The linked credential (bot token / webhook
+ * URL) is left to the credential lifecycle — callers that own the secret
+ * revoke it separately; a `web_push` channel keeps its subscription inline
+ * in `config`, which goes with the row. Returns the deleted channel's kind +
+ * credentialId so the action layer can audit and clean up.
+ */
+export async function deleteAlertChannel(
+  db: Db,
+  id: string,
+): Promise<{ kind: string; credentialId: string | null } | undefined> {
+  const rows = await db
+    .delete(alertChannels)
+    .where(eq(alertChannels.id, id))
+    .returning({ kind: alertChannels.kind, credentialId: alertChannels.credentialId });
+  return rows[0];
+}
+
 export interface EnqueueAlertInput {
   readonly dedupeKey: string;
   readonly alertType: AlertType;
