@@ -535,6 +535,31 @@ export async function saveCredentialAction(input: {
   };
 }
 
+/**
+ * Force every AUTH_REQUIRED eligibility verdict to recheck now (operator
+ * self-service, admin-crud-standards: an operation needed a second time is a
+ * button, not a wait). The worker's 60s pass drains them at 15/cycle, so all
+ * verdicts refresh within a couple of minutes instead of waiting out the
+ * staggered 30-minute backoff.
+ */
+export async function recheckEligibilityAction(): Promise<ActionState> {
+  const { db } = container();
+  try {
+    await requireApi("credentials:manage");
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const count = await markAuthRequiredChecksDue(db).catch(() => 0);
+  revalidatePath("/", "layout");
+  return {
+    ok: true,
+    message:
+      count === 0
+        ? "No pending 'AUTH NEEDED' verdicts to recheck."
+        : `Re-checking ${count} verdict${count === 1 ? "" : "s"} now — reload feeds in ~1–2 min.`,
+  };
+}
+
 export async function revokeCredentialAction(id: string): Promise<ActionState> {
   const { db } = container();
   let actor: string | null = null;

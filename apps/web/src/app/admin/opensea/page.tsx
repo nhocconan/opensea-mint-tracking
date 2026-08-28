@@ -2,6 +2,7 @@ import { listCredentials } from "@hoodmint/db";
 import { container } from "@/lib/container.ts";
 import { formatDateTimeUtc } from "@/lib/format.ts";
 import { CredentialForm, RevokeButton } from "./credential-forms.tsx";
+import { RecheckEligibilityButton } from "./recheck-eligibility-button.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -20,11 +21,14 @@ export default async function AdminOpenseaPage() {
         title="API key"
         hint="Developer Portal key preferred; instant keys rotate automatically when omitted."
       />
-      <CredentialForm
-        type="opensea_pat"
-        title="Wallet PAT"
-        hint="Must be scoped to read:eligibility only. Exchanged server-side for a ~12h wallet JWT."
-      />
+      <div>
+        <CredentialForm
+          type="opensea_pat"
+          title="Wallet PAT"
+          hint="Must be scoped to read:eligibility only. Exchanged server-side for a ~12h wallet JWT."
+        />
+        <RecheckEligibilityButton />
+      </div>
 
       <section className="rounded-md border border-line bg-base-raised p-4 md:col-span-2">
         <h2 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
