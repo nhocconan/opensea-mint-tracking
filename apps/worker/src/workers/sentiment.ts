@@ -36,7 +36,10 @@ export interface SentimentScanSummary {
 }
 
 /** How many projects to scan per pass — one metered Grok call each. */
-const MAX_PROJECTS_PER_PASS = 5;
+// 20 per 5-min pass: with ~130 LIVE/NEXT drops after chain-wide discovery,
+// 5/pass meant a 2-hour sweep before a new drop got its scam/hype read. Grok
+// runs on the operator's subscription, so this is latency, not billing.
+const MAX_PROJECTS_PER_PASS = 20;
 
 export async function runSentimentScan(ctx: WorkerContext): Promise<SentimentScanSummary> {
   const { db, config, log } = ctx;

@@ -26,8 +26,16 @@ export interface EligibilityUpsert {
 export async function markAuthRequiredChecksDue(db: Db): Promise<number> {
   const rows = await db
     .update(eligibilityChecks)
-    .set({ nextDueAt: new Date() })
-    .where(eq(eligibilityChecks.status, "AUTH_REQUIRED"))
+    // ERROR rows from a transient rate-limit are not real verdicts either —
+    // demote them back to AUTH_REQUIRED so the recheck resolves them instead
+    // of leaving "ERROR" chips for the 30-minute backoff.
+    .set({ nextDueAt: new Date(), status: "AUTH_REQUIRED", errorCode: null })
+    .where(
+      or(
+        eq(eligibilityChecks.status, "AUTH_REQUIRED"),
+        and(eq(eligibilityChecks.status, "ERROR"), eq(eligibilityChecks.errorCode, "RateLimited")),
+      ),
+    )
     .returning({ id: eligibilityChecks.walletId });
   return rows.length;
 }

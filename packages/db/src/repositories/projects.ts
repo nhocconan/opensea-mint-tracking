@@ -488,6 +488,14 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
   // the DB — velocity/aggregates still track them and a dedicated on-chain
   // view can surface hot ones later — just not in the curated feeds.
   conditions.push(sql`not (${projects.slug} is null and ${projects.name} like 'Unknown %')`);
+  // Chain-wide collection discovery (2026-08-28) surfaces every OpenSea
+  // collection on the chain, most of which are NOT SeaDrop drops — no
+  // schedule, lifecycle UNKNOWN forever. They're real projects (radar +
+  // signals still track them) but noise in the drop feeds: keep the feeds to
+  // projects that have at least one stage OR a resolved lifecycle.
+  conditions.push(
+    sql`(${projects.lifecycleStatus} <> 'UNKNOWN' or exists (select 1 from drop_stages ds where ds.project_id = ${projects.id}))`,
+  );
 
   if (filters.status !== undefined) {
     conditions.push(eq(projects.lifecycleStatus, filters.status));

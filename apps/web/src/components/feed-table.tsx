@@ -165,6 +165,17 @@ export function FeedTable({
                       >
                         {row.name}
                       </Link>
+                      {row.slug !== null ? (
+                        <a
+                          href={`https://opensea.io/collection/${row.slug}/overview`}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="mt-0.5 inline-flex items-center gap-1 rounded-xs border border-acid/40 px-1.5 py-0.5 font-mono text-[10px] text-acid hover:bg-acid/10"
+                        >
+                          Mint on OpenSea
+                          <ExternalLink className="size-3" aria-hidden />
+                        </a>
+                      ) : null}
                       {row.contractAddress !== null ? (
                         <span className="flex items-center gap-1 font-mono text-[11px] text-ink-faint">
                           {shortAddress(row.contractAddress)}
