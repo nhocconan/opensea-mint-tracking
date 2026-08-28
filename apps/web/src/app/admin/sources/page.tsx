@@ -2,6 +2,7 @@ import { listProviders } from "@hoodmint/db";
 import { container } from "@/lib/container.ts";
 import { formatDateTimeUtc } from "@/lib/format.ts";
 import { ProviderToggle } from "./provider-toggle.tsx";
+import { TrackDropForm } from "./track-drop-form.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,7 @@ export default async function AdminSourcesPage() {
 
   return (
     <div className="grid gap-3">
+      <TrackDropForm />
       <section className="rounded-md border border-line bg-base-raised p-4">
         <h2 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
           Discovery sources

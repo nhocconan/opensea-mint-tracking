@@ -60,7 +60,7 @@ import {
   storedDevicePendingSchema,
   xaiOAuthClientSchema,
 } from "@hoodmint/providers";
-import { enqueueMaintenance, enqueueRarity, queues } from "@hoodmint/queues";
+import { enqueueDetail, enqueueMaintenance, enqueueRarity, queues } from "@hoodmint/queues";
 import { fingerprint, sealSecret } from "@hoodmint/secrets";
 import { generateSessionKey, managedKeyAddress, parseBrowserSignResult } from "@hoodmint/signing";
 import { and, eq } from "drizzle-orm";
@@ -165,6 +165,48 @@ export async function setupAction(input: {
     };
   }
   redirect("/admin");
+}
+
+/**
+ * Track a specific OpenSea drop by URL or slug (operator+). Discovery only
+ * sees OpenSea's curated /drops LIST feed, so a mintable collection that
+ * isn't in that list (many direct/non-curated drops) never appears. This
+ * fetches it by slug directly (worker runDetailRefresh → getDrop → upsert
+ * project + stages), so it shows up in the calendar/feeds/eligibility.
+ */
+export async function trackDropAction(input: { input: string }): Promise<ActionState> {
+  const { db, config } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("scans:run");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const raw = input.input.trim();
+  // Accept a full OpenSea URL (…/collection/<slug>[/…]) or a bare slug.
+  const urlMatch = raw.match(/opensea\.io\/(?:[a-z]{2}\/)?collection\/([^/?#\s]+)/i);
+  const slug = (urlMatch?.[1] ?? raw).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{1,80}$/.test(slug)) {
+    return {
+      ok: false,
+      message: "Paste an OpenSea collection URL or a valid collection slug.",
+    };
+  }
+  await enqueueDetail(config.VALKEY_URL, { slug, freshnessBucket: "hot" });
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "discovery.track_drop",
+    targetType: "project",
+    targetId: slug,
+    result: "success",
+    metadata: { slug },
+  });
+  revalidatePath("/", "layout");
+  return {
+    ok: true,
+    message: `Fetching "${slug}" from OpenSea — reload the calendar/feeds in ~30s. If it never appears it isn't an OpenSea drop (check the slug or the on-chain radar).`,
+  };
 }
 
 /** Enqueue an immediate discovery scan (operator+). */
