@@ -18,19 +18,57 @@ const STAGE_KIND_MAP: Readonly<Record<string, StageKind>> = {
   public_sale: "public",
   public: "public",
   open: "public",
+  signed_public: "public",
   allowlist: "allowlist",
   allowlist_sale: "allowlist",
   allow_list: "allowlist",
+  allowlist_presale: "allowlist",
+  // OpenSea SeaDrop's signature-gated allowlist stage — the most common
+  // restricted stage on Robinhood Chain drops ("Holders WL", "GTD", "WL
+  // FCFS" all ship as signed_presale). Unmapped until 2026-08-28, so 151
+  // stages sat as "unknown" and were never eligibility-checked.
+  signed_presale: "allowlist",
   presale: "presale",
   pre_sale: "presale",
   gtd: "gtd",
   guaranteed: "gtd",
   community: "community",
   community_sale: "community",
+  token_gated: "community",
+  holder: "community",
+  holders: "community",
 };
 
+/**
+ * Map OpenSea's stage_type to our StageKind. Exact table first, then a
+ * conservative heuristic on the raw string so a new OpenSea variant lands
+ * as restricted/public instead of an un-checkable "unknown".
+ */
 export function stageTypeToKind(stageType: string): StageKind {
-  return STAGE_KIND_MAP[stageType.toLowerCase()] ?? "unknown";
+  const raw = stageType.toLowerCase();
+  const mapped = STAGE_KIND_MAP[raw];
+  if (mapped !== undefined) {
+    return mapped;
+  }
+  if (raw.includes("public") || raw.includes("open")) {
+    return "public";
+  }
+  if (raw.includes("gtd") || raw.includes("guarantee")) {
+    return "gtd";
+  }
+  if (raw.includes("holder") || raw.includes("token_gated") || raw.includes("community")) {
+    return "community";
+  }
+  if (
+    raw.includes("presale") ||
+    raw.includes("allowlist") ||
+    raw.includes("signed") ||
+    raw.includes("whitelist") ||
+    raw.includes("wl")
+  ) {
+    return "allowlist";
+  }
+  return "unknown";
 }
 
 function toStageUpsert(stage: z.infer<typeof stageSchema>): StageUpsert {

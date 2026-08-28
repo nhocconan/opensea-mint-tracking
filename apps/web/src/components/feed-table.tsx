@@ -227,7 +227,9 @@ export function FeedTable({
                     <span className="text-ink-faint">—</span>
                   )}
                 </td>
-                <td className="px-3 py-2 font-mono text-xs">{formatPrice(row.stagePriceWei)}</td>
+                <td className="px-3 py-2 font-mono text-xs">
+                  {formatPrice(row.stagePriceWei ?? row.nextStagePriceWei)}
+                </td>
                 <td className="px-3 py-2">
                   <Countdown
                     iso={(() => {

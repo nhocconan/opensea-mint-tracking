@@ -118,7 +118,9 @@ export default async function CalendarPage() {
                           </Link>
                         </td>
                         <td className="py-2 text-ink-faint">{row.stageLabel ?? "—"}</td>
-                        <td className="py-2 text-ink-faint">{formatPrice(row.stagePriceWei)}</td>
+                        <td className="py-2 text-ink-faint">
+                          {formatPrice(row.stagePriceWei ?? row.nextStagePriceWei)}
+                        </td>
                         <td className="w-20 py-2 pr-3">
                           <StatusChip status={row.lifecycleStatus} stale={false} />
                         </td>

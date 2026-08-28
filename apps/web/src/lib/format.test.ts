@@ -14,7 +14,7 @@ describe("UI-boundary formatting (PRD §14: UTC storage, locale at edge)", () =>
   });
 
   it("price display: free vs wei-derived", () => {
-    expect(formatPrice(null)).toBe("FREE");
+    expect(formatPrice(null)).toBe("—");
     expect(formatPrice("0")).toBe("FREE");
     expect(formatPrice("4200000000000000")).toBe("0.0042 ETH");
   });

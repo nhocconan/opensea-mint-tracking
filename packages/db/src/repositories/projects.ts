@@ -363,6 +363,9 @@ export interface FeedRow {
   readonly stageLabel: string | null;
   readonly stageKind: StageKind | null;
   readonly stagePriceWei: string | null;
+  /** Price of the NEXT (not-yet-open) stage — what an upcoming drop will
+   *  cost; `stagePriceWei` is the active stage's and is null before open. */
+  readonly nextStagePriceWei: string | null;
   readonly stageStartsAt: Date | null;
   readonly stageEndsAt: Date | null;
 }
@@ -630,6 +633,10 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       supplyVerified: latestVerified,
       velocity1h,
       uniqueMinters1h,
+      nextStagePriceWei: sql<string | null>`
+        (select ds.price_wei from drop_stages ds
+          where ds.project_id = ${projects.id} and ds.starts_at > now()
+          order by ds.starts_at asc limit 1)`,
       stageLabel: sql<string | null>`${currentStageCol("label")}`,
       stageKind: sql<StageKind | null>`${currentStageCol("type")}`,
       stagePriceWei: sql<string | null>`${currentStageCol("price_wei")}`,

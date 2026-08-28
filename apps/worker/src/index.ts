@@ -20,6 +20,7 @@ import { context } from "./context.ts";
 import { runChainSync } from "./workers/chain.ts";
 import { runClockCalibration } from "./workers/clock-calibration.ts";
 import {
+  repairUnknownStages,
   runCollectionDiscovery,
   runDetailRefresh,
   runDiscoveryCycle,
@@ -119,6 +120,9 @@ async function main(): Promise<void> {
   every(config.COLLECTION_DISCOVERY_INTERVAL_SECONDS * 1000, "collection-discovery", () =>
     runCollectionDiscovery(ctx),
   );
+  // Re-type "unknown" stages (unmapped OpenSea stage_type) so they become
+  // eligibility-checkable; boot + every 6h. See repairUnknownStages.
+  every(6 * 60 * 60 * 1000, "unknown-stage-repair", () => repairUnknownStages(ctx));
   every(60_000, "eligibility", async () => {
     await ensureEligibilityRows(ctx);
     await runEligibilityPass(ctx);

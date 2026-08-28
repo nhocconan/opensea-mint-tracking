@@ -30,7 +30,13 @@ export function formatDateTimeLocal(iso: string | Date | null): string {
 }
 
 export function formatPrice(wei: string | null): string {
-  if (wei === null || wei === "0") {
+  // null = price not known (no active stage yet / not a drop) — NOT free.
+  // Rendering unknown as "FREE" showed paid drops as free (found live
+  // 2026-08-28: Stackman, 0.001 ETH, displayed FREE before its stage opened).
+  if (wei === null) {
+    return "—";
+  }
+  if (wei === "0") {
     return "FREE";
   }
   const formatted = formatWei(wei as Wei, 18);

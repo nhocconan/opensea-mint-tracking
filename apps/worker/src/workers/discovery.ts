@@ -14,6 +14,7 @@ import {
   publishEvent,
   setSetting,
   startScanRun,
+  unwrapRows,
   upsertProjectFromSource,
 } from "@hoodmint/db";
 import { metrics } from "@hoodmint/observability";
@@ -24,6 +25,7 @@ import {
   QUEUE_NAMES,
   scheduledDiscoveryJobs,
 } from "@hoodmint/queues";
+import { sql } from "drizzle-orm";
 import type { WorkerContext } from "../context.ts";
 import { invalidateInstantKeyOnAuthFailure, resolveOpenSeaKey } from "../credentials.ts";
 
@@ -307,6 +309,37 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
 }
 
 /** Detail refresh (PRD §8.4 details queue): authoritative stage schedule. */
+/**
+ * Repair sweep for "unknown"-type stages (owner ask 2026-08-28: "quét mấy
+ * cái UNKNOWN"). A stage lands as `unknown` when OpenSea's stage_type wasn't
+ * in our map (e.g. `signed_presale` until today) — the eligibility engine
+ * then never checks it and the feed shows UNKNOWN. Re-enqueue a detail
+ * refresh for every LIVE/NEXT project that still has an unknown stage so the
+ * (now wider) mapping re-types it and eligibility rows get created. Bounded
+ * and idempotent (deterministic detail job ids); runs at boot + every 6h.
+ */
+export async function repairUnknownStages(ctx: WorkerContext, limit = 150): Promise<number> {
+  const { db, config, log } = ctx;
+  const rows = await db.execute(sql`
+    select distinct p.slug
+      from drop_stages s
+      join projects p on p.id = s.project_id
+     where s.type = 'unknown'
+       and p.slug is not null
+       and p.lifecycle_status in ('LIVE', 'NEXT')
+     order by p.slug
+     limit ${limit}
+  `);
+  const slugs = unwrapRows<{ slug: string }>(rows).map((r) => r.slug);
+  for (const slug of slugs) {
+    await enqueueDetail(config.VALKEY_URL, { slug, freshnessBucket: "hot" }).catch(() => undefined);
+  }
+  if (slugs.length > 0) {
+    log.info({ count: slugs.length }, "unknown-stage repair: detail refresh enqueued");
+  }
+  return slugs.length;
+}
+
 export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promise<void> {
   const { db, config, log } = ctx;
   const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
