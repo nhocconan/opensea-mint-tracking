@@ -19,7 +19,12 @@ import { Worker } from "bullmq";
 import { context } from "./context.ts";
 import { runChainSync } from "./workers/chain.ts";
 import { runClockCalibration } from "./workers/clock-calibration.ts";
-import { runDetailRefresh, runDiscoveryCycle, scheduleDiscovery } from "./workers/discovery.ts";
+import {
+  runCollectionDiscovery,
+  runDetailRefresh,
+  runDiscoveryCycle,
+  scheduleDiscovery,
+} from "./workers/discovery.ts";
 import { ensureEligibilityRows, runEligibilityPass } from "./workers/eligibility.ts";
 import { runMintExecutionPass, runMintHotLoop } from "./workers/execution.ts";
 import { refreshProviderFreshness, runMaintenance } from "./workers/maintenance.ts";
@@ -102,6 +107,17 @@ async function main(): Promise<void> {
   // button (featured only) triggers discovery.
   every(config.DISCOVERY_INTERVAL_SECONDS * 1000, "discovery-schedule", () =>
     scheduleDiscovery(ctx),
+  );
+  // Chain-wide collection discovery: the curated /drops feed only lists
+  // OpenSea-featured SeaDrop drops, so most Robinhood Chain collections never
+  // appear there. This sweeps GET /api/v2/collections (newest first) to find
+  // ALL of them, upserts each as a project, and enqueues a detail refresh so
+  // the ones that are drops get their stages filled in. Runs once at startup
+  // (every() fires immediately) then on a slower, quota-conscious cadence than
+  // /drops discovery — it is a broad sweep, bounded per pass by
+  // COLLECTION_DISCOVERY_MAX_PAGES/MAX_TOTAL.
+  every(config.COLLECTION_DISCOVERY_INTERVAL_SECONDS * 1000, "collection-discovery", () =>
+    runCollectionDiscovery(ctx),
   );
   every(60_000, "eligibility", async () => {
     await ensureEligibilityRows(ctx);

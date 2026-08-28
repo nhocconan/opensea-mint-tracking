@@ -4,8 +4,13 @@ import { AppError } from "@hoodmint/core";
 import { describe, expect, it } from "vitest";
 import { fetchJson } from "../http.ts";
 import { OpenSeaClient } from "./client.ts";
-import { normalizeDropDetail, normalizeDropRow, stageTypeToKind } from "./normalizer.ts";
-import { parseDropsPage, parseEligibility } from "./schemas.ts";
+import {
+  normalizeCollectionRow,
+  normalizeDropDetail,
+  normalizeDropRow,
+  stageTypeToKind,
+} from "./normalizer.ts";
+import { parseCollectionsPage, parseDropsPage, parseEligibility } from "./schemas.ts";
 
 const FIXTURES = join(import.meta.dirname, "../../fixtures/opensea");
 const fixture = (name: string): unknown => JSON.parse(readFileSync(join(FIXTURES, name), "utf8"));
@@ -48,6 +53,63 @@ describe("schema parsing", () => {
     expect(page.rows).toHaveLength(3);
     expect(page.malformed).toBe(1);
     expect(page.next).toBe("cursor-page-2");
+  });
+
+  it("parses a collections page: keeps on-chain rows, counts malformed, filters other chains", () => {
+    const payload = {
+      collections: [
+        {
+          collection: "sherwood-outlaws",
+          name: "Sherwood Outlaws",
+          image_url: "https://i.seadn.io/x.png",
+          contracts: [{ address: `0x${"a".repeat(40)}`, chain: "robinhood" }],
+          created_date: "2026-08-25T00:00:00Z",
+        },
+        {
+          // valid shape but on a different chain → filtered out, NOT malformed
+          collection: "ethereum-punks",
+          name: "Punks",
+          contracts: [{ address: `0x${"b".repeat(40)}`, chain: "ethereum" }],
+        },
+        {
+          // multi-chain: must select the robinhood contract, not the first one
+          collection: "deadpepe",
+          contracts: [
+            { address: `0x${"c".repeat(40)}`, chain: "matic" },
+            { address: `0x${"d".repeat(40)}`, chain: "robinhood" },
+          ],
+        },
+        { collection: "", contracts: [] }, // empty slug fails min(1) → malformed
+        { name: "no slug at all" }, // missing collection → malformed
+      ],
+      next: "cursor-2",
+    };
+    const page = parseCollectionsPage(payload, "robinhood");
+    expect(page.rows.map((r) => r.slug)).toEqual(["sherwood-outlaws", "deadpepe"]);
+    expect(page.malformed).toBe(2);
+    expect(page.next).toBe("cursor-2");
+    // multi-chain row picked the robinhood contract, and slug is the fallback name
+    const dead = page.rows.find((r) => r.slug === "deadpepe");
+    expect(dead?.contractAddress).toBe(`0x${"d".repeat(40)}`);
+    expect(dead?.name).toBe("deadpepe");
+  });
+
+  it("collections page also matches robinhood rows emitted as the numeric chain id 4663", () => {
+    const page = parseCollectionsPage(
+      {
+        collections: [
+          {
+            collection: "noirbrokers",
+            contracts: [{ address: `0x${"e".repeat(40)}`, chain: "4663" }],
+          },
+        ],
+        next: null,
+      },
+      "robinhood",
+    );
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]?.slug).toBe("noirbrokers");
+    expect(page.next).toBeNull();
   });
 
   it("parses eligibility with malformed stage rows counted", () => {
@@ -141,6 +203,79 @@ describe("OpenSeaClient", () => {
     const result = await client.listCollectionNfts("big-collection", { maxPagesOverride: 1 });
     expect(result.pages).toBe(1);
     expect(result.truncated).toBe(true);
+  });
+
+  it("paginates chain-wide collections across cursor pages, filtering to the target chain", async () => {
+    const calls: RoutedCall[] = [];
+    const page1 = {
+      collections: [
+        {
+          collection: "sherwood-outlaws",
+          name: "Sherwood Outlaws",
+          contracts: [{ address: `0x${"a".repeat(40)}`, chain: "robinhood" }],
+          created_date: "2026-08-25T00:00:00Z",
+        },
+        {
+          collection: "someeth",
+          contracts: [{ address: `0x${"b".repeat(40)}`, chain: "ethereum" }],
+        },
+      ],
+      next: "coll-page-2",
+    };
+    const page2 = {
+      collections: [
+        { collection: "deadpepe", contracts: [{ address: `0x${"c".repeat(40)}`, chain: "4663" }] },
+      ],
+      next: null,
+    };
+    const client = new OpenSeaClient({
+      apiKey: "sk-test",
+      fetchImpl: wrap(
+        routingFetch(
+          [
+            { match: (u) => u.includes("next=coll-page-2"), body: page2 },
+            { match: (u) => u.includes("/api/v2/collections"), body: page1 },
+          ],
+          calls,
+        ),
+      ),
+    });
+    const result = await client.listCollections("robinhood");
+    expect(result.pages).toBe(2);
+    expect(result.rows.map((r) => r.slug)).toEqual(["sherwood-outlaws", "deadpepe"]);
+    // Request carried the documented params.
+    expect(calls[0]?.url).toContain("chain=robinhood");
+    expect(calls[0]?.url).toContain("order_by=created_date");
+    expect(calls[0]?.url).toContain("order_direction=desc");
+  });
+
+  it("caps chain-wide collections at maxPages (bounded quota use)", async () => {
+    const client = new OpenSeaClient({
+      fetchImpl: wrap(
+        routingFetch([
+          {
+            match: () => true,
+            body: {
+              collections: [
+                { collection: "a", contracts: [{ address: `0x${"a".repeat(40)}`, chain: "4663" }] },
+              ],
+              next: "always-more",
+            },
+          },
+        ]),
+      ),
+    });
+    const result = await client.listCollections("robinhood", { maxPages: 2 });
+    expect(result.pages).toBe(2);
+  });
+
+  it("getDrop surfaces a 404 as a NotFound AppError (drives the graceful detail-refresh path)", async () => {
+    const client = new OpenSeaClient({
+      fetchImpl: wrap(
+        routingFetch([{ match: () => true, status: 404, body: { error: "not a drop" } }]),
+      ),
+    });
+    await expect(client.getDrop("some-collection")).rejects.toMatchObject({ category: "NotFound" });
   });
 
   it("retries without the chains filter on 400 and filters rows locally (new-chain behavior)", async () => {
@@ -321,6 +456,28 @@ describe("normalizer", () => {
     expect(draft.stages[0]?.priceWei).toBe("4200000000000000");
     expect(draft.confidence).toBe("single-source");
     expect(JSON.stringify(draft.evidence?.sanitizedPayload)).not.toContain("i.seadn.io");
+  });
+
+  it("collection rows become stage-less single-source projects (lifecycle resolved later)", () => {
+    const draft = normalizeCollectionRow(
+      {
+        slug: "sherwood-outlaws",
+        name: "Sherwood Outlaws",
+        imageUrl: "https://i.seadn.io/x.png",
+        contractAddress: `0x${"a".repeat(40)}`,
+        createdDate: "2026-08-25T00:00:00Z",
+      },
+      { chainId: 4663, now: NOW },
+    );
+    expect(draft.externalId).toBe("sherwood-outlaws");
+    expect(draft.slug).toBe("sherwood-outlaws");
+    expect(draft.name).toBe("Sherwood Outlaws");
+    expect(draft.contractAddress).toBe(`0x${"a".repeat(40)}`);
+    expect(draft.chainId).toBe(4663);
+    expect(draft.confidence).toBe("single-source");
+    expect(draft.stages).toEqual([]);
+    expect(draft.supply).toBeNull();
+    expect(draft.evidence?.kind).toBe("collections:list");
   });
 
   it("detail normalization merges full stage list and marks verified", () => {

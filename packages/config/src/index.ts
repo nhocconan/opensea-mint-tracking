@@ -77,6 +77,17 @@ export const envSchema = z.object({
   OPENSEA_CHAIN_FALLBACK: z.string().trim().min(1).default("robinhood"),
   DISCOVERY_INTERVAL_SECONDS: positiveInt.default(300),
   OPENSEA_MAX_PAGES: positiveInt.default(5),
+  /** Chain-wide collection discovery (finds ALL Robinhood Chain collections,
+   *  not just the curated /drops feed). Kept small and on a slower cadence
+   *  than /drops discovery because it is a broad, quota-heavy sweep: page
+   *  count × page size × interval bounds how much of the free OpenSea tier it
+   *  can burn per hour. See apps/worker discovery.runCollectionDiscovery. */
+  COLLECTION_DISCOVERY_MAX_PAGES: positiveInt.default(3),
+  COLLECTION_DISCOVERY_INTERVAL_SECONDS: positiveInt.default(900),
+  /** Hard per-pass ceiling on how many newest collections one sweep will
+   *  upsert+enqueue, so a very large chain can never create tens of thousands
+   *  of detail jobs in a single tick (defense on top of MAX_PAGES). */
+  COLLECTION_DISCOVERY_MAX_TOTAL: positiveInt.default(300),
   OPENSEA_RATE_RESERVE_PERCENT: nonNegativeInt
     .default(10)
     .refine((v) => v < 100, "reserve must leave room for traffic (< 100)"),
@@ -228,6 +239,7 @@ export function describeConfig(config: AppConfig): Record<string, unknown> {
     openseaKeyFromEnv: Boolean(config.OPENSEA_API_KEY),
     patFromEnv: Boolean(config.OPENSEA_WALLET_PAT),
     discoveryIntervalSeconds: config.DISCOVERY_INTERVAL_SECONDS,
+    collectionDiscoveryIntervalSeconds: config.COLLECTION_DISCOVERY_INTERVAL_SECONDS,
     alertWindowsMinutes: config.ALERT_STAGE_WINDOWS_MINUTES,
     demoMode: config.DEMO_MODE,
     logLevel: config.LOG_LEVEL,

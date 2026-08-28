@@ -7,7 +7,12 @@ import { createHash } from "node:crypto";
 import type { Confidence, StageKind } from "@hoodmint/core";
 import type { ProjectUpsert, StageUpsert } from "@hoodmint/db";
 import type { z } from "zod";
-import { dropRowSchema, type ParsedEligibility, type stageSchema } from "./schemas.ts";
+import {
+  dropRowSchema,
+  type ParsedCollectionRow,
+  type ParsedEligibility,
+  type stageSchema,
+} from "./schemas.ts";
 
 const STAGE_KIND_MAP: Readonly<Record<string, StageKind>> = {
   public_sale: "public",
@@ -87,6 +92,43 @@ export function normalizeDropRow(
         is_minting: row.is_minting ?? null,
         drop_type: row.drop_type ?? null,
         stages: stages.map((s) => s.providerStageId),
+      },
+    },
+    now: options.now,
+  };
+}
+
+/**
+ * Chain-wide collection normalization (PRD §7.2): maps one collections-feed
+ * row to the same `ProjectUpsert` shape `upsertProjectFromSource` consumes.
+ * A collection carries NO stage schedule, so it yields a project with no
+ * stages (lifecycle resolves to UNKNOWN in core) and "single-source"
+ * confidence — a later `/drops/{slug}` detail refresh upgrades the ones that
+ * are actually SeaDrop drops to a full, verified stage list.
+ */
+export function normalizeCollectionRow(
+  row: ParsedCollectionRow,
+  options: NormalizeOptions,
+): ProjectUpsert {
+  return {
+    providerKind: "opensea",
+    externalId: row.slug,
+    chainId: options.chainId,
+    contractAddress: row.contractAddress,
+    name: row.name,
+    slug: row.slug,
+    imageUrl: row.imageUrl,
+    confidence: "single-source" satisfies Confidence,
+    stages: [],
+    supply: null,
+    evidence: {
+      kind: "collections:list",
+      fetchedAt: options.now,
+      contentHash: contentHash(row),
+      sanitizedPayload: {
+        slug: row.slug,
+        contract: row.contractAddress,
+        createdDate: row.createdDate,
       },
     },
     now: options.now,

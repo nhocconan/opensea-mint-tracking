@@ -23,12 +23,16 @@ export function ImportKeyForm() {
         Import minting key
       </h2>
       <p className="mt-1 text-[11px] text-amber">
-        Burner wallets only — hold only your mint budget + gas. Encrypted at rest (AES-256-GCM),
-        decrypted only at the mint instant. Requires a passkey (register one at{" "}
+        A whitelist/allowlist is tied to a specific address — a burner is NOT on your allowlist and
+        cannot mint your WL. Import the key of the wallet that actually holds the spot to mint it
+        autonomously (or use browser-wallet signing to keep the key off the server). Use a{" "}
+        <strong>burner</strong> (mint budget + gas only) for public/FCFS mints. Keys are encrypted
+        at rest (AES-256-GCM), decrypted only at the mint instant, and require a passkey (register
+        one at{" "}
         <a href="/admin/account" className="underline">
           Admin → Account
-        </a>{" "}
-        first) and the live-execution switch.
+        </a>
+        ) plus the live-execution switch.
       </p>
       <form
         className="mt-3 space-y-2"

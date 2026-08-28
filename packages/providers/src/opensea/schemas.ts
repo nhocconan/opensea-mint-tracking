@@ -65,6 +65,100 @@ export const dropsResponseSchema = z.object({
   next: z.string().nullable().optional(),
 });
 
+/**
+ * Chain membership test shared by the drops filter and the chain-wide
+ * collections sweep. Lives here (not in client.ts) so the parse layer can
+ * filter rows to the target chain without a client→schemas→client import
+ * cycle. Robinhood Chain is emitted as its slug or its numeric id (4663)
+ * depending on the endpoint, so both are treated as a match.
+ */
+export function matchesChain(rowChain: string, targetSlug: string): boolean {
+  const normalized = rowChain.toLowerCase();
+  const target = targetSlug.toLowerCase();
+  return (
+    normalized === target ||
+    normalized === "4663" ||
+    normalized.replace(/[-_]/g, "") === target.replace(/[-_]/g, "") ||
+    normalized.includes(target)
+  );
+}
+
+/**
+ * Chain-wide collections listing: `GET /api/v2/collections?chain=<slug>
+ * &order_by=created_date&order_direction=desc&limit=<n>[&next=<cursor>]`.
+ * The curated `/drops` feed only surfaces OpenSea-featured SeaDrop drops, so
+ * most real Robinhood Chain collections never appear there — this endpoint is
+ * the authoritative "everything on the chain, newest first" source. A
+ * collection carries no stage schedule; a later `/drops/{slug}` detail fetch
+ * fills stages in for the ones that ARE drops.
+ */
+const collectionContractSchema = z.object({
+  address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  chain: z.string().min(1),
+});
+
+export const collectionRowSchema = z.object({
+  collection: z.string().min(1),
+  name: z.string().optional(),
+  description: z.string().nullable().optional(),
+  image_url: z.string().nullable().optional(),
+  contracts: z.array(collectionContractSchema).default([]),
+  // Kept lenient (not isoTime): a malformed/absent created_date must not drop
+  // an otherwise valid on-chain collection from discovery.
+  created_date: z.string().nullable().optional(),
+});
+
+export const collectionsResponseSchema = z.object({
+  collections: z.array(z.unknown()).default([]),
+  next: z.string().nullable().optional(),
+});
+
+export interface ParsedCollectionRow {
+  readonly slug: string;
+  readonly name: string;
+  readonly imageUrl: string | null;
+  /** The contract on the TARGET chain (a collection may span several). */
+  readonly contractAddress: string;
+  readonly createdDate: string | null;
+}
+
+export interface ParsedCollectionsPage {
+  readonly rows: ParsedCollectionRow[];
+  readonly malformed: number;
+  readonly next: string | null;
+}
+
+/**
+ * Parse one collections page and keep only rows with a contract on
+ * `chainSlug`. Schema-invalid rows are counted as `malformed`; valid rows
+ * that simply live on another chain are silently filtered out (not
+ * malformed).
+ */
+export function parseCollectionsPage(payload: unknown, chainSlug: string): ParsedCollectionsPage {
+  const page = collectionsResponseSchema.parse(payload);
+  const rows: ParsedCollectionRow[] = [];
+  let malformed = 0;
+  for (const raw of page.collections) {
+    const result = collectionRowSchema.safeParse(raw);
+    if (!result.success) {
+      malformed += 1;
+      continue;
+    }
+    const onChain = result.data.contracts.find((c) => matchesChain(c.chain, chainSlug));
+    if (onChain === undefined) {
+      continue;
+    }
+    rows.push({
+      slug: result.data.collection,
+      name: result.data.name ?? result.data.collection,
+      imageUrl: result.data.image_url ?? null,
+      contractAddress: onChain.address,
+      createdDate: result.data.created_date ?? null,
+    });
+  }
+  return { rows, malformed, next: page.next ?? null };
+}
+
 export const eligibilityStageSchema = z.object({
   stage_uuid: z.string().min(1),
   is_eligible: z.boolean(),

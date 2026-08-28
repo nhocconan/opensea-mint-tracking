@@ -23,8 +23,11 @@ import {
   eligibilityResponseSchema,
   exchangeResponseSchema,
   instantKeyResponseSchema,
+  matchesChain,
+  type ParsedCollectionsPage,
   type ParsedDropsPage,
   type ParsedNftsPage,
+  parseCollectionsPage,
   parseDropsPage,
   parseEligibility,
   parseNftsPage,
@@ -60,6 +63,12 @@ export interface ListDropsResult {
   readonly malformed: number;
   readonly pages: number;
   readonly chainFilterDropped: boolean;
+}
+
+export interface ListCollectionsResult {
+  readonly rows: ParsedCollectionsPage["rows"];
+  readonly malformed: number;
+  readonly pages: number;
 }
 
 export class OpenSeaClient {
@@ -230,6 +239,53 @@ export class OpenSeaClient {
     return { rows, malformed, pages, chainFilterDropped };
   }
 
+  /**
+   * Chain-wide collection discovery (mirrors {@link listDrops}'s structure):
+   * paginates `GET /api/v2/collections?chain=<slug>&order_by=<orderBy>
+   * &order_direction=desc&limit=<n>[&next=<cursor>]`, newest first. Bounded by
+   * `maxPages` (defaults to the client's drops-listing cap) so a broad sweep
+   * of a large chain cannot exhaust the free-tier quota — each request is
+   * still ETag-cached and quota-guarded via `this.call`. Rows are filtered to
+   * a contract on the target chain inside `parseCollectionsPage`.
+   */
+  async listCollections(
+    chainSlug: string,
+    opts: { orderBy?: string; maxPages?: number; pageLimit?: number } = {},
+  ): Promise<ListCollectionsResult> {
+    const rows: ParsedCollectionsPage["rows"] = [];
+    let malformed = 0;
+    let pages = 0;
+    let cursor: string | null = null;
+    const maxPages = opts.maxPages ?? this.maxPages;
+    const pageLimit = Math.min(opts.pageLimit ?? this.pageLimit, 100);
+    const orderBy = opts.orderBy ?? "created_date";
+
+    for (;;) {
+      if (pages >= maxPages) {
+        break;
+      }
+      const params = new URLSearchParams({
+        chain: chainSlug,
+        order_by: orderBy,
+        order_direction: "desc",
+        limit: String(pageLimit),
+      });
+      if (cursor !== null) {
+        params.set("next", cursor);
+      }
+      const { json } = await this.call(`/api/v2/collections?${params.toString()}`);
+      const page = parseCollectionsPage(json, chainSlug);
+      rows.push(...page.rows);
+      malformed += page.malformed;
+      pages += 1;
+      cursor = page.next;
+      if (cursor === null) {
+        break;
+      }
+    }
+    return { rows, malformed, pages };
+  }
+
   async getDrop(slug: string): Promise<unknown> {
     const { json } = await this.call(`/api/v2/drops/${encodeURIComponent(slug)}`);
     return json;
@@ -351,15 +407,4 @@ export class OpenSeaClient {
       expiresAt: expiresAt !== undefined && expiresAt !== null ? new Date(expiresAt) : null,
     };
   }
-}
-
-function matchesChain(rowChain: string, targetSlug: string): boolean {
-  const normalized = rowChain.toLowerCase();
-  const target = targetSlug.toLowerCase();
-  return (
-    normalized === target ||
-    normalized === "4663" ||
-    normalized.replace(/[-_]/g, "") === target.replace(/[-_]/g, "") ||
-    normalized.includes(target)
-  );
 }
