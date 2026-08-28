@@ -46,7 +46,11 @@ export interface EligibilitySummary {
  */
 export async function runEligibilityPass(
   ctx: WorkerContext,
-  limit = 15,
+  // 40/pass on a Developer-portal key (one request per wallet×drop pair):
+  // sweeps ~180 live/next drops × 2 wallets in a few minutes instead of
+  // half an hour. The RateLimited branch below still stops a pass early
+  // and backs off if the quota is ever hit.
+  limit = 40,
 ): Promise<EligibilitySummary> {
   const { db, config, log } = ctx;
   const due = await dueEligibilityChecks(db, new Date(), limit);
@@ -216,8 +220,26 @@ export async function runEligibilityPass(
         provider: "opensea-eligibility",
         category: errorCode,
       });
-      if (errorCode === "RateLimited") {
-        // A 429 is transient quota exhaustion, NOT a real verdict error —
+      if (errorCode === "NotFound") {
+        // OpenSea has no eligibility surface for this drop (404) — that's
+        // "not applicable", not an error: leave it UNKNOWN and don't hammer
+        // it again for hours.
+        for (const check of checks) {
+          await upsertEligibilityCheck(db, {
+            walletId: check.walletId,
+            projectId: check.projectId,
+            stageId: check.stageId,
+            status: "UNKNOWN",
+            errorCode,
+            checkedAt: new Date(),
+            nextDueAt: addMs(new Date(), 6 * 60 * 60 * 1000),
+          });
+        }
+        continue;
+      }
+      if (errorCode === "RateLimited" || errorCode === "AuthRequired") {
+        // A 429 (quota) or 401 (key rotating / missing) is transient provider
+        // trouble, NOT a real verdict error —
         // never overwrite a resolved chip (or leave a scary "ERROR") because
         // the free-tier quota ran out mid-cycle. Preserve any real verdict,
         // demote unresolved ones to AUTH_REQUIRED (retryable "AUTH NEEDED"),

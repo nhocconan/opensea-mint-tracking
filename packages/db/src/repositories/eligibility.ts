@@ -33,7 +33,10 @@ export async function markAuthRequiredChecksDue(db: Db): Promise<number> {
     .where(
       or(
         eq(eligibilityChecks.status, "AUTH_REQUIRED"),
-        and(eq(eligibilityChecks.status, "ERROR"), eq(eligibilityChecks.errorCode, "RateLimited")),
+        and(
+          eq(eligibilityChecks.status, "ERROR"),
+          inArray(eligibilityChecks.errorCode, ["RateLimited", "AuthRequired"]),
+        ),
       ),
     )
     .returning({ id: eligibilityChecks.walletId });
