@@ -57,7 +57,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { WorkerContext } from "../context.ts";
 import { buildOpenSeaMintTx } from "../mint-tx.ts";
 import { CACHE_TTL_MS } from "./pre-build.ts";
-import { resolveBestRpcUrl } from "./rpc-health.ts";
+import { resolveBestRpcUrl, resolveBroadcastRpcUrls } from "./rpc-health.ts";
 
 export interface MintExecutionSummary {
   readonly expired: number;
@@ -682,7 +682,18 @@ async function runManagedFire(
     .limit(1);
   if (fresh?.presignedRawTx) {
     try {
-      const broadcast = await broadcastRawTransaction(rpcUrl, fresh.presignedRawTx);
+      // Race-broadcast: fire the identical raw tx at every healthy RPC at
+      // once; first acceptance wins, the rest are harmless duplicates.
+      const urls = await resolveBroadcastRpcUrls(db, ctx.config.ROBINHOOD_CHAIN_ID, rpcUrl);
+      const rawTx = fresh.presignedRawTx;
+      const broadcast = await Promise.any(
+        (urls.length > 0 ? urls : [rpcUrl]).map((url) => broadcastRawTransaction(url, rawTx)),
+      ).catch((aggregate: unknown) => {
+        // Promise.any rejects with an AggregateError; surface the first
+        // real reason so stale-nonce detection below still works.
+        const first = aggregate instanceof AggregateError ? aggregate.errors[0] : aggregate;
+        throw first instanceof Error ? first : new Error(String(first));
+      });
       await record("broadcast", { txHash: broadcast.txHash });
       await clearPresignedTx(db, plan.id);
       await markMintPlanExecuted(db, plan.id);

@@ -73,6 +73,34 @@ export async function runRpcHealthCheck(ctx: WorkerContext): Promise<RpcHealthSu
  * install, nothing configured yet) — never a hard failure just because no
  * admin has added a custom endpoint.
  */
+/**
+ * Every non-down endpoint for the chain (ranked best-first) plus the env
+ * fallback, deduped, capped — for RACE BROADCAST of a pre-signed mint tx
+ * (ADR 0009): the same raw tx is sent to all of them at once and the first
+ * acceptance wins. Duplicates are harmless (same tx hash; a FIFO sequencer
+ * dedupes), and it removes any single RPC's queueing/latency from the
+ * critical path — the contested-mint edge a premium endpoint buys.
+ */
+export async function resolveBroadcastRpcUrls(
+  db: Db,
+  chainId: number,
+  fallback: string | undefined,
+  max = 4,
+): Promise<string[]> {
+  const endpoints = await listRpcEndpoints(db, chainId);
+  const ranked = rankRpcEndpoints(endpoints, chainId).filter((e) => e.healthStatus !== "down");
+  const urls: string[] = [];
+  for (const e of ranked) {
+    if (!urls.includes(e.httpUrl)) {
+      urls.push(e.httpUrl);
+    }
+  }
+  if (fallback !== undefined && fallback !== "" && !urls.includes(fallback)) {
+    urls.push(fallback);
+  }
+  return urls.slice(0, max);
+}
+
 export async function resolveBestRpcUrl(
   db: Db,
   chainId: number,

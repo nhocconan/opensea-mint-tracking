@@ -50,15 +50,26 @@ export async function runEligibilityPass(
   // sweeps ~180 live/next drops × 2 wallets in a few minutes instead of
   // half an hour. The RateLimited branch below still stops a pass early
   // and backs off if the quota is ever hit.
-  limit = 40,
+  limit?: number,
 ): Promise<EligibilitySummary> {
   const { db, config, log } = ctx;
-  const due = await dueEligibilityChecks(db, new Date(), limit);
+  // Resolve keys FIRST so the per-pass intensity scales with how many
+  // Developer keys the operator has saved: each key is paced to
+  // OPENSEA_PER_MINUTE_LIMIT independently, so N keys ≈ N× budget. One
+  // request per wallet×drop pair; leave ~half of each key's minute for the
+  // other loops (discovery, detail refresh, pre-build).
+  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+  const perPass =
+    limit ??
+    Math.min(
+      Math.max(1, key.apiKeys.length) * Math.floor(config.OPENSEA_PER_MINUTE_LIMIT / 2),
+      200,
+    );
+  const due = await dueEligibilityChecks(db, new Date(), perPass);
   if (due.length === 0) {
     return { checked: 0, eligible: 0, authMissing: false };
   }
 
-  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
   const clientFactory = (): OpenSeaClient =>
     new OpenSeaClient({
       apiKey: key.apiKey,
