@@ -24,7 +24,7 @@ import { isAppError } from "@hoodmint/core";
 import { finishScanRun, insertSignal, projectsForSentimentScan, startScanRun } from "@hoodmint/db";
 import { XaiClient } from "@hoodmint/providers";
 import type { WorkerContext } from "../context.ts";
-import { resolveXaiToken, type XaiTokenSource } from "../credentials.ts";
+import { markXaiTokenUnhealthy, resolveXaiToken, type XaiTokenSource } from "../credentials.ts";
 
 export interface SentimentScanSummary {
   readonly enabled: boolean;
@@ -139,13 +139,26 @@ export async function runSentimentScan(ctx: WorkerContext): Promise<SentimentSca
       signalsWritten += 1;
     } catch (error) {
       failed += 1;
+      const errorCode = isAppError(error) ? error.category : "unknown";
       log.warn(
         {
           projectId: project.id,
-          errorCode: isAppError(error) ? error.category : "unknown",
+          errorCode,
+          detail: error instanceof Error ? error.message.slice(0, 160) : undefined,
         },
         "sentiment scan failed for project (non-fatal)",
       );
+      if (errorCode === "AuthRequired") {
+        // The token authenticates but api.x.ai refuses the request (seen
+        // live: 403 personal-team-blocked:spending-limit — no API credits /
+        // Grok entitlement). Every remaining project would fail the same
+        // way this pass: record the reason on the credential so Admin →
+        // Signals shows it, and stop instead of burning 20 failures.
+        if (resolved.source === "subscription_oauth") {
+          await markXaiTokenUnhealthy(tokenDeps, "api_refused_spending_limit_or_no_entitlement");
+        }
+        break;
+      }
     }
   }
 

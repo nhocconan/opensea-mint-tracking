@@ -320,6 +320,20 @@ async function resolveXaiSubscriptionToken(deps: XaiResolveDeps): Promise<string
   }
 }
 
+/**
+ * Mark the subscription token unhealthy from OUTSIDE the refresh path — e.g.
+ * api.x.ai answering 403 "personal-team-blocked:spending-limit" (account has
+ * no API credits / Grok subscription entitlement) on an otherwise valid,
+ * unexpired token. Surfaces the real reason in Admin → Signals instead of
+ * silent per-project failures.
+ */
+export async function markXaiTokenUnhealthy(deps: XaiResolveDeps, code: string): Promise<void> {
+  const credential = await findCredentialByType(deps.db, "xai_user_token");
+  if (credential !== undefined) {
+    await markXaiCredentialUnhealthy(deps, credential.id, code);
+  }
+}
+
 /** Non-secret health marker on the credential row (mirrors provider health). */
 async function markXaiCredentialUnhealthy(
   deps: XaiResolveDeps,

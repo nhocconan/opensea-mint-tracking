@@ -275,6 +275,9 @@ export async function dueEligibilityChecks(db: Db, now: Date, limit: number): Pr
       and(
         eq(wallets.enabled, true),
         lte(eligibilityChecks.nextDueAt, now),
+        // Nothing to learn about a drop that's over — keep the bounded
+        // per-pass window for live/upcoming checks.
+        sql`${projects.lifecycleStatus} not in ('ENDED', 'SOLD_OUT')`,
         or(isNotNull(eligibilityChecks.nextDueAt), sql`true`),
       ),
     )

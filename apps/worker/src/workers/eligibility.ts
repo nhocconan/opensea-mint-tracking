@@ -213,6 +213,26 @@ export async function runEligibilityPass(
           });
         }
       }
+      // Starvation guard (found live 2026-08-28): a due row whose stage
+      // OpenSea did NOT return (stale provider_stage_id, "unknown"-type
+      // stage, ended stage) was never rewritten, so it stayed due forever
+      // and — with enough of them — filled every pass's window so newer
+      // checks never ran. Park such rows: UNKNOWN, retry in 6h.
+      const returned = new Set(parsed.stages.map((s) => s.stage_uuid));
+      for (const check of checks) {
+        const row = stageRows.find((s) => s.id === check.stageId);
+        if (row !== undefined && !returned.has(row.providerStageId)) {
+          await upsertEligibilityCheck(db, {
+            walletId: check.walletId,
+            projectId: check.projectId,
+            stageId: check.stageId,
+            status: "UNKNOWN",
+            errorCode: "stage_not_returned",
+            checkedAt: new Date(),
+            nextDueAt: addMs(new Date(), 6 * 60 * 60 * 1000),
+          });
+        }
+      }
       await publishEvent(db, {
         type: "eligibility.updated",
         projectId: first.projectId,
@@ -338,12 +358,18 @@ export async function ensureEligibilityRows(ctx: WorkerContext): Promise<number>
       continue;
     }
     const stages = await db.select().from(dropStages).where(eq(dropStages.projectId, project.id));
-    const hasRestricted = stages.some((s) => s.type !== "public");
+    // Only stages with a KNOWN restricted type get a check row. "unknown"
+    // stages (non-SeaDrop schedules from collection discovery) are never
+    // returned by OpenSea's eligibility endpoint — creating rows for them
+    // just manufactures un-resolvable checks (197 of 199 "ERROR" rows on
+    // 2026-08-28 were exactly this).
+    const isCheckable = (s: { type: string }) => s.type !== "public" && s.type !== "unknown";
+    const hasRestricted = stages.some(isCheckable);
     if (!hasRestricted) {
       continue;
     }
     for (const wallet of walletRows) {
-      for (const stage of stages.filter((s) => s.type !== "public")) {
+      for (const stage of stages.filter(isCheckable)) {
         const existing = await db
           .select({ id: eligibilityChecks.id })
           .from(eligibilityChecks)
