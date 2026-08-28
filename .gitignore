@@ -26,3 +26,5 @@ test-results/
 .DS_Store
 *.log
 .gstack/
+.env.bak*
+.env.*.bak

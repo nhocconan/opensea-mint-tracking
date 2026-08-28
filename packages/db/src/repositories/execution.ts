@@ -21,6 +21,7 @@ import {
   executionAttempts,
   type MintPlan,
   mintPlans,
+  projects as projectsTable,
   type Signer,
   signers,
   wallets,
@@ -337,6 +338,50 @@ export async function listMintPlansForProject(
     .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
     .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
     .where(eq(mintPlans.projectId, projectId))
+    .orderBy(desc(mintPlans.createdAt))
+    .limit(limit);
+}
+
+export interface MintPlanHistoryRow extends MintPlanBoardRow {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectSlug: string | null;
+  readonly updatedAt: Date | string;
+}
+
+/**
+ * Every mint plan across all collections, newest first — the Special Mints
+ * history board (operator ask 2026-08-28: "keep the history so I know what
+ * succeeded and what failed"). Plans are never deleted once armed, so this
+ * is the durable record; pair with `latestAttemptPerPlan` for the outcome.
+ */
+export async function listMintPlanHistory(db: Db, limit = 200): Promise<MintPlanHistoryRow[]> {
+  return db
+    .select({
+      id: mintPlans.id,
+      projectId: mintPlans.projectId,
+      projectName: projectsTable.name,
+      projectSlug: projectsTable.slug,
+      walletId: wallets.id,
+      walletAddress: wallets.address,
+      walletLabel: wallets.label,
+      hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
+      quantity: mintPlans.quantity,
+      status: mintPlans.status,
+      stageId: mintPlans.stageId,
+      stageLabel: dropStages.label,
+      fireAt: mintPlans.fireAt,
+      stageStartsAt: dropStages.startsAt,
+      armedUntil: mintPlans.armedUntil,
+      presigned: sql<boolean>`${mintPlans.presignedRawTx} is not null`,
+      perPlanCeilingWei: mintPlans.perPlanCeilingWei,
+      createdAt: mintPlans.createdAt,
+      updatedAt: mintPlans.updatedAt,
+    })
+    .from(mintPlans)
+    .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
+    .innerJoin(projectsTable, eq(mintPlans.projectId, projectsTable.id))
+    .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
     .orderBy(desc(mintPlans.createdAt))
     .limit(limit);
 }
