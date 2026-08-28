@@ -1,6 +1,6 @@
 "use server";
 
-import { isAppError } from "@hoodmint/core";
+import { AUTO_MINT_POLICY_SETTING_KEY, isAppError, parseAutoMintPolicy } from "@hoodmint/core";
 import {
   activateSigner,
   alertChannels,
@@ -630,6 +630,44 @@ export async function recheckEligibilityAction(): Promise<ActionState> {
       count === 0
         ? "No pending 'AUTH NEEDED' verdicts to recheck."
         : `Re-checking ${count} verdict${count === 1 ? "" : "s"} now — reload feeds in ~1–2 min.`,
+  };
+}
+
+/**
+ * Save the auto-mint policy (owner ask 2026-08-28). Enabling autonomous
+ * minting on managed wallets is spend-capable → passkey step-up, like arming.
+ * The saving admin becomes the policy owner: the worker arms plans on their
+ * behalf (armedBy + audit actor).
+ */
+export async function saveAutoMintPolicyAction(input: unknown): Promise<ActionState> {
+  const { db } = container();
+  let actor: string;
+  try {
+    actor = (await requireFreshStepUp("execution:configure")).id;
+  } catch (error) {
+    return {
+      ok: false,
+      message: isAppError(error) ? error.message : "Step-up re-authentication required.",
+    };
+  }
+  const policy = parseAutoMintPolicy({ ...(input as Record<string, unknown>), ownerUserId: actor });
+  if (policy.enabled && policy.walletIds.length === 0) {
+    return { ok: false, message: "Select at least one managed wallet to enable the policy." };
+  }
+  await setSetting(db, AUTO_MINT_POLICY_SETTING_KEY, policy);
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "automint.policy_saved",
+    targetType: "system",
+    result: "success",
+    metadata: { ...policy },
+  });
+  revalidatePath("/admin/execution");
+  return {
+    ok: true,
+    message: policy.enabled
+      ? `Auto-mint ENABLED on ${policy.walletIds.length} wallet(s) — planner runs every 60s.`
+      : "Auto-mint policy saved (disabled).",
   };
 }
 

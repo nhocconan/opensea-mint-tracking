@@ -11,15 +11,17 @@
  * - A tiny HTTP server exposes /health/live for compose health checks.
  */
 import http from "node:http";
-import { dbClient } from "@hoodmint/db";
+import { dbClient, recomputeLifecycles } from "@hoodmint/db";
 import { dispatchDueAlerts } from "@hoodmint/notifications";
 import { metrics } from "@hoodmint/observability";
 import { QUEUE_NAMES } from "@hoodmint/queues";
 import { Worker } from "bullmq";
 import { context } from "./context.ts";
+import { runAutoMintPlanner } from "./workers/auto-mint.ts";
 import { runChainSync } from "./workers/chain.ts";
 import { runClockCalibration } from "./workers/clock-calibration.ts";
 import {
+  refreshLiveNextDetails,
   repairUnknownStages,
   runCollectionDiscovery,
   runDetailRefresh,
@@ -123,6 +125,16 @@ async function main(): Promise<void> {
   // Re-type "unknown" stages (unmapped OpenSea stage_type) so they become
   // eligibility-checkable; boot + every 6h. See repairUnknownStages.
   every(6 * 60 * 60 * 1000, "unknown-stage-repair", () => repairUnknownStages(ctx));
+  // Auto-mint planner (free/public drops on listed managed wallets, quality +
+  // scam gated). Creates + arms plans only; firing is the hot loop's job.
+  every(60_000, "auto-mint-planner", () => runAutoMintPlanner(ctx));
+  // DB-only lifecycle recompute so LIVE/NEXT/ENDED follow the clock between
+  // OpenSea re-fetches (a drop whose last stage ended must leave /live).
+  every(60_000, "lifecycle-recompute", () => recomputeLifecycles(db));
+  // Delisting/freshness re-check: re-fetch every LIVE/NEXT drop's detail every
+  // 15 min so a drop OpenSea hid (drops endpoint → 404) leaves the feeds and
+  // renamed/rescheduled drops update. Bounded + paced by the OpenSea limiter.
+  every(15 * 60 * 1000, "live-next-refresh", () => refreshLiveNextDetails(ctx));
   every(60_000, "eligibility", async () => {
     await ensureEligibilityRows(ctx);
     await runEligibilityPass(ctx);

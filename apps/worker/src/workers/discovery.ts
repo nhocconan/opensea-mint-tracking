@@ -10,7 +10,10 @@ import {
   ensureProvider,
   finishScanRun,
   getSetting,
+  liveNextSlugs,
+  markProjectDelisted,
   markProviderHealth,
+  projectBySlugWithStageCount,
   publishEvent,
   setSetting,
   startScanRun,
@@ -340,6 +343,23 @@ export async function repairUnknownStages(ctx: WorkerContext, limit = 150): Prom
   return slugs.length;
 }
 
+/**
+ * Periodic freshness/delisting re-check for every LIVE/NEXT drop: enqueue a
+ * detail refresh so renamed/rescheduled drops update and hidden ones (drops
+ * endpoint 404) get delisted by runDetailRefresh. Deterministic job ids
+ * dedupe; the OpenSea limiter paces the resulting calls.
+ */
+export async function refreshLiveNextDetails(ctx: WorkerContext, limit = 300): Promise<number> {
+  const { db, config } = ctx;
+  const slugs = await liveNextSlugs(db, limit);
+  for (const slug of slugs) {
+    await enqueueDetail(config.VALKEY_URL, { slug, freshnessBucket: "warm" }).catch(
+      () => undefined,
+    );
+  }
+  return slugs.length;
+}
+
 export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promise<void> {
   const { db, config, log } = ctx;
   const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
@@ -357,6 +377,16 @@ export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promis
     // failure: leave the collection as a discovered project with no stages
     // rather than crashing the details pass (which would retry the job).
     if (isAppError(error) && error.category === "NotFound") {
+      // Two cases: a collection that was never a drop (fine, leave it), or a
+      // drop OpenSea has since HIDDEN — its collection still 200s but
+      // /drops/{slug} now 404s (found live 2026-08-28: sherwood-rh,
+      // pephoodies). If we hold a schedule for it, it was a drop → delist.
+      const known = await projectBySlugWithStageCount(db, slug);
+      if (known !== undefined && known.stages > 0 && known.lifecycle !== "ENDED") {
+        await markProjectDelisted(db, known.id);
+        log.info({ slug }, "detail refresh: drop no longer on OpenSea (404) — marked delisted");
+        return;
+      }
       log.debug({ slug }, "detail refresh: slug is not a drop (404), leaving as collection");
       return;
     }

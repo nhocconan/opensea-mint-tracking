@@ -1,4 +1,5 @@
 export * from "./address.ts";
+export * from "./auto-mint.ts";
 export * from "./brands.ts";
 export * from "./chains.ts";
 export * from "./clock-offset.ts";

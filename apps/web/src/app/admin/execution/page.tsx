@@ -1,4 +1,6 @@
+import { AUTO_MINT_POLICY_SETTING_KEY, parseAutoMintPolicy } from "@hoodmint/core";
 import {
+  getSetting,
   listExecutionAttempts,
   listMintPlans,
   listPendingSignatures,
@@ -10,6 +12,7 @@ import { classifyLatency, getGasSnapshot } from "@hoodmint/providers";
 import { container } from "@/lib/container.ts";
 import { formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
 import { requirePage } from "@/lib/session.ts";
+import { AutoMintPolicyPanel } from "./auto-mint-policy.tsx";
 import { BrowserSignPrompt } from "./browser-sign-prompt.tsx";
 import { ExecutorOnboarding } from "./executor-onboarding.tsx";
 import { ArmControls, DeleteDraftPlanControl, DisarmControl } from "./mint-plan-controls.tsx";
@@ -34,7 +37,7 @@ export const dynamic = "force-dynamic";
 export default async function AdminExecutionPage() {
   await requirePage("execution:configure");
   const { db, config } = container();
-  const [rpcEndpoints, signers, mintPlans, attempts, pendingSignatures, wallets] =
+  const [rpcEndpoints, signers, mintPlans, attempts, pendingSignatures, wallets, rawPolicy] =
     await Promise.all([
       listRpcEndpoints(db).catch(() => []),
       listSigners(db).catch(() => []),
@@ -42,7 +45,9 @@ export default async function AdminExecutionPage() {
       listExecutionAttempts(db, 25).catch(() => []),
       listPendingSignatures(db).catch(() => []),
       listWallets(db).catch(() => []),
+      getSetting<unknown>(db, AUTO_MINT_POLICY_SETTING_KEY).catch(() => undefined),
     ]);
+  const autoMintPolicy = parseAutoMintPolicy(rawPolicy);
 
   // Gas/RPC health widget (feature backlog): best-effort, bounded, never
   // blocks the page on a dead endpoint. Capped at 10 so a large endpoint
@@ -253,6 +258,7 @@ export default async function AdminExecutionPage() {
 
       <ExecutorOnboarding defaultChainId={config.ROBINHOOD_CHAIN_ID} />
 
+      <AutoMintPolicyPanel policy={autoMintPolicy} wallets={wallets} />
       <MintPlanForm
         wallets={wallets}
         signers={signers

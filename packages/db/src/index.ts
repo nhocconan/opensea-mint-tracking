@@ -1,6 +1,8 @@
 export { sql } from "drizzle-orm";
 export * from "./client.ts";
+export * from "./repositories/auto-mint.ts";
 export * from "./repositories/credentials.ts";
+export * from "./repositories/delist.ts";
 export * from "./repositories/eligibility.ts";
 export * from "./repositories/execution.ts";
 export * from "./repositories/key-hygiene.ts";

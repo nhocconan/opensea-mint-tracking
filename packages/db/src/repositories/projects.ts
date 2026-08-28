@@ -16,6 +16,7 @@ import {
 import type { SQL } from "drizzle-orm";
 import { and, asc, desc, eq, gt, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
 import type { Db, Tx } from "../client.ts";
+import { unwrapRows } from "../client.ts";
 import {
   dropStages,
   evidence as evidenceTable,
@@ -456,6 +457,14 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
   switch (filters.view) {
     case "live":
       conditions.push(eq(projects.lifecycleStatus, "LIVE"));
+      // Belt-and-braces: a LIVE row must actually have an open stage right
+      // now (the minute-cadence lifecycle recompute usually keeps this
+      // true, but never show an ended drop under "Live").
+      conditions.push(
+        sql`exists (select 1 from drop_stages s where s.project_id = ${projects.id}
+              and not s.paused and s.starts_at <= now()
+              and (s.ends_at is null or s.ends_at > now()))`,
+      );
       break;
     case "next":
       conditions.push(eq(projects.lifecycleStatus, "NEXT"));
@@ -668,6 +677,50 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
 }
 
 /* ── Detail ───────────────────────────────────────────────────────────────── */
+
+/**
+ * Time-based lifecycle recompute, DB-only, no API call (owner report
+ * 2026-08-28: /live showed drops whose stage had already ended). Lifecycle
+ * is otherwise only recomputed when a project is re-upserted, so a LIVE
+ * drop whose last stage ends stays LIVE until OpenSea is re-fetched. Run
+ * every minute: LIVE→ENDED when nothing is open and nothing is upcoming,
+ * LIVE→NEXT when only a future stage remains, NEXT→LIVE when a stage opened.
+ * Returns rows changed.
+ */
+export async function recomputeLifecycles(db: Db): Promise<number> {
+  const rows = await db.execute(sql`
+    with st as (
+      select p.id,
+        exists (select 1 from drop_stages s where s.project_id = p.id and not s.paused
+                  and s.starts_at <= now() and (s.ends_at is null or s.ends_at > now())) as live,
+        (select min(s.starts_at) from drop_stages s where s.project_id = p.id and not s.paused
+                  and s.starts_at > now()) as next_start,
+        exists (select 1 from drop_stages s where s.project_id = p.id) as has_stages
+      from projects p
+      where p.lifecycle_status in ('LIVE', 'NEXT')
+    )
+    update projects p
+       set lifecycle_status = case
+             when st.live then 'LIVE'
+             when st.next_start is not null then 'NEXT'
+             when st.has_stages then 'ENDED'
+             else p.lifecycle_status end,
+           next_stage_start = st.next_start,
+           updated_at = now()
+      from st
+     where st.id = p.id
+       and (
+         p.lifecycle_status <> case
+             when st.live then 'LIVE'
+             when st.next_start is not null then 'NEXT'
+             when st.has_stages then 'ENDED'
+             else p.lifecycle_status end
+         or p.next_stage_start is distinct from st.next_start
+       )
+    returning p.id
+  `);
+  return unwrapRows<{ id: string }>(rows).length;
+}
 
 export interface ProjectDetail {
   readonly project: typeof projects.$inferSelect;
