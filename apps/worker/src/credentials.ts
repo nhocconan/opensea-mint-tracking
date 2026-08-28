@@ -15,6 +15,7 @@ import {
   createCredential,
   findCredentialByType,
   getCredentialSecret,
+  revokeCredential,
   updateCredentialMetadata,
   updateCredentialSecret,
 } from "@hoodmint/db";
@@ -32,6 +33,30 @@ export interface ResolvedKey {
   readonly apiKey: string;
   readonly instant: boolean;
   readonly expiresAt: Date | null;
+}
+
+/**
+ * OpenSea answered 401 with the key we hold. A free instant key can be
+ * invalidated server-side well before its nominal 7-day expiry (found live
+ * 2026-08-28: every discovery call 401'd for 30+ min while `expires_at` still
+ * said next week, so the <24h rotation never triggered and the provider sat
+ * "down"). Drop the dead instant credential so the next `resolveOpenSeaKey`
+ * bootstraps a fresh one. A Developer-portal key is never touched — a 401
+ * there is the operator's to fix in Admin → OpenSea.
+ */
+export async function invalidateInstantKeyOnAuthFailure(
+  db: Db,
+  resolved: Pick<ResolvedKey, "instant">,
+): Promise<boolean> {
+  if (!resolved.instant) {
+    return false;
+  }
+  const instant = await findCredentialByType(db, "opensea_instant_key");
+  if (instant === undefined) {
+    return false;
+  }
+  await revokeCredential(db, instant.id);
+  return true;
 }
 
 export async function resolveOpenSeaKey(

@@ -25,7 +25,7 @@ import {
   scheduledDiscoveryJobs,
 } from "@hoodmint/queues";
 import type { WorkerContext } from "../context.ts";
-import { resolveOpenSeaKey } from "../credentials.ts";
+import { invalidateInstantKeyOnAuthFailure, resolveOpenSeaKey } from "../credentials.ts";
 
 /**
  * Discovery scheduler (PRD §8.4): enqueues one deterministic-id discovery
@@ -164,6 +164,20 @@ export async function runDiscoveryCycle(
     });
     metrics().inc("hoodmint_provider_errors_total", { provider: "opensea", category: errorCode });
     log.error({ err: error, feedType, errCode: errorCode }, "discovery cycle failed");
+    if (errorCode === "AuthRequired") {
+      // A dead free instant key never rotates on its own (its expires_at is
+      // still in the future) — drop it so the next cycle bootstraps a fresh one.
+      const rotated = await invalidateInstantKeyOnAuthFailure(
+        db,
+        await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY),
+      ).catch(() => false);
+      if (rotated) {
+        log.warn(
+          { feedType },
+          "OpenSea instant key rejected (401) — revoked; re-provisioning next cycle",
+        );
+      }
+    }
     return { feedType, found: 0, created: 0, malformed: 0, ok: false, errorCode };
   }
 }
@@ -275,6 +289,12 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
     });
     metrics().inc("hoodmint_provider_errors_total", { provider: "opensea", category: errorCode });
     log.error({ err: error, feedType, errCode: errorCode }, "collection discovery failed");
+    if (errorCode === "AuthRequired") {
+      await invalidateInstantKeyOnAuthFailure(
+        db,
+        await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY),
+      ).catch(() => false);
+    }
     return { feedType, found: 0, created: 0, malformed: 0, ok: false, errorCode };
   }
 }
