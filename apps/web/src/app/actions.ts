@@ -2077,6 +2077,8 @@ export async function disarmMintPlanAction(id: string): Promise<ActionState> {
     result: "success",
   });
   revalidatePath("/admin/execution");
+  // Admin → Special mints shows the same plans on its own status board.
+  revalidatePath("/admin/special-mints");
   return { ok: true, message: "Disarmed." };
 }
 
@@ -2110,6 +2112,7 @@ export async function deleteMintPlanAction(id: string): Promise<ActionState> {
     result: "success",
   });
   revalidatePath("/admin/execution");
+  revalidatePath("/admin/special-mints");
   return { ok: true, message: "Draft mint plan deleted." };
 }
 
@@ -2309,9 +2312,7 @@ export async function createSpecialMintAction(input: {
     };
   }
   const managed = new Set(
-    (await listWallets(db, { enabledOnly: true }))
-      .filter((w) => w.hasSigningKey)
-      .map((w) => w.id),
+    (await listWallets(db, { enabledOnly: true })).filter((w) => w.hasSigningKey).map((w) => w.id),
   );
   const unusable = selections.filter((s) => !managed.has(s.walletId));
   if (unusable.length > 0) {
@@ -2353,7 +2354,9 @@ export async function createSpecialMintAction(input: {
   return {
     ok: true,
     message: `${createdIds.length} draft plan${createdIds.length === 1 ? "" : "s"} created${
-      fireAt === undefined ? " (fire time auto-detected from the phase)" : " with a manual fire time"
+      fireAt === undefined
+        ? " (fire time auto-detected from the phase)"
+        : " with a manual fire time"
     }. Not armed yet.`,
   };
 }

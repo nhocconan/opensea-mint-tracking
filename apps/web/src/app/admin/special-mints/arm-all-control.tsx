@@ -27,9 +27,7 @@ export function ArmAllControl({
 
   return (
     <section className="rounded-md border border-magenta/40 bg-magenta/5 p-4">
-      <h2 className="font-mono text-[11px] tracking-widest text-magenta uppercase">
-        5 · Arm all
-      </h2>
+      <h2 className="font-mono text-[11px] tracking-widest text-magenta uppercase">5 · Arm all</h2>
       <p className="mt-1 text-[11px] text-ink-faint">
         Arms {plans.length} draft plan(s) after a single passkey verification. The window is derived
         server-side from each plan's own phase end (capped 24h) or manual fire time + 4h. Armed

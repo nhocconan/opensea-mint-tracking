@@ -9,6 +9,7 @@ import {
   listWallets,
 } from "@hoodmint/db";
 import { classifyLatency, getGasSnapshot } from "@hoodmint/providers";
+import Link from "next/link";
 import { container } from "@/lib/container.ts";
 import { formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
 import { requirePage } from "@/lib/session.ts";
@@ -89,6 +90,14 @@ export default async function AdminExecutionPage() {
           and remains refused. No hardware wallet is ever an automated signer in any scheme — a
           Ledger only ever signs the onboarding/allowlist steps below, individually, never a live
           mint. See <code className="font-mono">docs/execution-architecture.md</code>.
+        </p>
+        <p className="mt-2 text-xs text-ink-muted">
+          Sniping one specific drop at one specific phase?{" "}
+          <Link href="/admin/special-mints" className="text-acid underline">
+            Admin → Special mints
+          </Link>{" "}
+          is the dedicated flow: target by URL/slug/contract, per-wallet quantities, a GMT+7 fire
+          time you can override, and one passkey step-up that arms the whole batch.
         </p>
       </section>
 

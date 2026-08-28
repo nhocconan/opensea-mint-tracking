@@ -12,6 +12,7 @@ export const ADMIN_NAV = [
   ["/admin/wallets", "Wallets"],
   ["/admin/alerts", "Alerts"],
   ["/admin/execution", "Execution"],
+  ["/admin/special-mints", "Special mints"],
   ["/admin/users", "Users"],
   ["/admin/account", "Account"],
   ["/admin/audit", "Audit log"],

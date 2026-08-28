@@ -108,7 +108,27 @@ export default function AdminGuidePage() {
         </p>
       </Step>
 
-      <Step n={6} title="Alerts, audit, system">
+      <Step n={6} title="Special mints — sniping one drop at its phase">
+        <p>
+          <Link href="/admin/special-mints" className="text-acid underline">
+            Admin → Special mints
+          </Link>{" "}
+          is the dedicated console for one target. Paste the OpenSea collection URL, its slug, or a{" "}
+          <code className="text-acid">0x…</code> contract address; pick the <strong>phase</strong>{" "}
+          (e.g. FCFS); select your managed wallets with a <strong>quantity each</strong>; then
+          confirm the fire time.
+        </p>
+        <p>
+          The fire time is auto-detected from the phase, or you can override it — typed and
+          displayed in <strong>GMT+7</strong> (Asia/Ho_Chi_Minh) next to the stored UTC value. An
+          override wins over whatever OpenSea published, and a manual time works even for a mint
+          with no published phase. One <strong>passkey verification arms every plan</strong>, each
+          with a window derived from its own phase end (max 24h) or fire time + 4h; the status board
+          below shows per-wallet status, pre-sign state, countdown and last attempt.
+        </p>
+      </Step>
+
+      <Step n={7} title="Alerts, audit, system">
         <p>
           <Link href="/admin/alerts" className="text-acid underline">
             Alerts

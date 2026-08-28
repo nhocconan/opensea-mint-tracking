@@ -30,9 +30,7 @@ export function TargetForm({ currentTarget }: { currentTarget: string }) {
 
   return (
     <section className="rounded-md border border-line bg-base-raised p-4">
-      <h2 className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
-        1 · Target
-      </h2>
+      <h2 className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">1 · Target</h2>
       <p className="mt-1 text-[11px] text-ink-faint">
         Paste an OpenSea collection URL, a collection slug, or a{" "}
         <code className="font-mono">0x…</code> contract address.

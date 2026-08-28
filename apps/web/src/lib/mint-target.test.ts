@@ -16,8 +16,9 @@ describe("parseMintTarget (URL / slug / contract)", () => {
   });
 
   it("tolerates a language prefix, trailing path, query and whitespace", () => {
-    expect(parseMintTarget("  https://opensea.io/en/collection/Stackman-Genesis/overview?a=1  ")
-      ).toEqual({ kind: "slug", slug: "stackman-genesis" });
+    expect(
+      parseMintTarget("  https://opensea.io/en/collection/Stackman-Genesis/overview?a=1  "),
+    ).toEqual({ kind: "slug", slug: "stackman-genesis" });
   });
 
   it("recognises a contract address used as the collection segment", () => {
@@ -39,7 +40,9 @@ describe("parseMintTarget (URL / slug / contract)", () => {
 
   it("falls back to the address in a non-collection OpenSea URL", () => {
     expect(
-      parseMintTarget("https://opensea.io/item/ethereum/0xc21159f412c294ca2c38f2a9ecaaccf9d93ec929/7"),
+      parseMintTarget(
+        "https://opensea.io/item/ethereum/0xc21159f412c294ca2c38f2a9ecaaccf9d93ec929/7",
+      ),
     ).toEqual({ kind: "contract", address: "0xc21159f412c294ca2c38f2a9ecaaccf9d93ec929" });
   });
 
