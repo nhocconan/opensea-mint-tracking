@@ -14,7 +14,10 @@ export function middleware(request: NextRequest): NextResponse {
     `default-src 'self'`,
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
     `style-src 'self' 'unsafe-inline'`,
-    `img-src 'self' data: blob: https://i.seadn.io https://*.opensea.io https://api.opensea.io`,
+    // OpenSea serves collection art from several seadn.io subdomains
+    // (i.seadn.io, i2c.seadn.io, raw.seadn.io, …) — a single-host allow blocked
+    // every thumbnail (found live 2026-08-28). Wildcard the seadn.io CDN.
+    `img-src 'self' data: blob: https://*.seadn.io https://*.opensea.io https://api.opensea.io`,
     `font-src 'self' data:`,
     `connect-src 'self'${isDev ? " ws: http://localhost:*" : ""}`,
     `frame-ancestors 'none'`,

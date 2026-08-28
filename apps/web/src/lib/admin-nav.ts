@@ -13,6 +13,7 @@ export const ADMIN_NAV = [
   ["/admin/alerts", "Alerts"],
   ["/admin/execution", "Execution"],
   ["/admin/users", "Users"],
+  ["/admin/account", "Account"],
   ["/admin/audit", "Audit log"],
   ["/admin/system", "System"],
 ] as const;

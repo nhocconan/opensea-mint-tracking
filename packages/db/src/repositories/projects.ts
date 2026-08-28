@@ -481,6 +481,14 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       break;
   }
 
+  // Exclude unenriched on-chain radar placeholders — contracts the radar saw
+  // minting but that carry no OpenSea metadata (no slug, name still "Unknown
+  // 0x…"). They otherwise flood /all and /latest with tens of thousands of
+  // imageless rows (found live 2026-08-28: 27k of 27k projects). They stay in
+  // the DB — velocity/aggregates still track them and a dedicated on-chain
+  // view can surface hot ones later — just not in the curated feeds.
+  conditions.push(sql`not (${projects.slug} is null and ${projects.name} like 'Unknown %')`);
+
   if (filters.status !== undefined) {
     conditions.push(eq(projects.lifecycleStatus, filters.status));
   }
