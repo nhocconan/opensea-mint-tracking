@@ -16,6 +16,7 @@
  */
 import { AppError, allowedRequests, parseRateLimitHeaders, type QuotaState } from "@hoodmint/core";
 import { type FetchLike, fetchJson } from "../http.ts";
+import { acquire, penalize, pickKey } from "./rate-limiter.ts";
 import type { ParsedEligibility } from "./schemas.ts";
 import {
   chainsResponseSchema,
@@ -55,6 +56,11 @@ export interface OpenSeaClientOptions {
   readonly maxPages?: number;
   readonly pageLimit?: number;
   readonly hourlyLimit?: number;
+  /** All Developer keys to load-balance across (each paced independently).
+   *  Falls back to `apiKey` alone. */
+  readonly apiKeys?: readonly string[];
+  /** Per-key requests/minute pacing (see rate-limiter.ts). */
+  readonly perMinuteLimit?: number;
   readonly reservePercent?: number;
 }
 
@@ -74,6 +80,8 @@ export interface ListCollectionsResult {
 export class OpenSeaClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string | undefined;
+  private readonly apiKeys: readonly string[];
+  private readonly perMinuteLimit: number | undefined;
   private readonly fetchImpl?: FetchLike | undefined;
   private readonly maxPages: number;
   private readonly pageLimit: number;
@@ -84,6 +92,13 @@ export class OpenSeaClient {
   constructor(options: OpenSeaClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? "https://api.opensea.io").replace(/\/$/, "");
     this.apiKey = options.apiKey;
+    this.apiKeys =
+      options.apiKeys !== undefined && options.apiKeys.length > 0
+        ? options.apiKeys
+        : options.apiKey !== undefined
+          ? [options.apiKey]
+          : [];
+    this.perMinuteLimit = options.perMinuteLimit;
     this.fetchImpl = options.fetchImpl;
     this.maxPages = options.maxPages ?? 5;
     this.pageLimit = Math.min(options.pageLimit ?? 50, 100);
@@ -133,7 +148,16 @@ export class OpenSeaClient {
   ): Promise<{ json: unknown; headers: Record<string, string> }> {
     this.assertQuota();
     const headers: Record<string, string> = {};
-    if (this.apiKey !== undefined) {
+    // Process-wide pacing: pick the Developer key with the most budget left
+    // and wait for a token before touching the network (rate-limiter.ts).
+    // Only when a per-minute limit is configured — tests and the keyless
+    // instant-key bootstrap stay unpaced.
+    let pacedKey: string | undefined;
+    if (this.apiKeys.length > 0 && this.perMinuteLimit !== undefined) {
+      pacedKey = pickKey(this.apiKeys, this.perMinuteLimit);
+      await acquire(pacedKey, this.perMinuteLimit);
+      headers["x-api-key"] = pacedKey;
+    } else if (this.apiKey !== undefined) {
       headers["x-api-key"] = this.apiKey;
     }
     if (init.authenticated !== undefined) {
@@ -145,9 +169,23 @@ export class OpenSeaClient {
       ...(init.method !== undefined ? { method: init.method } : {}),
       ...(init.body !== undefined ? { body: init.body } : {}),
     };
-    const result = await fetchJson(`${this.baseUrl}${path}`, options, this.etagCache);
-    this.updateQuota(result.headers);
-    return { json: result.json, headers: result.headers };
+    try {
+      const result = await fetchJson(`${this.baseUrl}${path}`, options, this.etagCache);
+      this.updateQuota(result.headers);
+      return { json: result.json, headers: result.headers };
+    } catch (error) {
+      // Upstream 429 despite pacing → drain that key's bucket for the
+      // advertised Retry-After so concurrent loops back off instead of piling on.
+      if (
+        pacedKey !== undefined &&
+        this.perMinuteLimit !== undefined &&
+        error instanceof AppError &&
+        error.category === "RateLimited"
+      ) {
+        penalize(pacedKey, error.retryAfterSeconds ?? 5, this.perMinuteLimit);
+      }
+      throw error;
+    }
   }
 
   /**

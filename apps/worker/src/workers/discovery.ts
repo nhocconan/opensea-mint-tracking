@@ -75,6 +75,8 @@ export async function runDiscoveryCycle(
     const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
     const client = new OpenSeaClient({
       apiKey: key.apiKey,
+      apiKeys: key.apiKeys,
+      perMinuteLimit: config.OPENSEA_PER_MINUTE_LIMIT,
       maxPages: config.OPENSEA_MAX_PAGES,
       hourlyLimit: config.OPENSEA_HOURLY_LIMIT,
       reservePercent: config.OPENSEA_RATE_RESERVE_PERCENT,
@@ -214,6 +216,8 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
     const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
     const client = new OpenSeaClient({
       apiKey: key.apiKey,
+      apiKeys: key.apiKeys,
+      perMinuteLimit: config.OPENSEA_PER_MINUTE_LIMIT,
       maxPages: config.COLLECTION_DISCOVERY_MAX_PAGES,
       hourlyLimit: config.OPENSEA_HOURLY_LIMIT,
       reservePercent: config.OPENSEA_RATE_RESERVE_PERCENT,
@@ -238,13 +242,16 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
       const upserted = await upsertProjectFromSource(db, draft);
       if (upserted.created) {
         created += 1;
+        // Detail refresh ONLY for newly discovered collections: it's what
+        // promotes the ones that are drops to a full schedule. Re-enqueuing
+        // all ~400 swept rows every pass was the single biggest source of
+        // OpenSea 429s (each detail job is a getDrop call). Existing drops
+        // are refreshed on the freshness-bucket cadence by the /drops
+        // discovery cycle instead.
+        await enqueueDetail(config.VALKEY_URL, { slug: row.slug, freshnessBucket: "hot" }).catch(
+          () => undefined,
+        );
       }
-      // Always enqueue a detail refresh: a collection carries no stages, so
-      // this is what promotes the ones that are drops to a full schedule.
-      // `runDetailRefresh` degrades gracefully when the slug is not a drop.
-      await enqueueDetail(config.VALKEY_URL, { slug: row.slug, freshnessBucket: "hot" }).catch(
-        () => undefined,
-      );
     }
 
     await finishScanRun(db, scanRunId, {
@@ -303,7 +310,11 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
 export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promise<void> {
   const { db, config, log } = ctx;
   const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
-  const client = new OpenSeaClient({ apiKey: key.apiKey });
+  const client = new OpenSeaClient({
+    apiKey: key.apiKey,
+    apiKeys: key.apiKeys,
+    perMinuteLimit: config.OPENSEA_PER_MINUTE_LIMIT,
+  });
   let payload: unknown;
   try {
     payload = await client.getDrop(slug);

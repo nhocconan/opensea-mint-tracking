@@ -14,6 +14,7 @@ import type { Db } from "@hoodmint/db";
 import {
   createCredential,
   findCredentialByType,
+  findCredentialsByType,
   getCredentialSecret,
   getSetting,
   revokeCredential,
@@ -34,7 +35,11 @@ import {
 const INSTANT_KEY_BACKOFF_SETTING = "opensea_instant_key_backoff_until";
 
 export interface ResolvedKey {
+  /** Primary key (first of `apiKeys`) — kept for single-key callers. */
   readonly apiKey: string;
+  /** Every usable key: all saved Developer keys, load-balanced by the
+   *  OpenSea client's per-key pacing (N keys ≈ N× the 120/min budget). */
+  readonly apiKeys: readonly string[];
   readonly instant: boolean;
   readonly expiresAt: Date | null;
 }
@@ -68,15 +73,27 @@ export async function resolveOpenSeaKey(
   masterKey: string,
   envKey?: string,
 ): Promise<ResolvedKey> {
-  const portal = await findCredentialByType(db, "opensea_api_key");
-  if (portal !== undefined) {
+  // Every saved Developer key, decrypted — the client spreads load across
+  // all of them. The operator can add more keys in Admin → OpenSea to scale
+  // the per-minute budget linearly.
+  const portals = await findCredentialsByType(db, "opensea_api_key");
+  const portalKeys: string[] = [];
+  for (const portal of portals) {
     const secret = await getCredentialSecret(db, portal.id, masterKey);
-    if (secret !== undefined) {
-      return { apiKey: secret, instant: false, expiresAt: portal.expiresAt };
+    if (secret !== undefined && secret.trim() !== "") {
+      portalKeys.push(secret);
     }
   }
-  if (envKey !== undefined && envKey !== "") {
-    return { apiKey: envKey, instant: false, expiresAt: null };
+  if (envKey !== undefined && envKey !== "" && !portalKeys.includes(envKey)) {
+    portalKeys.push(envKey);
+  }
+  if (portalKeys.length > 0) {
+    return {
+      apiKey: portalKeys[0] as string,
+      apiKeys: portalKeys,
+      instant: false,
+      expiresAt: portals[0]?.expiresAt ?? null,
+    };
   }
 
   const instant = await findCredentialByType(db, "opensea_instant_key");
@@ -87,7 +104,7 @@ export async function resolveOpenSeaKey(
       secret !== undefined &&
       (expiresAt === null || expiresAt.getTime() > Date.now() + 24 * 3600 * 1000)
     ) {
-      return { apiKey: secret, instant: true, expiresAt };
+      return { apiKey: secret, apiKeys: [secret], instant: true, expiresAt };
     }
   }
 
@@ -123,7 +140,7 @@ export async function resolveOpenSeaKey(
     masterKey,
     expiresAt,
   });
-  return { apiKey: created.apiKey, instant: true, expiresAt };
+  return { apiKey: created.apiKey, apiKeys: [created.apiKey], instant: true, expiresAt };
 }
 
 /** In-memory JWT cache keyed by PAT fingerprint. */

@@ -92,6 +92,11 @@ export const envSchema = z.object({
     .default(10)
     .refine((v) => v < 100, "reserve must leave room for traffic (< 100)"),
   OPENSEA_HOURLY_LIMIT: positiveInt.default(600),
+  /** Per-key requests/minute the process paces itself to. OpenSea self-serve
+   *  Developer keys allow ~120/min; 100 leaves headroom for retries and the
+   *  web app's occasional calls. Shared across every worker loop and
+   *  load-balanced across all saved Developer keys (N keys ≈ N×). */
+  OPENSEA_PER_MINUTE_LIMIT: positiveInt.default(100),
   OPENSEA_WALLET_PAT: z.string().trim().optional(),
 
   ALERT_STAGE_WINDOWS_MINUTES: z

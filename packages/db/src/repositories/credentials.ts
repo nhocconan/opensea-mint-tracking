@@ -166,6 +166,20 @@ export async function updateCredentialMetadata(
     .where(eq(credentials.id, id));
 }
 
+/** Every credential of a type, newest first — e.g. all saved OpenSea
+ *  Developer keys so the client can load-balance across them. */
+export async function findCredentialsByType(
+  db: Db,
+  type: CredentialType,
+): Promise<CredentialView[]> {
+  const rows = await db
+    .select()
+    .from(credentials)
+    .where(eq(credentials.type, type))
+    .orderBy(desc(credentials.createdAt));
+  return rows.map(toView);
+}
+
 export async function findCredentialByType(
   db: Db,
   type: CredentialType,

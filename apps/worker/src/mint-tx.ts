@@ -33,7 +33,11 @@ export async function buildOpenSeaMintTx(
 ): Promise<BuiltMintTx> {
   const { db, config } = ctx;
   const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
-  const client = new OpenSeaClient({ apiKey: key.apiKey });
+  const client = new OpenSeaClient({
+    apiKey: key.apiKey,
+    apiKeys: key.apiKeys,
+    perMinuteLimit: config.OPENSEA_PER_MINUTE_LIMIT,
+  });
   const adapter = openSeaSeaDropAdapter(client, input.slug);
   const tx = await adapter.buildTransaction({
     chainId: input.chainId,

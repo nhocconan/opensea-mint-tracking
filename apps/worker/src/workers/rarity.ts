@@ -60,7 +60,11 @@ export async function runRarityRefresh(
     }
 
     const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
-    const client = new OpenSeaClient({ apiKey: key.apiKey });
+    const client = new OpenSeaClient({
+      apiKey: key.apiKey,
+      apiKeys: key.apiKeys,
+      perMinuteLimit: config.OPENSEA_PER_MINUTE_LIMIT,
+    });
     const page = await client.listCollectionNfts(project.slug, {
       maxPagesOverride: RARITY_MAX_PAGES,
     });

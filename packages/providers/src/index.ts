@@ -8,6 +8,7 @@ export * from "./chain/simulate.ts";
 export * from "./http.ts";
 export * from "./opensea/client.ts";
 export * from "./opensea/normalizer.ts";
+export * from "./opensea/rate-limiter.ts";
 export * from "./opensea/schemas.ts";
 export * from "./x/client.ts";
 export * from "./x/schemas.ts";

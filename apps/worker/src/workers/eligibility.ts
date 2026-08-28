@@ -59,7 +59,12 @@ export async function runEligibilityPass(
   }
 
   const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
-  const clientFactory = (): OpenSeaClient => new OpenSeaClient({ apiKey: key.apiKey });
+  const clientFactory = (): OpenSeaClient =>
+    new OpenSeaClient({
+      apiKey: key.apiKey,
+      apiKeys: key.apiKeys,
+      perMinuteLimit: config.OPENSEA_PER_MINUTE_LIMIT,
+    });
   const jwt = await getWalletJwt(
     db,
     config.APP_ENCRYPTION_KEY,
