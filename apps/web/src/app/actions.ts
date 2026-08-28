@@ -23,6 +23,7 @@ import {
   getCredentialSecret,
   getDropStage,
   getSigner,
+  markAuthRequiredChecksDue,
   markExecutionAttemptBroadcast,
   markProviderHealth,
   recordAudit,
@@ -515,10 +516,22 @@ export async function saveCredentialAction(input: {
     // No before/after secret values ever (PRD §11).
     metadata: { type: input.type },
   });
+  // Saving a wallet PAT is what unlocks eligibility — make the checks that
+  // were degraded to AUTH_REQUIRED (for lack of a PAT) due now, so the next
+  // eligibility pass (≤60s) re-runs them instead of waiting out the 30-minute
+  // backoff. Best-effort; never blocks the save.
+  let rechecked = 0;
+  if (input.type === "opensea_pat") {
+    rechecked = await markAuthRequiredChecksDue(db).catch(() => 0);
+    revalidatePath("/", "layout");
+  }
   revalidatePath("/admin/opensea");
   return {
     ok: true,
-    message: "Saved and encrypted. Older keys of this type remain until revoked.",
+    message:
+      input.type === "opensea_pat"
+        ? `Saved and encrypted. Re-checking ${rechecked} eligibility verdict${rechecked === 1 ? "" : "s"} now — reload feeds in ~1 min.`
+        : "Saved and encrypted. Older keys of this type remain until revoked.",
   };
 }
 

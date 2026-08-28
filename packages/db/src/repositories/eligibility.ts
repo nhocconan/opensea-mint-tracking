@@ -16,6 +16,22 @@ export interface EligibilityUpsert {
   readonly nextDueAt: Date | null;
 }
 
+/**
+ * Make every AUTH_REQUIRED check due immediately — called right after an
+ * OpenSea wallet PAT is saved so the next eligibility pass (≤60s) re-runs the
+ * verdicts that were degraded to "AUTH NEEDED" for lack of a PAT, instead of
+ * making the operator wait out the 30-minute AUTH_REQUIRED backoff. Returns
+ * how many rows were reset.
+ */
+export async function markAuthRequiredChecksDue(db: Db): Promise<number> {
+  const rows = await db
+    .update(eligibilityChecks)
+    .set({ nextDueAt: new Date() })
+    .where(eq(eligibilityChecks.status, "AUTH_REQUIRED"))
+    .returning({ id: eligibilityChecks.walletId });
+  return rows.length;
+}
+
 export async function upsertEligibilityCheck(db: Db, input: EligibilityUpsert): Promise<void> {
   await db
     .insert(eligibilityChecks)

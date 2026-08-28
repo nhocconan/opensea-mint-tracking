@@ -1,6 +1,26 @@
 @import "tailwindcss";
 @import "@hoodmint/ui/tokens.css" layer(theme);
 
+/*
+ * Tailwind v4's Preflight no longer sets `cursor: pointer` on buttons (it
+ * follows the browser default of `cursor: default`), so every clickable
+ * control in the app looked unclickable on hover. Restore the pointer for
+ * interactive elements that aren't disabled.
+ */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label:has(> input:not(:disabled)),
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+}
+
 html {
   color-scheme: dark;
 }
