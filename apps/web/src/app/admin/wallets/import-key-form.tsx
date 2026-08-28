@@ -1,24 +1,21 @@
 "use client";
 
-import { useActionState } from "react";
-import { type ActionState, importWalletKeyAction } from "@/app/actions.ts";
-
-const initial: ActionState = { ok: false, message: "" };
+import { useState, useTransition } from "react";
+import { importWalletKeyAction } from "@/app/actions.ts";
+import { authClient } from "@/lib/auth-client.ts";
 
 /**
  * Import a burner wallet's private key for autonomous managed-key minting.
  * The key is AES-256-GCM encrypted server-side on save and only decrypted in
- * the worker at fire time. Requires a passkey step-up (enforced server-side).
+ * the worker at fire time. Importing is a spend-capable action, so — exactly
+ * like arming a mint (ArmControls) — it requires a fresh WebAuthn passkey
+ * step-up: we run the passkey ceremony here first, then the server action
+ * re-checks it. Register a passkey at Admin → Account first, or the ceremony
+ * has nothing to assert.
  */
 export function ImportKeyForm() {
-  const [state, formAction, pending] = useActionState(
-    async (_prev: ActionState, formData: FormData) =>
-      importWalletKeyAction({
-        privateKey: String(formData.get("privateKey") ?? ""),
-        label: String(formData.get("label") ?? ""),
-      }),
-    initial,
-  );
+  const [status, setStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [pending, startTransition] = useTransition();
 
   return (
     <section className="rounded-md border border-magenta/30 bg-base-raised p-4">
@@ -27,9 +24,39 @@ export function ImportKeyForm() {
       </h2>
       <p className="mt-1 text-[11px] text-amber">
         Burner wallets only — hold only your mint budget + gas. Encrypted at rest (AES-256-GCM),
-        decrypted only at the mint instant. Requires a passkey and the live-execution switch.
+        decrypted only at the mint instant. Requires a passkey (register one at{" "}
+        <a href="/admin/account" className="underline">
+          Admin → Account
+        </a>{" "}
+        first) and the live-execution switch.
       </p>
-      <form action={formAction} className="mt-3 space-y-2">
+      <form
+        className="mt-3 space-y-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          startTransition(async () => {
+            setStatus(null);
+            // Fresh passkey step-up (same ceremony as arming) before the
+            // server action, which re-verifies it server-side.
+            const signIn = await authClient.signIn.passkey();
+            if (signIn?.error) {
+              setStatus({
+                ok: false,
+                message:
+                  signIn.error.message ??
+                  "Passkey verification failed or was cancelled. Register a passkey at Admin → Account first.",
+              });
+              return;
+            }
+            const result = await importWalletKeyAction({
+              privateKey: String(form.get("privateKey") ?? ""),
+              label: String(form.get("label") ?? ""),
+            });
+            setStatus(result);
+          });
+        }}
+      >
         <label className="block">
           <span className="mb-1 block text-[11px] text-ink-muted">Private key (0x + 64 hex)</span>
           <input
@@ -55,14 +82,14 @@ export function ImportKeyForm() {
           disabled={pending}
           className="rounded-sm border border-magenta/50 bg-magenta/15 px-3 py-1.5 font-mono text-xs text-magenta hover:bg-magenta/25 disabled:opacity-50"
         >
-          {pending ? "Encrypting…" : "Import & encrypt key"}
+          {pending ? "Verifying + encrypting…" : "Verify passkey + import key"}
         </button>
-        {state.message !== "" ? (
+        {status !== null ? (
           <p
-            role={state.ok ? "status" : "alert"}
-            className={`text-xs ${state.ok ? "text-acid" : "text-magenta"}`}
+            role={status.ok ? "status" : "alert"}
+            className={`text-xs ${status.ok ? "text-acid" : "text-magenta"}`}
           >
-            {state.message}
+            {status.message}
           </p>
         ) : null}
       </form>

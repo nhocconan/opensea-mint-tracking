@@ -5,6 +5,7 @@ import { Geist_Mono, Space_Grotesk } from "next/font/google";
 import { cookies } from "next/headers";
 import { AppShell } from "@/components/app-shell.tsx";
 import { container } from "@/lib/container.ts";
+import { getSessionUser } from "@/lib/session.ts";
 import "./globals.css";
 
 const display = Space_Grotesk({
@@ -44,6 +45,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const cookieStore = await cookies();
   const theme = resolveTheme(parseThemePreference(cookieStore.get(THEME_COOKIE)?.value));
 
+  let signedIn = false;
+  try {
+    signedIn = (await getSessionUser()) !== null;
+  } catch {
+    // Session lookup best-effort; a signed-out shell is the safe default.
+  }
+
   return (
     <html
       lang="en"
@@ -53,7 +61,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     >
       <body className="min-h-dvh bg-base text-ink antialiased">
         {demoMode ? <DemoBanner /> : null}
-        <AppShell theme={theme}>{children}</AppShell>
+        <AppShell theme={theme} signedIn={signedIn}>
+          {children}
+        </AppShell>
       </body>
     </html>
   );

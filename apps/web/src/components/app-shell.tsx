@@ -8,10 +8,12 @@ import {
   Eye,
   Flame,
   Layers,
+  LogIn,
   Search,
   ShieldCheck,
   Sparkles,
   Star,
+  UserCog,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -19,6 +21,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { ADMIN_NAV } from "@/lib/admin-nav.ts";
 import { type CommandItem, CommandPalette } from "./command-palette.tsx";
 import { Logo } from "./logo.tsx";
+import { SignOutButton } from "./sign-out-button.tsx";
 import { useRadarEvents } from "./sse.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
 
@@ -38,7 +41,15 @@ const COMMAND_ITEMS: readonly CommandItem[] = [
   ...ADMIN_NAV.map(([href, label]) => ({ href, label, group: "Admin" })),
 ];
 
-export function AppShell({ children, theme }: { children: ReactNode; theme: Theme }) {
+export function AppShell({
+  children,
+  theme,
+  signedIn = false,
+}: {
+  children: ReactNode;
+  theme: Theme;
+  signedIn?: boolean;
+}) {
   const pathname = usePathname();
   const [paletteOpen, setPaletteOpen] = useState(false);
   useRadarEvents();
@@ -99,6 +110,26 @@ export function AppShell({ children, theme }: { children: ReactNode; theme: Them
             <kbd className="rounded-xs border border-line px-1 font-mono text-[10px]">⌘K</kbd>
           </button>
           <ThemeToggle initialTheme={theme} />
+          {signedIn ? (
+            <>
+              <Link
+                href="/admin/account"
+                className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+              >
+                <UserCog className="size-3" aria-hidden />
+                Account
+              </Link>
+              <SignOutButton className="flex items-center gap-1 rounded-sm px-2 py-1 text-left text-[11px] text-ink-faint hover:bg-base-overlay hover:text-magenta" />
+            </>
+          ) : (
+            <Link
+              href="/login"
+              className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+            >
+              <LogIn className="size-3" aria-hidden />
+              Sign in
+            </Link>
+          )}
           <div className="px-2 text-[11px] text-ink-faint">
             <Eye className="mr-1 inline size-3" aria-hidden />
             read-only radar
