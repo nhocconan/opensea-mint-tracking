@@ -8,7 +8,6 @@ import {
   Eye,
   Flame,
   Layers,
-  Radar,
   Search,
   ShieldCheck,
   Sparkles,
@@ -19,6 +18,7 @@ import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
 import { ADMIN_NAV } from "@/lib/admin-nav.ts";
 import { type CommandItem, CommandPalette } from "./command-palette.tsx";
+import { Logo } from "./logo.tsx";
 import { useRadarEvents } from "./sse.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
 
@@ -73,9 +73,8 @@ export function AppShell({ children, theme }: { children: ReactNode; theme: Them
         aria-label="Primary"
         className="hidden shrink-0 flex-col gap-1 border-r border-line bg-base-raised p-3 md:flex md:w-48"
       >
-        <Link href="/" className="mb-4 flex items-center gap-2 px-2 py-1">
-          <Radar className="size-5 text-acid" aria-hidden />
-          <span className="font-display text-sm font-semibold tracking-wide">HOODMINT</span>
+        <Link href="/" className="mb-4 flex items-center px-2 py-1">
+          <Logo className="size-6" />
         </Link>
         {NAV.map(({ href, label, icon: Icon }) => (
           <Link
@@ -108,9 +107,8 @@ export function AppShell({ children, theme }: { children: ReactNode; theme: Them
       </nav>
 
       <header className="flex items-center justify-between border-b border-line bg-base-raised px-3 py-2 md:hidden">
-        <Link href="/" className="flex items-center gap-2">
-          <Radar className="size-5 text-acid" aria-hidden />
-          <span className="font-display text-sm font-semibold tracking-wide">HOODMINT</span>
+        <Link href="/" className="flex items-center">
+          <Logo className="size-6" />
         </Link>
         <div className="flex items-center gap-1">
           {/* Mobile-responsive-design gap, found and fixed 2026-08-22: the

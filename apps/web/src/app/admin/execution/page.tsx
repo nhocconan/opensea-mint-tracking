@@ -248,7 +248,12 @@ export default async function AdminExecutionPage() {
 
       <ExecutorOnboarding defaultChainId={config.ROBINHOOD_CHAIN_ID} />
 
-      <MintPlanForm wallets={wallets} />
+      <MintPlanForm
+        wallets={wallets}
+        signers={signers
+          .filter((s) => s.status === "active")
+          .map((s) => ({ id: s.id, ownerAddress: s.ownerAddress, scheme: s.scheme }))}
+      />
 
       <section className="rounded-md border border-line bg-base-raised p-4">
         <h2 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase">

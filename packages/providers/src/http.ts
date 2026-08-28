@@ -18,6 +18,13 @@ export interface FetchJsonOptions {
   readonly headers?: Record<string, string>;
   readonly method?: "GET" | "POST";
   readonly body?: string;
+  /**
+   * Statuses returned to the caller as an ordinary result (parsed body,
+   * no throw) instead of being mapped to an AppError. Needed for protocols
+   * that carry meaning in a 4xx body — RFC 8628 device-code polling signals
+   * `authorization_pending` / `slow_down` as HTTP 400.
+   */
+  readonly allowStatuses?: readonly number[];
 }
 
 export interface FetchJsonResult {
@@ -106,7 +113,9 @@ export async function fetchJson(
   if (method === "GET" && cached !== undefined) {
     headers["if-none-match"] = cached.etag;
   }
-  if (options.body !== undefined) {
+  // JSON is the default request encoding, but callers may override it —
+  // X's OAuth token endpoint requires application/x-www-form-urlencoded.
+  if (options.body !== undefined && headers["content-type"] === undefined) {
     headers["content-type"] = "application/json";
   }
 
@@ -130,6 +139,20 @@ export async function fetchJson(
         // redirect:"error" should have thrown; treat any 3xx as a hard stop
         // so a permissive fetch implementation cannot silently follow.
         throw new AppError("PermanentConfig", "redirect blocked by outbound policy");
+      }
+      // Caller-declared meaningful statuses bypass error mapping entirely.
+      // Checked after the redirect guard so it can never re-open 3xx.
+      if (options.allowStatuses?.includes(response.status) === true) {
+        const text = await readBounded(response, maxBytes);
+        let json: unknown = null;
+        if (text.length > 0) {
+          try {
+            json = JSON.parse(text);
+          } catch {
+            json = null;
+          }
+        }
+        return { status: response.status, headers: responseHeaders, json, fromCache: false };
       }
       if (response.status === 429 || response.status >= 500) {
         const retryAfter = retryAfterSeconds(responseHeaders);

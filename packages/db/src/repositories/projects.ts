@@ -766,6 +766,55 @@ export async function dueEligibilityCandidates(
     .limit(limit);
 }
 
+export interface UpcomingStage {
+  readonly stageId: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectSlug: string | null;
+  readonly stageLabel: string;
+  readonly stagePriceWei: string | null;
+  readonly stageMaxPerWallet: number | null;
+  readonly startsAt: Date;
+  readonly endsAt: Date | null;
+}
+
+/**
+ * Stages opening within `maxWindowMinutes` from now — not yet started, not
+ * paused — candidates for stage_starting alerts (PRD §7.4). Callers narrow
+ * further to the exact configured window(s) a stage has crossed with
+ * `dueStageStartingWindows` from `@hoodmint/core`.
+ */
+export async function upcomingDropStages(
+  db: Db,
+  now: Date,
+  maxWindowMinutes: number,
+): Promise<UpcomingStage[]> {
+  const cutoff = new Date(now.getTime() + maxWindowMinutes * 60_000);
+  const rows = await db
+    .select({
+      stageId: dropStages.id,
+      projectId: dropStages.projectId,
+      projectName: projects.name,
+      projectSlug: projects.slug,
+      stageLabel: dropStages.label,
+      stagePriceWei: dropStages.priceWei,
+      stageMaxPerWallet: dropStages.maxPerWallet,
+      startsAt: dropStages.startsAt,
+      endsAt: dropStages.endsAt,
+    })
+    .from(dropStages)
+    .innerJoin(projects, eq(projects.id, dropStages.projectId))
+    .where(
+      and(
+        gt(dropStages.startsAt, now),
+        lte(dropStages.startsAt, cutoff),
+        eq(dropStages.paused, false),
+      ),
+    )
+    .orderBy(asc(dropStages.startsAt));
+  return rows;
+}
+
 export async function findProjectBySlugOrId(
   db: Db,
   key: string,

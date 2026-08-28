@@ -33,7 +33,16 @@ export const EXECUTION_ATTEMPT_STATUSES = [
 export type ExecutionAttemptStatus = (typeof EXECUTION_ATTEMPT_STATUSES)[number];
 
 /** browser_wallet = Phase 1 (zero server custody). The other two are Phase 2 (ADR 0004). */
-export const SIGNER_SCHEMES = ["browser_wallet", "eip7702_safe_zodiac", "custom_executor"] as const;
+export const SIGNER_SCHEMES = [
+  "browser_wallet",
+  "eip7702_safe_zodiac",
+  "custom_executor",
+  // Owner-authorized managed-key custody: the worker signs a direct mint tx
+  // with a burner wallet's AES-256-GCM-sealed EOA key (no Executor contract),
+  // for autonomous multi-wallet minting. Still hard-gated by
+  // LIVE_EXECUTION_ENABLED + WebAuthn step-up on import.
+  "managed_wallet_key",
+] as const;
 export type SignerScheme = (typeof SIGNER_SCHEMES)[number];
 
 export const SIGNAL_KINDS = ["hype", "risk"] as const;

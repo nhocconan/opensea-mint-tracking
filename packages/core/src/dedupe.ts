@@ -34,17 +34,21 @@ export function alertDedupeKey(parts: AlertKeyParts): string {
   return components.map((c) => `${c.length}:${c}`).join("|");
 }
 
-/** Deterministic job IDs (PRD §8.4). */
+/**
+ * Deterministic job IDs (PRD §8.4). Separator is "." — BullMQ rejects
+ * custom job ids containing ":" ("Custom Id cannot contain :"), because it
+ * uses ":" in its own Redis key layout.
+ */
 export const jobId = {
   discovery: (provider: string, dropType: string, windowStart: number): string =>
-    `discover:${provider}:${dropType}:${windowStart}`,
+    `discover.${provider}.${dropType}.${windowStart}`,
   detail: (provider: string, externalId: string, bucket: string): string =>
-    `detail:${provider}:${externalId}:${bucket}`,
+    `detail.${provider}.${externalId}.${bucket}`,
   chainSync: (chainId: number, fromBlock: bigint, toBlock: bigint): string =>
-    `chain:${chainId}:${fromBlock.toString(10)}:${toBlock.toString(10)}`,
+    `chain.${chainId}.${fromBlock.toString(10)}.${toBlock.toString(10)}`,
   eligibility: (walletId: string, dropId: string, stageVersion: number): string =>
-    `eligibility:${walletId}:${dropId}:${stageVersion}`,
-  notification: (outboxRowId: string): string => `notify:${outboxRowId}`,
+    `eligibility.${walletId}.${dropId}.${stageVersion}`,
+  notification: (outboxRowId: string): string => `notify.${outboxRowId}`,
   /**
    * Rarity refresh (feature-backlog.md §2): admin-triggered, not scheduled,
    * so unlike the other job kinds this deliberately includes a timestamp —
@@ -54,5 +58,5 @@ export const jobId = {
    * rather than being silently deduped against a stale completed job id.
    */
   rarity: (projectId: string, triggeredAtMs: number): string =>
-    `rarity:${projectId}:${Math.floor(triggeredAtMs / 60_000)}`,
+    `rarity.${projectId}.${Math.floor(triggeredAtMs / 60_000)}`,
 } as const;

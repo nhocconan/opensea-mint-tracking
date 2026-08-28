@@ -1,6 +1,6 @@
 import { encodeAbiParameters, type Log, parseAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
-import { ChainRadar } from "./rpc.ts";
+import { ChainRadar, isOversizedLogsError } from "./rpc.ts";
 import { isMintTransfer, SEADROP_ADDRESS, ZERO_ADDRESS } from "./seadrop.ts";
 
 const radar = new ChainRadar({ rpcUrl: "http://127.0.0.1:8545", chainId: 4663, initialRange: 100 });
@@ -36,6 +36,43 @@ describe("mint classification", () => {
     expect(isMintTransfer(SEADROP_ADDRESS)).toBe(true);
     expect(isMintTransfer(MINTER)).toBe(false);
     expect(isMintTransfer(SEADROP_ADDRESS.toUpperCase())).toBe(true);
+  });
+});
+
+describe("isOversizedLogsError", () => {
+  it("matches classic range/limit phrasings in the message", () => {
+    expect(isOversizedLogsError(new Error("query exceeds max block range"))).toBe(true);
+    expect(isOversizedLogsError(new Error("result set too large"))).toBe(true);
+    expect(isOversizedLogsError(new Error("limit exceeded"))).toBe(true);
+  });
+
+  it("matches the raw RPC reason hidden in viem's `details` field", () => {
+    // Robinhood Chain RPC: viem surfaces InvalidParamsRpcError with a generic
+    // message and puts the real reason in `details`.
+    const viemStyle = Object.assign(new Error("Missing or invalid parameters."), {
+      details: "logs matched by query exceeds limit of 10000",
+    });
+    expect(isOversizedLogsError(viemStyle)).toBe(true);
+  });
+
+  it("matches viem's HTTP response-body size cap on oversized log pages", () => {
+    expect(
+      isOversizedLogsError(
+        new Error(
+          "HTTP response body exceeded the size limit.\n\nMax: 10485760 bytes\nReceived: 10502144 bytes",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("treats transport timeouts as shrink signals", () => {
+    expect(isOversizedLogsError(new Error("The request took too long to respond."))).toBe(true);
+    expect(isOversizedLogsError(new Error("Request timed out"))).toBe(true);
+  });
+
+  it("ignores unrelated failures", () => {
+    expect(isOversizedLogsError(new Error("connection refused"))).toBe(false);
+    expect(isOversizedLogsError(new Error("HTTP 500 internal server error"))).toBe(false);
   });
 });
 

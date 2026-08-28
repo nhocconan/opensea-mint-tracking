@@ -1,42 +1,59 @@
 /**
- * Sentiment/risk signal scan (ADR 0007). Reads public X mentions of the
- * LIVE/NEXT drops, scores hype + phishing-risk, and writes advisory-only
- * `signals` rows — NEVER touches projects.confidence / lifecycleStatus /
- * eligibility (packages/signals can't even import @hoodmint/db; this worker
- * only calls insertSignal, which exposes nothing that writes those tables).
+ * Sentiment/risk signal scan (ADR 0007, revised 2026-08-28). Asks xAI's
+ * Grok — with its server-side `x_search` tool — to read public X chatter
+ * about the LIVE/NEXT drops and return a hype + phishing-risk read, then
+ * writes advisory-only `signals` rows. It NEVER touches
+ * projects.confidence / lifecycleStatus / eligibility: the only DB writer
+ * used here is insertSignal, which exposes nothing that writes those
+ * tables.
  *
- * HARD-GATED, off by default: does nothing unless the operator both set
- * X_SIGNALS_ENABLED=true AND supplied X_API_BEARER_TOKEN. X's free tier was
- * retired Feb 2026 (verified against docs.x.com), so this endpoint is
- * metered pay-per-use — the scan is bounded to a small number of projects
- * per pass, one API call each, to keep spend predictable.
+ * HARD-GATED, off by default: does nothing unless the operator set
+ * X_SIGNALS_ENABLED=true AND a usable xAI credential resolves — their X
+ * Premium+/SuperGrok subscription (device-code OAuth), a stored
+ * console.x.ai API key, or the XAI_API_KEY env fallback, in that order
+ * (see ../credentials.ts). Grok's answer is untrusted model output derived
+ * from attacker-controllable posts, so it crosses a Zod boundary and is
+ * clamped before it reaches the database; an unparseable answer records a
+ * low-confidence empty signal rather than throwing.
+ *
+ * Cost stays bounded the same way it always did: one request per project,
+ * only for projects nearing mint, capped per pass.
  */
 
 import { isAppError } from "@hoodmint/core";
-import {
-  finishScanRun,
-  insertSignal,
-  latestSignal,
-  projectsForSentimentScan,
-  startScanRun,
-} from "@hoodmint/db";
-import { XClient } from "@hoodmint/providers";
-import { scanProjectSignals } from "@hoodmint/signals";
+import { finishScanRun, insertSignal, projectsForSentimentScan, startScanRun } from "@hoodmint/db";
+import { XaiClient } from "@hoodmint/providers";
 import type { WorkerContext } from "../context.ts";
+import { resolveXaiToken, type XaiTokenSource } from "../credentials.ts";
 
 export interface SentimentScanSummary {
   readonly enabled: boolean;
   readonly scanned: number;
   readonly signalsWritten: number;
   readonly failed: number;
+  /** Which credential answered — never the token itself. */
+  readonly tokenSource?: XaiTokenSource;
 }
 
-/** How many projects to scan per pass — one metered X call each. */
+/** How many projects to scan per pass — one metered Grok call each. */
 const MAX_PROJECTS_PER_PASS = 5;
 
 export async function runSentimentScan(ctx: WorkerContext): Promise<SentimentScanSummary> {
   const { db, config, log } = ctx;
-  if (!config.X_SIGNALS_ENABLED || config.X_API_BEARER_TOKEN === undefined) {
+  if (!config.X_SIGNALS_ENABLED) {
+    return { enabled: false, scanned: 0, signalsWritten: 0, failed: 0 };
+  }
+  const tokenDeps = {
+    db,
+    masterKey: config.APP_ENCRYPTION_KEY,
+    envApiKey: config.XAI_API_KEY,
+    log,
+  };
+  // Resolves — and, when inside the 1-hour refresh skew, refreshes and
+  // re-seals — the credential before any metered call is made. Null means
+  // signals are enabled but no xAI credential is configured at all.
+  const resolved = await resolveXaiToken(tokenDeps);
+  if (resolved === null) {
     return { enabled: false, scanned: 0, signalsWritten: 0, failed: 0 };
   }
 
@@ -46,49 +63,55 @@ export async function runSentimentScan(ctx: WorkerContext): Promise<SentimentSca
     correlationId: crypto.randomUUID(),
   });
 
-  const client = new XClient({ bearerToken: config.X_API_BEARER_TOKEN });
+  const client = new XaiClient({
+    model: config.XAI_MODEL,
+    // Re-resolved per request so a subscription token that crosses its
+    // refresh skew mid-pass is rotated rather than sent expired; falls back
+    // to the token this pass started with if the lookup itself fails.
+    tokenProvider: async () => {
+      const current = await resolveXaiToken(tokenDeps).catch(() => null);
+      return current?.token ?? resolved.token;
+    },
+  });
+
   const candidates = await projectsForSentimentScan(db, MAX_PROJECTS_PER_PASS);
   let scanned = 0;
   let signalsWritten = 0;
   let failed = 0;
 
   for (const project of candidates) {
-    // Query by slug when we have it (tighter), else the project name. Both
-    // are collection identifiers, not user handles — app-only search of
-    // public posts (ADR 0007), never a private timeline.
+    // Subject keys the signal history: slug when we have it (tighter), else
+    // the project name. Both are collection identifiers, never a handle.
     const subject = project.slug ?? project.name;
-    const query = project.slug ?? `"${project.name}"`;
     try {
-      // Rolling baseline: the previous hype scan's tweet count for this
-      // subject (stored in evidence), and since_id to only pull posts newer
-      // than last time — both make "how much louder than usual" meaningful
-      // and cut API cost.
-      const prev = await latestSignal(db, subject, "x_mentions", "hype");
-      const baselineAvgMentions =
-        typeof prev?.evidence?.tweetCount === "number" ? prev.evidence.tweetCount : 0;
-      const sinceId =
-        typeof prev?.evidence?.newestId === "string" ? prev.evidence.newestId : undefined;
-
-      const result = await scanProjectSignals({
-        client,
-        query,
-        baselineAvgMentions,
-        ...(sinceId !== undefined ? { sinceId } : {}),
+      const result = await client.scanSentiment({
+        name: project.name,
+        slug: project.slug,
       });
       scanned += 1;
 
       const observedAt = new Date();
+      // A model answer we could not parse is still a completed scan: record
+      // it as an explicitly unverified zero rather than silently skipping,
+      // so the UI can show "we looked and learned nothing".
+      const parsed = result.signal;
+      const confidence = parsed === null ? "unverified" : "single-source";
+      const sources = parsed === null ? result.citations : parsed.sources;
+
       await insertSignal(db, {
         projectId: project.id,
         subject,
-        source: "x_mentions",
+        source: "grok_x_search",
         kind: "hype",
-        score: result.hype.score,
-        confidence: result.hype.confidence,
+        score: parsed?.hype_score ?? 0,
+        confidence,
         evidence: {
-          tweetCount: result.tweetCount,
-          velocityRatio: result.hype.velocityRatio,
-          newestId: result.newestId,
+          model: result.model,
+          parsed: parsed !== null,
+          summary: parsed?.summary ?? "",
+          notablePosts: parsed?.notable_posts ?? [],
+          citations: result.citations,
+          sources,
         },
         observedAt,
       });
@@ -97,14 +120,16 @@ export async function runSentimentScan(ctx: WorkerContext): Promise<SentimentSca
       await insertSignal(db, {
         projectId: project.id,
         subject,
-        source: "x_mentions",
+        source: "grok_x_search",
         kind: "risk",
-        score: result.risk.score,
-        confidence: result.risk.confidence,
+        score: parsed?.risk_score ?? 0,
+        confidence,
         evidence: {
-          tweetCount: result.tweetCount,
-          flaggedFraction: result.risk.flaggedFraction,
-          flags: result.risk.flags,
+          model: result.model,
+          parsed: parsed !== null,
+          phishingFlags: parsed?.phishing_flags ?? [],
+          summary: parsed?.summary ?? "",
+          citations: result.citations,
         },
         observedAt,
       });
@@ -125,5 +150,5 @@ export async function runSentimentScan(ctx: WorkerContext): Promise<SentimentSca
     status: failed > 0 ? "partial" : "success",
     counts: { scanned, signalsWritten, failed },
   });
-  return { enabled: true, scanned, signalsWritten, failed };
+  return { enabled: true, scanned, signalsWritten, failed, tokenSource: resolved.source };
 }

@@ -64,7 +64,11 @@ export class NotImplementedSigningSchemeError extends Error {
  * scheme gets to say "no" before any calldata is shown to anyone.
  */
 export function assertSignable(signer: SignerHandle): void {
-  if (signer.scheme !== "browser_wallet" && signer.scheme !== "custom_executor") {
+  if (
+    signer.scheme !== "browser_wallet" &&
+    signer.scheme !== "custom_executor" &&
+    signer.scheme !== "managed_wallet_key"
+  ) {
     throw new NotImplementedSigningSchemeError(signer.scheme);
   }
 }
@@ -193,6 +197,64 @@ export async function signExecutorTransaction(
   // so this needs no RPC round-trip to know the hash before broadcasting.
   const txHash = keccak256(rawTx);
   return { rawTx, txHash };
+}
+
+/* ── managed_wallet_key scheme (owner-authorized managed custody, 2026-08-28)
+ * ─────────────────────────────────────────────────────────────────────────
+ * Unlike custom_executor, there is no Executor contract: the burner wallet's
+ * own EOA key signs a DIRECT mint transaction (the wallet mints to itself,
+ * standard for an FCFS public mint). This is a spend-capable signature, so it
+ * lives here in the chokepoint alongside the other real-signing schemes. The
+ * caller (apps/worker) decrypts the sealed key immediately before calling
+ * this and lets the plaintext go out of scope right after — same discipline
+ * as signExecutorTransaction. */
+
+export interface ManagedMintSignRequest {
+  readonly chainId: number;
+  /** The real mint target contract + calldata + price — the exact tx broadcast. */
+  readonly to: string;
+  readonly data: string;
+  readonly valueWei: string;
+  readonly nonce: number;
+  readonly maxFeePerGasWei: string;
+  readonly maxPriorityFeePerGasWei: string;
+  /** From the pipeline's mandatory pre-flight simulation (ADR 0005), +headroom. */
+  readonly gas: bigint;
+}
+
+/**
+ * Signs a direct mint transaction from a managed burner wallet's own key.
+ * `privateKeyHex` is already-decrypted (the caller opened the sealed blob);
+ * the viem account built here is function-scoped and never cached or logged.
+ * Signs + serialises in one step; broadcasting is the caller's job (this
+ * package has no RPC access by design).
+ */
+export async function signManagedMintTransaction(
+  request: ManagedMintSignRequest,
+  privateKeyHex: string,
+): Promise<SignedExecutorTransaction> {
+  const account = privateKeyToAccount(privateKeyHex as Hex);
+  const rawTx = await account.signTransaction({
+    to: request.to as Hex,
+    data: request.data as Hex,
+    value: BigInt(request.valueWei),
+    chainId: request.chainId,
+    nonce: request.nonce,
+    gas: request.gas,
+    maxFeePerGas: BigInt(request.maxFeePerGasWei),
+    maxPriorityFeePerGas: BigInt(request.maxPriorityFeePerGasWei),
+    type: "eip1559",
+  });
+  return { rawTx, txHash: keccak256(rawTx) };
+}
+
+/**
+ * Derives the address of a managed key without signing — used at import time
+ * to prove a pasted private key matches the wallet it's being attached to.
+ * The key is function-scoped; only the address (safe to display) is returned.
+ */
+export function managedKeyAddress(privateKeyHex: string): string {
+  return privateKeyToAccount(privateKeyHex as Hex).address;
 }
 
 export interface GeneratedSessionKey {

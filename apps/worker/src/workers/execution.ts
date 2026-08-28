@@ -43,7 +43,8 @@ import {
   fetchFeeContext,
   simulateTransaction,
 } from "@hoodmint/providers";
-import { signExecutorTransaction } from "@hoodmint/signing";
+import { openSecret, type SealedSecret } from "@hoodmint/secrets";
+import { signExecutorTransaction, signManagedMintTransaction } from "@hoodmint/signing";
 import { eq } from "drizzle-orm";
 import { privateKeyToAccount } from "viem/accounts";
 import type { WorkerContext } from "../context.ts";
@@ -55,12 +56,24 @@ export interface MintExecutionSummary {
   readonly expired: number;
   readonly claimed: boolean;
   readonly outcome?: string;
+  /** Set when claimed — lets the coarse drain loop stop once it sees a
+   *  plan re-claimed within the same tick (shadow mode re-arms plans after
+   *  simulating, so "claimed something" alone would loop forever). */
+  readonly planId?: string;
 }
 
 export interface HotLoopSummary {
   readonly candidates: number;
   readonly fired: boolean;
 }
+
+/**
+ * Cap on concurrent fire passes per hot-loop tick (multi-wallet fan-out).
+ * Each pass costs a handful of RPC round-trips; 8 keeps a large wallet
+ * fleet competitive without stampeding the RPC endpoint at the open
+ * instant. Plans beyond the cap are claimed on the next 200ms tick.
+ */
+const MAX_PARALLEL_FIRES = 8;
 
 /**
  * Precision fire hot-loop (ADR 0009 competitiveness — the piece that turns
@@ -85,7 +98,7 @@ export async function runMintHotLoop(ctx: WorkerContext): Promise<HotLoopSummary
     return { candidates: 0, fired: false };
   }
   const clockOffsetMs = (await getSetting<number>(db, CHAIN_CLOCK_OFFSET_SETTING_KEY)) ?? 0;
-  const anyDue = candidates.some(
+  const dueCount = candidates.filter(
     (plan) =>
       computeFirePhase({
         stageStartChainMs: plan.stageStartMs,
@@ -95,14 +108,20 @@ export async function runMintHotLoop(ctx: WorkerContext): Promise<HotLoopSummary
         leadMs: config.MINT_FIRE_LEAD_MS,
         continueForMs: config.MINT_FIRE_CONTINUE_MS,
       }).phase === "fire",
-  );
-  if (!anyDue) {
+  ).length;
+  if (dueCount === 0) {
     return { candidates: candidates.length, fired: false };
   }
-  // At least one plan is at its fire instant — pump the real pass. It claims
-  // the oldest due plan; across a burst the lease/release loop lets the same
-  // plan (or the next) be re-claimed on each tick until terminal/expired.
-  await runMintExecutionPass(ctx);
+  // Multi-wallet fan-out: pump one pass per due plan, in parallel, so N
+  // wallets on the same drop all fire at the open instant instead of
+  // serializing at one plan per 200ms tick. Safe because each pass claims
+  // its own plan atomically (claimArmedMintPlan's FOR UPDATE SKIP LOCKED);
+  // a pass that finds nothing left to claim is a cheap no-op. allSettled
+  // isolates per-plan failures; across a burst the lease/release loop lets
+  // plans be re-claimed on each tick until terminal/expired.
+  await Promise.allSettled(
+    Array.from({ length: Math.min(dueCount, MAX_PARALLEL_FIRES) }, () => runMintExecutionPass(ctx)),
+  );
   return { candidates: candidates.length, fired: true };
 }
 
@@ -140,7 +159,7 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     const rpcUrl = await resolveBestRpcUrl(db, config.ROBINHOOD_CHAIN_ID, config.RPC_URL);
     if (!rpcUrl) {
       await record("failed", { errorCode: "no_rpc_configured" });
-      return { expired, claimed: true, outcome: "no_rpc_configured" };
+      return { expired, claimed: true, outcome: "no_rpc_configured", planId: plan.id };
     }
 
     const [project] = await db
@@ -150,18 +169,21 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     const [wallet] = await db.select().from(walletsTable).where(eq(walletsTable.id, plan.walletId));
     if (project === undefined || wallet === undefined) {
       await record("failed", { errorCode: "missing_project_or_wallet" });
-      return { expired, claimed: true, outcome: "missing_project_or_wallet" };
+      return { expired, claimed: true, outcome: "missing_project_or_wallet", planId: plan.id };
     }
     if (project.slug === null) {
       // Phase 1 only ships the OpenSea adapter (ADR 0004 amendment); a
       // project with no OpenSea slug has no MintAdapter yet.
       await record("failed", { errorCode: "no_mint_adapter_for_project" });
-      return { expired, claimed: true, outcome: "no_mint_adapter_for_project" };
+      return { expired, claimed: true, outcome: "no_mint_adapter_for_project", planId: plan.id };
     }
 
     let signerId = "unregistered";
-    let signerScheme: "browser_wallet" | "eip7702_safe_zodiac" | "custom_executor" =
-      "browser_wallet";
+    let signerScheme:
+      | "browser_wallet"
+      | "eip7702_safe_zodiac"
+      | "custom_executor"
+      | "managed_wallet_key" = "browser_wallet";
     // No coarse on-chain ceiling exists for browser_wallet (no delegation to
     // cap in Phase 1) — default it to the plan's own ceiling so the
     // coarse-vs-precise check (ADR 0004) is a no-op until a real delegated
@@ -185,6 +207,17 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
           delegatedSignerRow = row;
         }
       }
+    }
+
+    // Managed-key custody (owner-authorized, 2026-08-28): when a plan carries
+    // no active delegated (custom_executor) signer but its burner wallet has
+    // an imported sealed signing key, the wallet's own EOA signs a direct
+    // mint tx autonomously. An explicit active custom_executor signer above
+    // still takes precedence. Still hard-gated downstream by
+    // LIVE_EXECUTION_ENABLED (shadow mode simulates only).
+    if (signerScheme === "browser_wallet" && wallet.encryptedSigningKey !== null) {
+      signerScheme = "managed_wallet_key";
+      signerId = `managed:${wallet.id}`;
     }
 
     // ADR 0009, item P4: prefer a fresh speculative pre-build over a fresh
@@ -299,10 +332,14 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
         at: new Date().toISOString(),
       });
     } else if (outcome.stage === "ready_for_delegated_signature") {
-      await runDelegatedFire(ctx, plan, outcome, delegatedSignerRow, rpcUrl, record);
+      if (signerScheme === "managed_wallet_key") {
+        await runManagedFire(ctx, plan, outcome, wallet, rpcUrl, record);
+      } else {
+        await runDelegatedFire(ctx, plan, outcome, delegatedSignerRow, rpcUrl, record);
+      }
     }
 
-    return { expired, claimed: true, outcome: outcome.stage };
+    return { expired, claimed: true, outcome: outcome.stage, planId: plan.id };
   } catch (error) {
     log.error({ err: error, planId: plan.id }, "mint execution pass failed");
     await record("failed", {
@@ -313,7 +350,7 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     // 'executing' (finding #1). If it's genuinely broken it'll fail again
     // and the window will expire it.
     await releaseMintPlanToArmed(db, plan.id, new Date()).catch(() => {});
-    return { expired, claimed: true, outcome: "error" };
+    return { expired, claimed: true, outcome: "error", planId: plan.id };
   }
 }
 
@@ -439,6 +476,102 @@ async function runDelegatedFire(
     log.error({ err: error, planId: plan.id }, "delegated signing/broadcast failed");
     await record("failed", { errorCode });
     // Nonce race / transient RPC error is retryable within the window.
+    await releaseMintPlanToArmed(db, plan.id, new Date());
+  }
+}
+
+/**
+ * Managed-key fire (owner-authorized custody, 2026-08-28). Unlike the
+ * delegated path there is no Executor contract: the burner wallet's own EOA
+ * key signs a DIRECT mint transaction (mint-to-self, standard FCFS). The
+ * pipeline already simulated this exact tx from the wallet, but we
+ * re-simulate right before signing (stage-not-open is the common early
+ * revert) and re-fetch a fresh nonce/fee. The sealed key is decrypted into a
+ * function-scoped local, handed straight to the signing chokepoint, and
+ * never assigned to anything logged.
+ */
+async function runManagedFire(
+  ctx: WorkerContext,
+  plan: { id: string; projectId: string },
+  outcome: { tx: { chainId: number; to: string; data: string; valueWei: string } },
+  wallet: { id: string; address: string; encryptedSigningKey: string | null },
+  rpcUrl: string,
+  record: (
+    status: "failed" | "simulated_ok" | "simulated_revert" | "broadcast" | "awaiting_signature",
+    extra?: {
+      errorCode?: string;
+      simulationResult?: Record<string, unknown>;
+      pendingTx?: { to: string; data: string; valueWei: string; chainId: number };
+      txHash?: string;
+    },
+  ) => Promise<unknown>,
+): Promise<void> {
+  const { db, log } = ctx;
+  if (wallet.encryptedSigningKey === null) {
+    await record("failed", { errorCode: "managed_key_missing" });
+    await failMintPlanExecution(db, plan.id);
+    return;
+  }
+  try {
+    // Simulate the REAL direct mint tx from the burner wallet — same bytes,
+    // same sender we broadcast. Authoritative gate for this path.
+    const sim = await simulateTransaction({
+      rpcUrl,
+      from: wallet.address,
+      to: outcome.tx.to,
+      data: outcome.tx.data,
+      valueWei: outcome.tx.valueWei,
+    });
+    if (!sim.ok) {
+      await record("simulated_revert", {
+        errorCode: sim.revertReason,
+        simulationResult: { revertReason: sim.revertReason, managed: true },
+      });
+      await releaseMintPlanToArmed(db, plan.id, new Date());
+      return;
+    }
+
+    // Fresh nonce/fee for THIS wallet right before signing (per-wallet nonce).
+    const fees = await fetchFeeContext(rpcUrl, wallet.address);
+
+    // Decrypt the sealed key into a function-scoped local, hand it straight to
+    // the chokepoint, and never log it. `openSecret` throws on tamper/wrong key.
+    const sealed = JSON.parse(wallet.encryptedSigningKey) as SealedSecret;
+    const privateKeyHex = openSecret(sealed, ctx.config.APP_ENCRYPTION_KEY);
+    const signed = await signManagedMintTransaction(
+      {
+        chainId: outcome.tx.chainId,
+        to: outcome.tx.to,
+        data: outcome.tx.data,
+        valueWei: outcome.tx.valueWei,
+        nonce: fees.nonce,
+        maxFeePerGasWei: fees.maxFeePerGasWei,
+        maxPriorityFeePerGasWei: fees.maxPriorityFeePerGasWei,
+        gas: (sim.gasEstimate * 120n) / 100n,
+      },
+      privateKeyHex,
+    );
+
+    const broadcast = await broadcastRawTransaction(rpcUrl, signed.rawTx);
+    await record("broadcast", { txHash: broadcast.txHash });
+    await markMintPlanExecuted(db, plan.id);
+    log.info(
+      { planId: plan.id, walletId: wallet.id, txHash: broadcast.txHash },
+      "managed-key mint transaction broadcast",
+    );
+    await publishEvent(db, {
+      type: "execution.broadcast",
+      projectId: plan.projectId,
+      at: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorCode = isAppError(error)
+      ? error.category
+      : error instanceof Error
+        ? error.message.slice(0, 200)
+        : "unknown_managed_signing_error";
+    log.error({ err: error, planId: plan.id }, "managed-key signing/broadcast failed");
+    await record("failed", { errorCode });
     await releaseMintPlanToArmed(db, plan.id, new Date());
   }
 }

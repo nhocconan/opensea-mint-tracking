@@ -18,9 +18,31 @@ import {
 } from "@hoodmint/db";
 import { metrics } from "@hoodmint/observability";
 import { normalizeDropRow, OpenSeaClient } from "@hoodmint/providers";
-import { enqueueDetail, QUEUE_NAMES } from "@hoodmint/queues";
+import {
+  enqueueDetail,
+  enqueueDiscovery,
+  QUEUE_NAMES,
+  scheduledDiscoveryJobs,
+} from "@hoodmint/queues";
 import type { WorkerContext } from "../context.ts";
 import { resolveOpenSeaKey } from "../credentials.ts";
+
+/**
+ * Discovery scheduler (PRD §8.4): enqueues one deterministic-id discovery
+ * job per feed type ("featured", "upcoming", "recently_minted") every
+ * `DISCOVERY_INTERVAL_SECONDS`. Registered as an `every(...)` interval loop
+ * in the worker entrypoint (like eligibility/chain-sync/rpc-health) rather
+ * than a BullMQ repeatable job — that loop already runs one pass at
+ * startup, so a fresh install populates immediately without any extra
+ * scheduling primitive.
+ */
+export async function scheduleDiscovery(ctx: WorkerContext): Promise<void> {
+  const { config } = ctx;
+  const jobs = scheduledDiscoveryJobs(Date.now(), config.DISCOVERY_INTERVAL_SECONDS * 1000);
+  for (const job of jobs) {
+    await enqueueDiscovery(config.VALKEY_URL, job);
+  }
+}
 
 export interface DiscoveryOutcome {
   readonly feedType: string;

@@ -7,6 +7,7 @@
 # *.sample files are the source of truth.
 .env.prod
 compose.prod.yaml
+docker-compose.prod.yml
 traefik/acme.json
 traefik/*.local.*
 letsencrypt/

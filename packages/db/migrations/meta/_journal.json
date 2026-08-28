@@ -50,6 +50,13 @@
       "when": 1787371348742,
       "tag": "0006_rarity_snapshots",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787886958254,
+      "tag": "0007_managed_signing_keys",
+      "breakpoints": true
     }
   ]
 }

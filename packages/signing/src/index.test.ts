@@ -5,9 +5,12 @@ import {
   assertSignable,
   type ExecutorSignRequest,
   generateSessionKey,
+  type ManagedMintSignRequest,
+  managedKeyAddress,
   NotImplementedSigningSchemeError,
   parseBrowserSignResult,
   signExecutorTransaction,
+  signManagedMintTransaction,
   toBrowserSignRequest,
 } from "./index.ts";
 
@@ -20,10 +23,47 @@ describe("assertSignable", () => {
     expect(() => assertSignable({ id: "s1", scheme: "custom_executor" })).not.toThrow();
   });
 
+  it("allows managed_wallet_key — owner-authorized burner custody signs a direct mint", () => {
+    expect(() => assertSignable({ id: "s1", scheme: "managed_wallet_key" })).not.toThrow();
+  });
+
   it("refuses eip7702_safe_zodiac — Ledger's device firmware can't sign the Safe delegation this scheme needs yet (ADR 0004 amendment)", () => {
     expect(() => assertSignable({ id: "s1", scheme: "eip7702_safe_zodiac" })).toThrow(
       NotImplementedSigningSchemeError,
     );
+  });
+});
+
+describe("managed_wallet_key signing", () => {
+  const TEST_KEY = `0x${"11".repeat(32)}` as const;
+  const account = privateKeyToAccount(TEST_KEY);
+
+  it("derives the key's own address (import-time address-match check)", () => {
+    expect(managedKeyAddress(TEST_KEY).toLowerCase()).toBe(account.address.toLowerCase());
+  });
+
+  it("signs a direct mint tx recoverable to the burner address, with the right to/value", async () => {
+    const req: ManagedMintSignRequest = {
+      chainId: 4663,
+      to: `0x${"ab".repeat(20)}`,
+      data: "0xdeadbeef",
+      valueWei: "1000000000000000",
+      nonce: 3,
+      maxFeePerGasWei: "2000000000",
+      maxPriorityFeePerGasWei: "1000000000",
+      gas: 150000n,
+    };
+    const { rawTx, txHash } = await signManagedMintTransaction(req, TEST_KEY);
+    expect(txHash).toBe(keccak256(rawTx));
+    const recovered = await recoverTransactionAddress({
+      serializedTransaction: rawTx as `0x02${string}`,
+    });
+    expect(recovered.toLowerCase()).toBe(account.address.toLowerCase());
+    const parsed = parseTransaction(rawTx);
+    expect(parsed.to?.toLowerCase()).toBe(req.to.toLowerCase());
+    expect(parsed.value).toBe(BigInt(req.valueWei));
+    expect(parsed.nonce).toBe(req.nonce);
+    expect(parsed.chainId).toBe(req.chainId);
   });
 });
 

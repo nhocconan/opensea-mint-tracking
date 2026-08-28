@@ -11,3 +11,6 @@ export * from "./opensea/normalizer.ts";
 export * from "./opensea/schemas.ts";
 export * from "./x/client.ts";
 export * from "./x/schemas.ts";
+export * from "./xai/client.ts";
+export * from "./xai/oauth.ts";
+export * from "./xai/schemas.ts";

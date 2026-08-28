@@ -33,17 +33,54 @@ describe("alertDedupeKey", () => {
     const b = alertDedupeKey({ ...base, walletId: "a", projectId: "bc" });
     expect(a).not.toBe(b);
   });
+
+  it("is stable for stage_starting keys (not wallet-scoped, walletId left empty) and separates thresholds/stages", () => {
+    const stageStarting = {
+      deploymentId: "default",
+      walletId: "",
+      projectId: "p1",
+      stageId: "s1",
+      alertType: "stage_starting" as const,
+      thresholdMinutes: 60,
+    };
+    expect(alertDedupeKey(stageStarting)).toBe(alertDedupeKey({ ...stageStarting }));
+    expect(alertDedupeKey({ ...stageStarting, thresholdMinutes: 15 })).not.toBe(
+      alertDedupeKey(stageStarting),
+    );
+    expect(alertDedupeKey({ ...stageStarting, stageId: "s2" })).not.toBe(
+      alertDedupeKey(stageStarting),
+    );
+    // Must never collide with a wallet-scoped restricted_eligible key for
+    // the same project/stage — different alertType is enough on its own.
+    expect(alertDedupeKey({ ...base, thresholdMinutes: 60 })).not.toBe(
+      alertDedupeKey(stageStarting),
+    );
+  });
 });
 
 describe("jobId determinism (PRD §8.4)", () => {
   it("matches the PRD patterns", () => {
-    expect(jobId.discovery("opensea", "upcoming", 123)).toBe("discover:opensea:upcoming:123");
+    expect(jobId.discovery("opensea", "upcoming", 123)).toBe("discover.opensea.upcoming.123");
     expect(jobId.detail("opensea", "robindroids5000", "hot")).toBe(
-      "detail:opensea:robindroids5000:hot",
+      "detail.opensea.robindroids5000.hot",
     );
-    expect(jobId.chainSync(4663, 100n, 200n)).toBe("chain:4663:100:200");
-    expect(jobId.eligibility("w1", "d1", 3)).toBe("eligibility:w1:d1:3");
-    expect(jobId.notification("0192abc")).toBe("notify:0192abc");
+    expect(jobId.chainSync(4663, 100n, 200n)).toBe("chain.4663.100.200");
+    expect(jobId.eligibility("w1", "d1", 3)).toBe("eligibility.w1.d1.3");
+    expect(jobId.notification("0192abc")).toBe("notify.0192abc");
+  });
+
+  it("never emits ':' — BullMQ rejects custom job ids containing it", () => {
+    const samples = [
+      jobId.discovery("opensea", "upcoming", 123),
+      jobId.detail("opensea", "slug", "hot"),
+      jobId.chainSync(4663, 100n, 200n),
+      jobId.eligibility("w1", "d1", 3),
+      jobId.notification("0192abc"),
+      jobId.rarity("p1", 1_700_000_000_000),
+    ];
+    for (const id of samples) {
+      expect(id).not.toContain(":");
+    }
   });
 });
 

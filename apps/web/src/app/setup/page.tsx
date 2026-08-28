@@ -1,5 +1,6 @@
 import { hasAnyUser } from "@hoodmint/auth";
 import type { Metadata } from "next";
+import { Logo } from "@/components/logo.tsx";
 import { container } from "@/lib/container.ts";
 import { SetupForm } from "./setup-form.tsx";
 
@@ -19,6 +20,7 @@ export default async function SetupPage() {
 
   return (
     <section className="mx-auto max-w-md px-4 py-10">
+      <Logo className="mb-6 size-9" />
       <h1 className="font-display text-lg font-semibold tracking-tight">HoodMint Radar setup</h1>
       <p className="mt-1 text-xs text-ink-muted">
         Create the first administrator with a one-time bootstrap token. Generate one with{" "}

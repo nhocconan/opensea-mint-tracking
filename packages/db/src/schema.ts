@@ -467,6 +467,15 @@ export const wallets = pgTable(
     credentialId: uuid("credential_id").references(() => credentials.id, {
       onDelete: "set null",
     }),
+    // Owner-authorized managed-key custody (2026-08-28): a burner wallet's
+    // AES-256-GCM-sealed private key (JSON SealedSecret as text), enabling
+    // the `managed_wallet_key` signer scheme for autonomous multi-wallet
+    // minting. Decrypted ONLY in worker memory at fire time, never logged.
+    // Fingerprint is safe to display; the blob is never selected into any
+    // client-facing payload (listWallets excludes it).
+    encryptedSigningKey: text("encrypted_signing_key"),
+    signingKeyFingerprint: text("signing_key_fingerprint"),
+    signingKeyAddedAt: timestamp("signing_key_added_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

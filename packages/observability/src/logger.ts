@@ -39,11 +39,18 @@ export function createLogger(options: LoggerOptions): Logger {
         // posture as every other secret-bearing key above.
         "privateKey",
         "sessionKey",
+        // Managed-key custody (2026-08-28): a burner wallet row carries the
+        // sealed key blob; redact it defensively should a row ever reach a
+        // log field, same posture as the session key above.
+        "encryptedSigningKey",
+        "encrypted_signing_key",
         "*.authorization",
         "*.apiKey",
         "*.token",
         "*.privateKey",
         "*.sessionKey",
+        "*.encryptedSigningKey",
+        "*.encrypted_signing_key",
       ],
       censor: "[REDACTED]",
     },

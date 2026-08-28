@@ -9,10 +9,24 @@
  * plaintext DB columns (PRD §11).
  */
 
-import { AppError } from "@hoodmint/core";
+import { AppError, isAppError } from "@hoodmint/core";
 import type { Db } from "@hoodmint/db";
-import { createCredential, findCredentialByType, getCredentialSecret } from "@hoodmint/db";
-import { OpenSeaClient } from "@hoodmint/providers";
+import {
+  createCredential,
+  findCredentialByType,
+  getCredentialSecret,
+  updateCredentialMetadata,
+  updateCredentialSecret,
+} from "@hoodmint/db";
+import type { Logger } from "@hoodmint/observability";
+import {
+  isTokenExpiring,
+  OpenSeaClient,
+  refreshXaiToken,
+  resolveXaiClient,
+  storedXaiTokenSchema,
+  xaiOAuthClientSchema,
+} from "@hoodmint/providers";
 
 export interface ResolvedKey {
   readonly apiKey: string;
@@ -99,5 +113,163 @@ export async function getWalletJwt(
       return null;
     }
     throw error;
+  }
+}
+
+/* ── xAI (Grok) hype-signal token resolution (ADR 0007) ──────────────────── */
+
+/** Which credential answered. For logs/summaries only — never the token. */
+export type XaiTokenSource = "subscription_oauth" | "stored_api_key" | "env_api_key";
+
+export interface ResolvedXaiToken {
+  readonly token: string;
+  readonly source: XaiTokenSource;
+}
+
+export interface XaiResolveDeps {
+  readonly db: Db;
+  readonly masterKey: string;
+  readonly envApiKey?: string | undefined;
+  readonly log?: Pick<Logger, "warn" | "info"> | undefined;
+  readonly now?: Date | undefined;
+}
+
+/**
+ * Load the optional `xai_oauth_client` override, falling back to the
+ * built-in public Grok-CLI client and endpoints. A malformed or
+ * undecryptable override degrades to the defaults rather than failing the
+ * scan — the defaults are what a subscriber needs anyway.
+ */
+export async function resolveXaiClientConfig(deps: XaiResolveDeps) {
+  const credential = await findCredentialByType(deps.db, "xai_oauth_client");
+  if (credential === undefined) {
+    return resolveXaiClient(null);
+  }
+  const sealed = await getCredentialSecret(deps.db, credential.id, deps.masterKey);
+  if (sealed === undefined) {
+    return resolveXaiClient(null);
+  }
+  const parsed = xaiOAuthClientSchema.safeParse(safeJsonParse(sealed));
+  return resolveXaiClient(parsed.success ? parsed.data : null);
+}
+
+/**
+ * Resolve the xAI bearer in priority order (PRD §11 secret hygiene — no
+ * branch here puts a token in a log field, an error message, or credential
+ * metadata):
+ *
+ *   1. `xai_user_token` — the operator's X Premium+/SuperGrok subscription
+ *      via device-code OAuth. Refreshed in place when inside the 1-hour
+ *      skew; xAI ROTATES the refresh token, so the new one is persisted
+ *      atomically (one UPDATE) before the access token is used.
+ *   2. `xai_api_key` — a console.x.ai API key (separate xAI billing).
+ *   3. `XAI_API_KEY` — env fallback for headless bootstrap.
+ *
+ * Returns null when none is configured. Never throws for a credential
+ * problem: a revoked grant marks the credential unhealthy in its
+ * (non-secret) metadata and falls through, so the scan loop degrades
+ * instead of crashing.
+ */
+export async function resolveXaiToken(deps: XaiResolveDeps): Promise<ResolvedXaiToken | null> {
+  const subscription = await resolveXaiSubscriptionToken(deps);
+  if (subscription !== null) {
+    return { token: subscription, source: "subscription_oauth" };
+  }
+
+  const stored = await findCredentialByType(deps.db, "xai_api_key");
+  if (stored !== undefined) {
+    const secret = await getCredentialSecret(deps.db, stored.id, deps.masterKey);
+    if (secret !== undefined && secret.trim() !== "") {
+      return { token: secret, source: "stored_api_key" };
+    }
+  }
+
+  const env = deps.envApiKey;
+  if (env !== undefined && env.trim() !== "") {
+    return { token: env, source: "env_api_key" };
+  }
+  return null;
+}
+
+async function resolveXaiSubscriptionToken(deps: XaiResolveDeps): Promise<string | null> {
+  const credential = await findCredentialByType(deps.db, "xai_user_token");
+  if (credential === undefined) {
+    return null;
+  }
+  const sealed = await getCredentialSecret(deps.db, credential.id, deps.masterKey);
+  if (sealed === undefined) {
+    return null;
+  }
+  const parsed = storedXaiTokenSchema.safeParse(safeJsonParse(sealed));
+  if (!parsed.success) {
+    await markXaiCredentialUnhealthy(deps, credential.id, "malformed_stored_token");
+    return null;
+  }
+  const token = parsed.data;
+  const now = deps.now ?? new Date();
+  if (!isTokenExpiring(token, { now })) {
+    return token.access_token;
+  }
+
+  if (token.refresh_token === null) {
+    await markXaiCredentialUnhealthy(deps, credential.id, "expired_no_refresh_token");
+    return null;
+  }
+
+  try {
+    const client = await resolveXaiClientConfig(deps);
+    const refreshed = await refreshXaiToken({
+      client,
+      refreshToken: token.refresh_token,
+      now,
+    });
+    // One UPDATE: rotated refresh token + new expiry + health land together,
+    // so a crash can never strand an already-invalidated refresh token.
+    await updateCredentialSecret(deps.db, credential.id, {
+      secret: JSON.stringify(refreshed),
+      masterKey: deps.masterKey,
+      expiresAt: new Date(refreshed.expires_at),
+      metadata: {
+        ...(credential.metadata ?? {}),
+        scopes: refreshed.scopes,
+        health: "healthy",
+        lastErrorCode: null,
+        refreshedAt: now.toISOString(),
+      },
+    });
+    deps.log?.info({ source: "subscription_oauth" }, "refreshed xAI subscription token");
+    return refreshed.access_token;
+  } catch (error) {
+    await markXaiCredentialUnhealthy(
+      deps,
+      credential.id,
+      isAppError(error) ? error.category : "refresh_failed",
+    );
+    deps.log?.warn(
+      { errorCode: isAppError(error) ? error.category : "unknown" },
+      "xAI subscription token refresh failed — falling back to API key",
+    );
+    return null;
+  }
+}
+
+/** Non-secret health marker on the credential row (mirrors provider health). */
+async function markXaiCredentialUnhealthy(
+  deps: XaiResolveDeps,
+  id: string,
+  code: string,
+): Promise<void> {
+  await updateCredentialMetadata(deps.db, id, {
+    health: "unhealthy",
+    lastErrorCode: code,
+    lastErrorAt: (deps.now ?? new Date()).toISOString(),
+  }).catch(() => undefined);
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
   }
 }

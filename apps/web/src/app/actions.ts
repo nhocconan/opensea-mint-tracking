@@ -5,16 +5,20 @@ import {
   activateSigner,
   alertChannels,
   armMintPlan,
+  clearWalletSigningKey,
   consumeBootstrapToken,
   createCredential,
   createMintPlan as createMintPlanRepo,
   createRpcEndpoint,
   createSigner as createSignerRepo,
   createWallet as createWalletRepo,
+  type Db,
   deleteRpcEndpoint,
   disarmMintPlan,
   ensureProvider,
+  findCredentialByType,
   getCredentialSecret,
+  getDropStage,
   getSigner,
   markExecutionAttemptBroadcast,
   markProviderHealth,
@@ -25,9 +29,11 @@ import {
   setSetting,
   setSignerDelegateContract,
   setSignerOnchainCeiling,
+  setWalletSigningKey,
   sql,
   toggleWatch,
   unwrapRows,
+  updateCredentialSecret,
   updateProvider,
   user as userTable,
 } from "@hoodmint/db";
@@ -42,10 +48,15 @@ import {
   buildExecutorDeployData,
   buildSetAllowlistCalldata,
   buildSetOperatorCalldata,
+  pollDeviceToken,
+  requestDeviceAuthorization,
+  resolveXaiClient,
+  storedDevicePendingSchema,
+  xaiOAuthClientSchema,
 } from "@hoodmint/providers";
 import { enqueueMaintenance, enqueueRarity, queues } from "@hoodmint/queues";
-import { fingerprint } from "@hoodmint/secrets";
-import { generateSessionKey, parseBrowserSignResult } from "@hoodmint/signing";
+import { fingerprint, sealSecret } from "@hoodmint/secrets";
+import { generateSessionKey, managedKeyAddress, parseBrowserSignResult } from "@hoodmint/signing";
 import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
@@ -173,7 +184,7 @@ export async function scanNowAction(): Promise<ActionState> {
       dropType: "featured",
       windowStartMs: Date.now(),
     } as never,
-    { jobId: `discover:manual:${Date.now()}` },
+    { jobId: `discover.manual.${Date.now()}` },
   );
   revalidatePath("/admin");
   return { ok: true, message: "Scan enqueued — watch Admin → Overview for the run." };
@@ -239,6 +250,152 @@ export async function createWalletAction(input: {
   return { ok: true, message: "Wallet added." };
 }
 
+/** Bulk-add wallets, one per line as `0xADDRESS` or `0xADDRESS,label`
+ *  (operator+). Fails closed: any invalid line rejects the whole batch,
+ *  nothing partial gets written. `createWalletRepo` upserts on address
+ *  (onConflictDoUpdate), so duplicate lines/re-submits are safe. */
+export async function createWalletsBulkAction(input: { entries: string }): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("wallets:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const lines = input.entries
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (lines.length === 0) {
+    return { ok: false, message: "Enter at least one wallet, one per line." };
+  }
+  if (lines.length > 100) {
+    return { ok: false, message: `Too many lines (${lines.length}) — max 100 per submit.` };
+  }
+  const parsed: { address: string; label?: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] as string;
+    const commaIndex = line.indexOf(",");
+    const addressRaw = commaIndex === -1 ? line : line.slice(0, commaIndex);
+    const labelRaw = commaIndex === -1 ? "" : line.slice(commaIndex + 1).trim();
+    const address = addressRaw.trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) {
+      return {
+        ok: false,
+        message: `Line ${i + 1} is not a valid address ("${line}") — batch rejected, nothing added.`,
+      };
+    }
+    parsed.push({ address, ...(labelRaw !== "" ? { label: labelRaw } : {}) });
+  }
+  for (const entry of parsed) {
+    await createWalletRepo(db, entry);
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "wallet.bulk_create",
+    targetType: "wallet",
+    result: "success",
+    metadata: { count: parsed.length, addresses: parsed.map((p) => p.address) },
+  });
+  revalidatePath("/admin/wallets");
+  return { ok: true, message: `Added/updated ${parsed.length} wallets.` };
+}
+
+/**
+ * Import a burner wallet's private key for autonomous managed-key minting
+ * (owner-authorized custody, 2026-08-28). Gated by `requireFreshStepUp`
+ * exactly like arming a mint — importing a spend-capable key is at least as
+ * sensitive. The key is AES-256-GCM sealed before it touches Postgres and
+ * only ever decrypted in worker memory at fire time; nothing here (or in the
+ * audit log) records the key material — only the derived address and a
+ * one-way fingerprint.
+ */
+export async function importWalletKeyAction(input: {
+  privateKey: string;
+  label?: string;
+  walletId?: string;
+}): Promise<ActionState> {
+  const { db, config } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireFreshStepUp("execution:configure");
+    actor = user.id;
+  } catch (error) {
+    return {
+      ok: false,
+      message: isAppError(error)
+        ? error.message
+        : "Step-up re-authentication (passkey) required to import a signing key.",
+    };
+  }
+  const key = input.privateKey.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{64}$/.test(key)) {
+    return { ok: false, message: "Invalid private key — expected 0x followed by 64 hex chars." };
+  }
+  let address: string;
+  try {
+    address = managedKeyAddress(key).toLowerCase();
+  } catch {
+    return { ok: false, message: "Could not derive an address from that key." };
+  }
+  // Upsert the wallet at the key's own address; a provided walletId must
+  // refer to that same wallet (fail closed on any mismatch).
+  const wallet = await createWalletRepo(db, {
+    address,
+    ...(input.label?.trim() ? { label: input.label.trim() } : {}),
+  });
+  if (wallet === undefined) {
+    return { ok: false, message: "Failed to persist the wallet." };
+  }
+  if (input.walletId !== undefined && input.walletId !== "" && input.walletId !== wallet.id) {
+    return {
+      ok: false,
+      message: "This key does not match the selected wallet's address.",
+    };
+  }
+  const sealedJson = JSON.stringify(sealSecret(key, config.APP_ENCRYPTION_KEY));
+  await setWalletSigningKey(db, wallet.id, sealedJson, fingerprint(key));
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "wallet.key_import",
+    targetType: "wallet",
+    targetId: address,
+    result: "success",
+    metadata: { address, fingerprint: fingerprint(key) },
+  });
+  revalidatePath("/admin/wallets");
+  return { ok: true, message: "Signing key imported and encrypted. Wallet is now managed." };
+}
+
+/** Remove a managed signing key from a wallet (owner-authorized). */
+export async function revokeWalletKeyAction(walletId: string): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("wallets:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!/^[0-9a-f-]{36}$/i.test(walletId)) {
+    return { ok: false, message: "Invalid wallet." };
+  }
+  const cleared = await clearWalletSigningKey(db, walletId);
+  if (!cleared) {
+    return { ok: false, message: "Wallet not found." };
+  }
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "wallet.key_revoke",
+    targetType: "wallet",
+    targetId: walletId,
+    result: "success",
+  });
+  revalidatePath("/admin/wallets");
+  return { ok: true, message: "Signing key removed. Wallet is no longer managed." };
+}
+
 /** Store an OpenSea API key / PAT encrypted at rest (admin only). */
 export async function saveCredentialAction(input: {
   type: "opensea_api_key" | "opensea_pat";
@@ -297,7 +454,363 @@ export async function revokeCredentialAction(id: string): Promise<ActionState> {
     result: revoked ? "success" : "failure",
   });
   revalidatePath("/admin/opensea");
+  revalidatePath("/admin/signals");
   return { ok: revoked, message: revoked ? "Credential revoked." : "Credential not found." };
+}
+
+/* ── xAI (Grok) hype signals (ADR 0007) ──────────────────────────────────── */
+
+/**
+ * Store an OPTIONAL override of the built-in public Grok-CLI client id and
+ * endpoints. Nothing here is a secret (a device-code public client has no
+ * client_secret), but it is sealed like every other credential so there is
+ * exactly one storage path, and the client id is mirrored into non-secret
+ * metadata for display. Operators using their X subscription never need
+ * this — it exists so a private client can be dropped in without a code
+ * change.
+ */
+export async function saveXaiOAuthClientAction(input: {
+  clientId: string;
+  deviceAuthorizationUrl?: string;
+  tokenUrl?: string;
+  apiUrl?: string;
+}): Promise<ActionState> {
+  const { db, config } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("credentials:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const clientId = input.clientId.trim();
+  if (clientId.length < 8) {
+    return { ok: false, message: "Client ID looks too short to be valid." };
+  }
+  const endpoints: Record<string, string> = {};
+  for (const [key, raw] of [
+    ["deviceAuthorization", input.deviceAuthorizationUrl],
+    ["token", input.tokenUrl],
+    ["api", input.apiUrl],
+  ] as const) {
+    const value = (raw ?? "").trim();
+    if (value === "") {
+      continue;
+    }
+    if (!value.startsWith("https://")) {
+      return { ok: false, message: `${key} endpoint must be an https:// URL.` };
+    }
+    endpoints[key] = value;
+  }
+
+  const parsed = xaiOAuthClientSchema.safeParse({
+    client_id: clientId,
+    ...(Object.keys(endpoints).length > 0 ? { endpoints } : {}),
+  });
+  if (!parsed.success) {
+    return { ok: false, message: "Client override is not valid." };
+  }
+  await createCredential(db, {
+    type: "xai_oauth_client",
+    name: "xAI OAuth client override",
+    secret: JSON.stringify(parsed.data),
+    masterKey: config.APP_ENCRYPTION_KEY,
+    metadata: { clientId, endpoints },
+    createdBy: actor ?? undefined,
+  });
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "credential.create",
+    targetType: "credential",
+    targetId: "xai_oauth_client",
+    metadata: { type: "xai_oauth_client" },
+    result: "success",
+  });
+  revalidatePath("/admin/signals");
+  return { ok: true, message: "Saved. Reconnect the account for it to take effect." };
+}
+
+/** Store a console.x.ai API key, encrypted at rest (admin only). */
+export async function saveXaiApiKeyAction(input: { value: string }): Promise<ActionState> {
+  const { db, config } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("credentials:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const value = input.value.trim();
+  if (value.length < 16) {
+    return { ok: false, message: "Value looks too short to be an xAI API key." };
+  }
+  await createCredential(db, {
+    type: "xai_api_key",
+    name: "xAI API key",
+    secret: value,
+    masterKey: config.APP_ENCRYPTION_KEY,
+    createdBy: actor ?? undefined,
+  });
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "credential.create",
+    targetType: "credential",
+    targetId: "xai_api_key",
+    metadata: { type: "xai_api_key" },
+    result: "success",
+  });
+  revalidatePath("/admin/signals");
+  return { ok: true, message: "Saved and encrypted. Older keys remain until revoked." };
+}
+
+/** What the browser is allowed to see about an in-flight device grant. */
+export interface XaiDeviceAuthState {
+  readonly ok: boolean;
+  readonly message: string;
+  /** Short code the operator types at x.ai. Not a credential by itself. */
+  readonly userCode?: string;
+  readonly verificationUri?: string;
+  readonly verificationUriComplete?: string;
+  readonly intervalSeconds?: number;
+  readonly expiresAt?: string;
+}
+
+/**
+ * Begin the RFC 8628 device grant.
+ *
+ * The `device_code` is bearer-equivalent — anyone holding it can complete
+ * the grant — so it is sealed into a short-lived `xai_device_pending`
+ * credential and NEVER returned to the browser. That reuses the existing
+ * AES-256-GCM credential path (no schema change, no new table, and
+ * `revokeCredential` is already the "clear it" primitive) instead of a
+ * cookie, which would put the code in a client-readable round trip, or a
+ * file, which the read-only worker/web FS forbids. The row is bound to the
+ * initiating admin via `createdBy` + `metadata.userId` and is deleted the
+ * moment the poll reaches a terminal state.
+ */
+export async function startXaiDeviceAuthAction(): Promise<XaiDeviceAuthState> {
+  const { db, config } = container();
+  let actor: string;
+  try {
+    const user = await requireApi("credentials:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+
+  try {
+    const client = await resolveStoredXaiClient(db, config.APP_ENCRYPTION_KEY);
+    const device = await requestDeviceAuthorization({ client });
+    const expiresAt = new Date(Date.now() + device.expires_in * 1000);
+
+    // Only one grant may be in flight; drop any stale pending row first.
+    const stale = await findCredentialByType(db, "xai_device_pending");
+    if (stale !== undefined) {
+      await revokeCredential(db, stale.id);
+    }
+    await createCredential(db, {
+      type: "xai_device_pending",
+      name: "xAI device grant (pending)",
+      secret: JSON.stringify({
+        device_code: device.device_code,
+        interval: device.interval,
+        expires_at: expiresAt.toISOString(),
+      }),
+      masterKey: config.APP_ENCRYPTION_KEY,
+      // Non-secret only: never the device_code.
+      metadata: { userId: actor, interval: device.interval },
+      expiresAt,
+      createdBy: actor,
+    });
+    await recordAudit(db, {
+      actorUserId: actor,
+      action: "credential.xai_device_start",
+      targetType: "credential",
+      targetId: "xai_user_token",
+      result: "success",
+    });
+
+    return {
+      ok: true,
+      message: "Approve the code at x.ai, then this page will finish automatically.",
+      userCode: device.user_code,
+      verificationUri: device.verification_uri,
+      ...(device.verification_uri_complete !== undefined
+        ? { verificationUriComplete: device.verification_uri_complete }
+        : {}),
+      intervalSeconds: device.interval,
+      expiresAt: expiresAt.toISOString(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: isAppError(error)
+        ? `Could not start the connection: ${error.message}`
+        : "Could not reach xAI to start the connection.",
+    };
+  }
+}
+
+export interface XaiDevicePollState {
+  readonly status: "pending" | "slow_down" | "denied" | "expired" | "success" | "error";
+  readonly message: string;
+  /** Seconds the client should wait before polling again. */
+  readonly intervalSeconds?: number;
+}
+
+/**
+ * Poll the token endpoint once for the in-flight grant. On success the
+ * tokens are sealed into `xai_user_token` and the pending row is deleted;
+ * on any terminal failure the pending row is deleted too, so a stuck grant
+ * can always be restarted.
+ */
+export async function pollXaiDeviceAuthAction(): Promise<XaiDevicePollState> {
+  const { db, config } = container();
+  let actor: string;
+  try {
+    const user = await requireApi("credentials:manage");
+    actor = user.id;
+  } catch {
+    return { status: "error", message: "Insufficient role." };
+  }
+
+  const pending = await findCredentialByType(db, "xai_device_pending");
+  if (pending === undefined) {
+    return { status: "error", message: "No connection in progress. Start it again." };
+  }
+  // Bind the grant to the admin who started it: another admin polling would
+  // otherwise attach the first admin's subscription without their action.
+  if (pending.metadata?.userId !== actor) {
+    return { status: "error", message: "This connection was started by another admin." };
+  }
+  const sealed = await getCredentialSecret(db, pending.id, config.APP_ENCRYPTION_KEY);
+  const parsed = storedDevicePendingSchema.safeParse(
+    sealed === undefined ? null : safeParseJson(sealed),
+  );
+  if (!parsed.success) {
+    await revokeCredential(db, pending.id);
+    return { status: "error", message: "Pending connection was unreadable. Start it again." };
+  }
+  if (Date.parse(parsed.data.expires_at) <= Date.now()) {
+    await revokeCredential(db, pending.id);
+    return { status: "expired", message: "The code expired before it was approved. Try again." };
+  }
+
+  let outcome: Awaited<ReturnType<typeof pollDeviceToken>>;
+  try {
+    const client = await resolveStoredXaiClient(db, config.APP_ENCRYPTION_KEY);
+    outcome = await pollDeviceToken({
+      client,
+      deviceCode: parsed.data.device_code,
+      intervalSeconds: parsed.data.interval,
+    });
+  } catch {
+    // Transport failure is not terminal — keep the grant alive and retry.
+    return {
+      status: "pending",
+      message: "Waiting for approval…",
+      intervalSeconds: parsed.data.interval,
+    };
+  }
+
+  switch (outcome.status) {
+    case "pending":
+      return {
+        status: "pending",
+        message: "Waiting for approval at x.ai…",
+        intervalSeconds: outcome.intervalSeconds,
+      };
+    case "slow_down":
+      return {
+        status: "slow_down",
+        message: "Waiting for approval at x.ai…",
+        intervalSeconds: outcome.intervalSeconds,
+      };
+    case "denied":
+      await revokeCredential(db, pending.id);
+      await recordAudit(db, {
+        actorUserId: actor,
+        action: "credential.xai_device_connect",
+        targetType: "credential",
+        targetId: "xai_user_token",
+        result: "failure",
+        metadata: { reason: "access_denied" },
+      });
+      revalidatePath("/admin/signals");
+      return { status: "denied", message: "Approval was declined at x.ai — nothing was stored." };
+    case "expired":
+      await revokeCredential(db, pending.id);
+      revalidatePath("/admin/signals");
+      return { status: "expired", message: "The code expired before it was approved. Try again." };
+    case "error":
+      await revokeCredential(db, pending.id);
+      revalidatePath("/admin/signals");
+      return { status: "error", message: `xAI rejected the connection (${outcome.code}).` };
+    case "success": {
+      const token = outcome.token;
+      const metadata = {
+        scopes: token.scopes,
+        health: "healthy",
+        lastErrorCode: null,
+        connectedAt: new Date().toISOString(),
+      };
+      // Rotate an existing connection in place so the worker never sees two
+      // live subscription tokens and the row id stays stable.
+      const existing = await findCredentialByType(db, "xai_user_token");
+      if (existing === undefined) {
+        await createCredential(db, {
+          type: "xai_user_token",
+          name: "xAI subscription (Grok) token",
+          secret: JSON.stringify(token),
+          masterKey: config.APP_ENCRYPTION_KEY,
+          metadata,
+          expiresAt: new Date(token.expires_at),
+          createdBy: actor,
+        });
+      } else {
+        await updateCredentialSecret(db, existing.id, {
+          secret: JSON.stringify(token),
+          masterKey: config.APP_ENCRYPTION_KEY,
+          metadata,
+          expiresAt: new Date(token.expires_at),
+        });
+      }
+      await revokeCredential(db, pending.id);
+      await recordAudit(db, {
+        actorUserId: actor,
+        action: "credential.xai_device_connect",
+        targetType: "credential",
+        targetId: "xai_user_token",
+        result: "success",
+        // Scope names only — no token material (PRD §11).
+        metadata: { scopes: token.scopes },
+      });
+      revalidatePath("/admin/signals");
+      return { status: "success", message: "Connected. The next scan will use your subscription." };
+    }
+  }
+}
+
+/** Built-in public client, overridden by `xai_oauth_client` when present. */
+async function resolveStoredXaiClient(db: Db, masterKey: string) {
+  const credential = await findCredentialByType(db, "xai_oauth_client");
+  if (credential === undefined) {
+    return resolveXaiClient(null);
+  }
+  const sealed = await getCredentialSecret(db, credential.id, masterKey);
+  if (sealed === undefined) {
+    return resolveXaiClient(null);
+  }
+  const parsed = xaiOAuthClientSchema.safeParse(safeParseJson(sealed));
+  return resolveXaiClient(parsed.success ? parsed.data : null);
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 /** Configure a Telegram channel with an encrypted bot token (admin only). */
@@ -1075,10 +1588,15 @@ export async function activateExecutorSignerAction(
   return { ok: true, message: "Signer activated — the worker can now use it for live execution." };
 }
 
-/** Creates a mint plan in `draft` status only — arming is a separate, step-up-gated action below. */
+/** Creates one mint plan per wallet, all in `draft` status only — arming is
+ *  a separate, step-up-gated action below. Fans a single project/stage/
+ *  signer/quantity/ceiling config out across many wallets so the operator
+ *  can mint with many wallets at once instead of repeating this form. */
 export async function createMintPlanAction(input: {
   projectId: string;
-  walletId: string;
+  walletIds: string[];
+  stageId?: string;
+  signerId?: string;
   quantity: number;
   perPlanCeilingWei: string;
 }): Promise<ActionState> {
@@ -1094,8 +1612,20 @@ export async function createMintPlanAction(input: {
   if (!uuid.test(input.projectId)) {
     return { ok: false, message: "Pick a project from the search results." };
   }
-  if (!uuid.test(input.walletId)) {
-    return { ok: false, message: "Select a wallet." };
+  const walletIds = [...new Set(input.walletIds.map((id) => id.trim()))].filter((id) => id !== "");
+  if (walletIds.length === 0) {
+    return { ok: false, message: "Select at least one wallet." };
+  }
+  if (walletIds.length > 50) {
+    return {
+      ok: false,
+      message: `Too many wallets selected (${walletIds.length}) — max 50 per submit.`,
+    };
+  }
+  for (const walletId of walletIds) {
+    if (!uuid.test(walletId)) {
+      return { ok: false, message: "Invalid wallet selection." };
+    }
   }
   if (!/^[0-9]+$/.test(input.perPlanCeilingWei) || input.perPlanCeilingWei === "0") {
     return { ok: false, message: "Per-plan ceiling must be a positive wei amount." };
@@ -1105,22 +1635,72 @@ export async function createMintPlanAction(input: {
   if (!Number.isFinite(input.quantity)) {
     return { ok: false, message: "Quantity must be a number." };
   }
-  const created = await createMintPlanRepo(db, {
-    projectId: input.projectId,
-    walletId: input.walletId,
-    quantity: Math.max(1, Math.floor(input.quantity)),
-    perPlanCeilingWei: input.perPlanCeilingWei,
-  });
-  await recordAudit(db, {
-    actorUserId: actor,
-    action: "execution.mint_plan.create",
-    targetType: "mint_plan",
-    targetId: created.id,
-    result: "success",
-    metadata: { projectId: input.projectId, walletId: input.walletId },
-  });
+  // Both optional — empty string/undefined means "keep the current default
+  // behavior" (coarse 30s tick / browser_wallet fallback), not an error.
+  const stageIdRaw = input.stageId?.trim() ?? "";
+  let stageId: string | undefined;
+  if (stageIdRaw !== "") {
+    if (!uuid.test(stageIdRaw)) {
+      return { ok: false, message: "Invalid stage selection." };
+    }
+    const stage = await getDropStage(db, stageIdRaw);
+    if (stage === undefined || stage.projectId !== input.projectId) {
+      return { ok: false, message: "Selected stage does not belong to the chosen project." };
+    }
+    stageId = stageIdRaw;
+  }
+  const signerIdRaw = input.signerId?.trim() ?? "";
+  let signerId: string | undefined;
+  if (signerIdRaw !== "") {
+    if (!uuid.test(signerIdRaw)) {
+      return { ok: false, message: "Invalid signer selection." };
+    }
+    const signer = await getSigner(db, signerIdRaw);
+    if (signer === undefined) {
+      return { ok: false, message: "Selected signer not found." };
+    }
+    if (signer.status !== "active") {
+      return { ok: false, message: "Selected signer is not active yet." };
+    }
+    signerId = signerIdRaw;
+  }
+  // Sequential: each wallet gets its own plan row, same project/stage/
+  // signer/quantity/ceiling config, and its own audit entry (matches the
+  // existing single-plan audit shape below, which already keys on
+  // walletId per row — a batch-level audit would lose that per-wallet
+  // targetId).
+  const quantity = Math.max(1, Math.floor(input.quantity));
+  for (const walletId of walletIds) {
+    const created = await createMintPlanRepo(db, {
+      projectId: input.projectId,
+      walletId,
+      ...(stageId !== undefined ? { stageId } : {}),
+      ...(signerId !== undefined ? { signerId } : {}),
+      quantity,
+      perPlanCeilingWei: input.perPlanCeilingWei,
+    });
+    await recordAudit(db, {
+      actorUserId: actor,
+      action: "execution.mint_plan.create",
+      targetType: "mint_plan",
+      targetId: created.id,
+      result: "success",
+      metadata: {
+        projectId: input.projectId,
+        walletId,
+        stageId: stageId ?? null,
+        signerId: signerId ?? null,
+      },
+    });
+  }
   revalidatePath("/admin/execution");
-  return { ok: true, message: "Mint plan created as draft (not armed)." };
+  return {
+    ok: true,
+    message:
+      walletIds.length === 1
+        ? "1 mint plan created as draft (not armed)."
+        : `${walletIds.length} mint plans created as drafts (not armed).`,
+  };
 }
 
 /**

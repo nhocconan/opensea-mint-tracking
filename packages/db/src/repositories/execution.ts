@@ -14,6 +14,7 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Db, unwrapRows } from "../client.ts";
 import {
+  type DropStage,
   dropStages,
   type ExecutionAttempt,
   executionAttempts,
@@ -129,6 +130,17 @@ export async function setSignerOnchainCeiling(
     .update(signers)
     .set({ onchainSpendCeilingWei, updatedAt: new Date() })
     .where(eq(signers.id, id));
+}
+
+/**
+ * Looks up a single drop stage by id — used only to validate that a mint
+ * plan's optional `stageId` actually belongs to the project it's being
+ * created against (apps/web's `createMintPlanAction`) before it's ever
+ * persisted. Not part of the hot loop.
+ */
+export async function getDropStage(db: Db, id: string): Promise<DropStage | undefined> {
+  const [row] = await db.select().from(dropStages).where(eq(dropStages.id, id)).limit(1);
+  return row;
 }
 
 export interface CreateMintPlanInput {

@@ -1,6 +1,6 @@
 import { getSetting } from "@hoodmint/db";
 import { DemoBanner, parseThemePreference, resolveTheme, THEME_COOKIE } from "@hoodmint/ui";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist_Mono, Space_Grotesk } from "next/font/google";
 import { cookies } from "next/headers";
 import { AppShell } from "@/components/app-shell.tsx";
@@ -22,7 +22,13 @@ const mono = Geist_Mono({
 export const metadata: Metadata = {
   title: { default: "HoodMint Radar", template: "%s · HoodMint Radar" },
   description: "NFT drop discovery and allowlist eligibility radar for Robinhood Chain",
+  applicationName: "HoodMint Radar",
+  appleWebApp: { capable: true, title: "HoodMint", statusBarStyle: "black-translucent" },
   robots: { index: false, follow: false },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#070908",
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {

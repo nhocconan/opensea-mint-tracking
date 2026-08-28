@@ -23,7 +23,29 @@ export type CredentialType =
    *  spend-capable key is ever decrypted, per this file's own header
    *  comment) gates on this exact type string before treating a
    *  credential row as key material rather than an API token. */
-  | "delegated_session_key";
+  | "delegated_session_key"
+  /** xAI (Grok) hype/risk signals (ADR 0007). Distinct types because they
+   *  are resolved in priority order by the worker and revoked
+   *  independently by the operator:
+   *  - `xai_user_token`: sealed JSON `{access_token, refresh_token,
+   *    expires_at, scopes}` from the RFC 8628 device-code grant — this is
+   *    the operator's X Premium+/SuperGrok subscription. Rotated in place
+   *    on refresh (xAI issues a NEW refresh token every time).
+   *  - `xai_api_key`: a plain console.x.ai API key, the alternative to the
+   *    subscription grant (separate xAI billing).
+   *  - `xai_oauth_client`: OPTIONAL sealed JSON `{client_id, endpoints?}`
+   *    overriding the built-in public Grok-CLI client and endpoints.
+   *    Absent = defaults, which is all a subscriber needs. Non-secret
+   *    `client_id` is mirrored into `metadata.clientId` for display.
+   *  - `xai_device_pending`: sealed JSON `{device_code, interval,
+   *    expires_at}` for an in-flight device grant. The device_code is
+   *    bearer-equivalent — whoever holds it can complete the grant — so it
+   *    is sealed like any other secret and never returned to a browser.
+   *    Short-lived; deleted when the poll resolves. */
+  | "xai_user_token"
+  | "xai_api_key"
+  | "xai_oauth_client"
+  | "xai_device_pending";
 
 export interface CreateCredentialInput {
   readonly type: CredentialType;
@@ -85,6 +107,63 @@ export async function getCredentialSecret(
     { ciphertext: row.ciphertext, keyVersion: row.keyVersion, algorithm: "aes-256-gcm" },
     masterKey,
   );
+}
+
+export interface UpdateCredentialSecretInput {
+  readonly secret: string;
+  readonly masterKey: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly expiresAt?: Date | null;
+}
+
+/**
+ * Re-seal a credential's secret in place. One UPDATE, so a rotated OAuth
+ * refresh token and its new expiry/metadata land atomically — a crash can
+ * never leave the row holding an already-invalidated refresh token beside a
+ * fresh expiry. Returns undefined when the row was revoked concurrently.
+ */
+export async function updateCredentialSecret(
+  db: Db,
+  id: string,
+  input: UpdateCredentialSecretInput,
+): Promise<CredentialView | undefined> {
+  const sealed = sealSecret(input.secret, input.masterKey);
+  const rows = await db
+    .update(credentials)
+    .set({
+      ciphertext: sealed.ciphertext,
+      keyVersion: sealed.keyVersion,
+      fingerprint: fingerprint(input.secret),
+      updatedAt: new Date(),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+    })
+    .where(eq(credentials.id, id))
+    .returning();
+  const row = rows[0];
+  return row === undefined ? undefined : toView(row);
+}
+
+/**
+ * Merge non-secret operational state (health, last error code, connection
+ * timestamps) into a credential's metadata. Never touches the ciphertext,
+ * and callers must never put a secret value in here — metadata is returned
+ * by `listCredentials` and rendered in the admin UI.
+ */
+export async function updateCredentialMetadata(
+  db: Db,
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  const rows = await db.select().from(credentials).where(eq(credentials.id, id)).limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    return;
+  }
+  await db
+    .update(credentials)
+    .set({ metadata: { ...(row.metadata ?? {}), ...patch }, updatedAt: new Date() })
+    .where(eq(credentials.id, id));
 }
 
 export async function findCredentialByType(

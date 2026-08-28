@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-interface ProjectHit {
+export interface ProjectHit {
   readonly id: string;
   readonly name: string;
   readonly chainId: number;
@@ -13,9 +13,17 @@ interface ProjectHit {
  * Type-ahead over the existing /api/v1/projects feed endpoint — no new
  * search infrastructure, just a UI on top of what discovery already
  * indexes. Selecting a hit fills the hidden `projectId` input the
- * surrounding form submits.
+ * surrounding form submits. `onSelect` is optional — callers that need to
+ * react to the choice (e.g. loading that project's stages) get the full
+ * hit, or `null` when the selection is cleared.
  */
-export function ProjectPicker({ name = "projectId" }: { name?: string }) {
+export function ProjectPicker({
+  name = "projectId",
+  onSelect,
+}: {
+  name?: string;
+  onSelect?: (hit: ProjectHit | null) => void;
+}) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<ProjectHit[]>([]);
   const [selected, setSelected] = useState<ProjectHit | null>(null);
@@ -54,6 +62,7 @@ export function ProjectPicker({ name = "projectId" }: { name?: string }) {
           value={selected !== null ? selected.name : query}
           onChange={(e) => {
             setSelected(null);
+            onSelect?.(null);
             setQuery(e.target.value);
             setOpen(true);
           }}
@@ -89,6 +98,7 @@ export function ProjectPicker({ name = "projectId" }: { name?: string }) {
               aria-selected={selected?.id === hit.id}
               onClick={() => {
                 setSelected(hit);
+                onSelect?.(hit);
                 setOpen(false);
               }}
               className="block w-full px-3 py-1.5 text-left hover:bg-base-overlay"

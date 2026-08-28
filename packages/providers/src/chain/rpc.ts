@@ -10,7 +10,16 @@
 import { createHash } from "node:crypto";
 import { AppError } from "@hoodmint/core";
 import type { MintEventInsert } from "@hoodmint/db";
-import { createPublicClient, decodeAbiParameters, http, type Log, type PublicClient } from "viem";
+import {
+  createPublicClient,
+  decodeAbiParameters,
+  http,
+  type Log,
+  numberToHex,
+  type PublicClient,
+  type RpcLog,
+} from "viem";
+import { formatLog } from "viem/utils";
 import {
   ERC721_TRANSFER_TOPIC,
   ERC1155_TRANSFER_BATCH_TOPIC,
@@ -42,6 +51,28 @@ export interface CheckpointState {
   readonly blockHash: string;
 }
 
+/**
+ * True when an eth_getLogs failure means "narrow the block window and retry".
+ * viem hides the raw RPC reason (e.g. Robinhood's "logs matched by query
+ * exceeds limit of 10000") in `details`, leaving a generic "Missing or
+ * invalid parameters." message — so both fields are matched.
+ */
+export function isOversizedLogsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const details =
+    error !== null && typeof error === "object" && "details" in error
+      ? String((error as { details?: unknown }).details ?? "")
+      : "";
+  // "exceed" covers "limit exceeded", "exceeds limit of 10000" (Robinhood
+  // RPC) and "HTTP response body exceeded the size limit" (viem's own 10MB
+  // transport cap on oversized log pages). Timeouts count too: a getLogs
+  // window that can't answer inside the transport timeout is best treated
+  // as too big — shrinking is the adaptive response that makes progress.
+  return /block range|too large|exceed|more than|invalid parameters|took too long|timed? ?out/i.test(
+    `${message}\n${details}`,
+  );
+}
+
 export class ChainRadar {
   private readonly client: PublicClient;
   private readonly chainId: number;
@@ -52,7 +83,10 @@ export class ChainRadar {
 
   constructor(options: ChainRadarOptions) {
     this.client = createPublicClient({
-      transport: http(options.rpcUrl, { retryCount: 2 }),
+      // 30s timeout: the Robinhood RPC needs 2-4s per 1000-block getLogs
+      // window, so a grown 5000-20000-block window legitimately exceeds
+      // viem's 10s default and was surfacing as "RPC Request failed".
+      transport: http(options.rpcUrl, { retryCount: 2, timeout: 30_000 }),
       batch: { multicall: false },
     });
     this.chainId = options.chainId;
@@ -103,7 +137,17 @@ export class ChainRadar {
       }
     }
 
-    const to = head;
+    // Bound each pass so catch-up after downtime advances the checkpoint
+    // incrementally instead of demanding one atomic checkpoint→head sweep —
+    // where any transient RPC failure discarded the entire pass and the
+    // checkpoint never moved. 1000 blocks ≈ up to ~80k matched logs on
+    // this chain (~80 mint-transfers/block), i.e. roughly a minute of
+    // decode+insert per pass — small enough to keep memory and pass
+    // duration bounded, large enough to out-pace ~6 blocks/s head growth.
+    // The lag metric still measures against the true head; the next tick
+    // resumes from the saved checkpoint.
+    const maxSpan = BigInt(Math.min(this.maxRange, 1000));
+    const to = head - from + 1n > maxSpan ? from + maxSpan - 1n : head;
     if (to < from) {
       return {
         fromBlock: from,
@@ -115,10 +159,23 @@ export class ChainRadar {
       };
     }
 
-    const logs = await this.fetchLogsAdaptive(from, to);
-    const events = logs
-      .map((log) => this.decodeMintLog(log, now))
-      .filter((event): event is MintEventInsert => event !== null);
+    // Iterative pager: decode each window's logs immediately and keep only
+    // the (much smaller) MintEventInsert rows. The previous recursive
+    // implementation accumulated every raw Log for the whole span before
+    // decoding — on a dense catch-up that is hundreds of MB and OOM-killed
+    // the 512M worker container.
+    const events: MintEventInsert[] = [];
+    let cursor = from;
+    while (cursor <= to) {
+      const { logs, windowTo } = await this.fetchLogsWindow(cursor, to);
+      for (const log of logs) {
+        const event = this.decodeMintLog(log, now);
+        if (event !== null) {
+          events.push(event);
+        }
+      }
+      cursor = windowTo + 1n;
+    }
 
     return {
       fromBlock: from,
@@ -130,33 +187,61 @@ export class ChainRadar {
     };
   }
 
-  private async fetchLogsAdaptive(from: bigint, to: bigint): Promise<Log[]> {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+  /**
+   * Fetch one adaptively-sized window of logs starting at `from` (never
+   * past `to`) and report the window bound actually used, so the caller's
+   * pager can advance its cursor. Oversize shrinks get their own budget,
+   * separate from transient failures: a dense block region can
+   * legitimately need several shrinks (5000 → 1250 → 312 → 78 → 19 → 10)
+   * before a window fits under both the RPC's matched-log cap and viem's
+   * 10MB response-body cap, and burning the transient-retry budget on
+   * those made catch-up through busy regions impossible. HARD_FLOOR
+   * deliberately undercuts the configured minRange — minRange bounds the
+   * *adaptive* sizing on success; a region so dense that even minRange
+   * overflows must still be traversable rather than wedging the
+   * checkpoint forever.
+   */
+  private async fetchLogsWindow(
+    from: bigint,
+    to: bigint,
+  ): Promise<{ logs: Log[]; windowTo: bigint }> {
+    const HARD_FLOOR = 10;
+    let transientFailures = 0;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
       const windowTo = from + BigInt(this.range) - 1n > to ? to : from + BigInt(this.range) - 1n;
       try {
-        const logs = await this.client.getLogs({
-          fromBlock: from,
-          toBlock: windowTo,
-          topics: [Array.from(MINT_TOPICS)],
-        } as Parameters<typeof this.client.getLogs>[0]);
+        // Raw eth_getLogs via client.request: viem's typed getLogs() does
+        // NOT accept a raw `topics` param — the earlier `as`-cast call
+        // silently dropped the filter and fetched EVERY log on the chain,
+        // which is what actually blew the RPC's matched-log cap and viem's
+        // 10MB body cap at even tiny windows (found live 2026-08-27; this
+        // chain runs ~80 mint-transfer logs per block WITH the filter).
+        const rawLogs = (await this.client.request({
+          method: "eth_getLogs",
+          params: [
+            {
+              fromBlock: numberToHex(from),
+              toBlock: numberToHex(windowTo),
+              topics: [Array.from(MINT_TOPICS)],
+            },
+          ],
+        })) as RpcLog[];
+        const logs = rawLogs.map((raw) => formatLog(raw));
         // Adaptive sizing: heavy pages shrink the range; light ones grow it.
         if (logs.length > 4000 && this.range > this.minRange) {
           this.range = Math.max(this.minRange, Math.floor(this.range / 2));
         } else if (logs.length < 500 && this.range < this.maxRange) {
           this.range = Math.min(this.maxRange, this.range * 2);
         }
-        if (windowTo >= to) {
-          return logs;
-        }
-        const rest = await this.fetchLogsAdaptive(windowTo + 1n, to);
-        return [...logs, ...rest];
+        return { logs, windowTo };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/block range|too large|limit exceeded/i.test(message) && this.range > this.minRange) {
-          this.range = Math.max(this.minRange, Math.floor(this.range / 4));
+        if (isOversizedLogsError(error) && this.range > HARD_FLOOR) {
+          this.range = Math.max(HARD_FLOOR, Math.floor(this.range / 4));
           continue;
         }
-        if (attempt >= 3) {
+        transientFailures += 1;
+        if (transientFailures >= 4) {
           throw new AppError("RetryableProvider", `eth_getLogs failed: ${message.slice(0, 120)}`);
         }
       }

@@ -136,6 +136,15 @@ export const envSchema = z.object({
    *  self-gates to a no-op unless it is true AND X_API_BEARER_TOKEN is set. */
   X_SIGNALS_ENABLED: bool.default(false),
   X_API_BEARER_TOKEN: z.string().trim().optional(),
+  /** ADR 0007 (revised 2026-08-28): the scan now reads X through xAI's Grok
+   *  with the server-side x_search tool, authorized by the operator's X
+   *  Premium+/SuperGrok subscription (device-code OAuth, stored encrypted)
+   *  or a console.x.ai API key — no separate X API billing. This env var is
+   *  the last-resort key fallback for a headless bootstrap; the stored
+   *  credentials take priority. Model ids rev (grok-4.5/4.6 exist), so the
+   *  model is configurable rather than pinned in code. */
+  XAI_MODEL: z.string().trim().min(1).default("grok-4"),
+  XAI_API_KEY: z.string().trim().optional(),
 
   /** Web Push channel (feature-backlog.md, shipped 2026-08-22): opt-in
    *  like X signals above — no channel is active without an operator-

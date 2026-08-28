@@ -56,9 +56,26 @@ function getQueue(name: QueueName, url: string): Queue {
   return queue;
 }
 
+export const DISCOVERY_FEED_TYPES = ["featured", "upcoming", "recently_minted"] as const;
+
 export interface DiscoveryJobData {
-  readonly dropType: "featured" | "upcoming" | "recently_minted";
+  readonly dropType: (typeof DISCOVERY_FEED_TYPES)[number];
   readonly windowStartMs: number;
+}
+
+/**
+ * One discovery job per feed type, deterministically bucketed to the
+ * polling interval (PRD §8.4): `windowStartMs` is floored to `intervalMs`
+ * so repeated calls within the same interval collapse onto the same job id
+ * via {@link enqueueDiscovery}, while each new interval still gets a fresh
+ * run instead of being deduped away forever.
+ */
+export function scheduledDiscoveryJobs(
+  nowMs: number,
+  intervalMs: number,
+): readonly DiscoveryJobData[] {
+  const windowStartMs = Math.floor(nowMs / intervalMs) * intervalMs;
+  return DISCOVERY_FEED_TYPES.map((dropType) => ({ dropType, windowStartMs }));
 }
 
 export interface DetailJobData {
@@ -156,7 +173,7 @@ export function enqueueMaintenance(
   data: MaintenanceJobData,
 ): Promise<Job<MaintenanceJobData>> {
   return queues(url).maintenance.add("maintain", data, {
-    jobId: `maintain:${data.kind}:${Math.floor(Date.now() / 60_000)}`,
+    jobId: `maintain.${data.kind}.${Math.floor(Date.now() / 60_000)}`,
   });
 }
 
