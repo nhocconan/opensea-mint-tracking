@@ -614,6 +614,13 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
         and ds.starts_at <= now()
         and (ds.ends_at is null or ds.ends_at > now())
       order by ds.starts_at asc limit 1)`;
+  // The NEXT (not-yet-open) stage — what an upcoming drop will cost / when
+  // it opens. Null once every stage has started.
+  const nextStageCol = (col: string): SQL =>
+    sql`(select ds.${sql.raw(col)} from drop_stages ds
+      where ds.project_id = ${projects.id}
+        and ds.starts_at > now()
+      order by ds.starts_at asc limit 1)`;
 
   const rows = await db
     .select({
@@ -633,10 +640,13 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       supplyVerified: latestVerified,
       velocity1h,
       uniqueMinters1h,
-      nextStagePriceWei: sql<string | null>`
-        (select ds.price_wei from drop_stages ds
-          where ds.project_id = ${projects.id} and ds.starts_at > now()
-          order by ds.starts_at asc limit 1)`,
+      // Same double-wrap shape as the currentStageCol fields below and for
+      // the same reason: a `${projects.id}` placed DIRECTLY in a select-list
+      // sql template renders as an unqualified `"id"`, which inside the
+      // correlated subselect resolves to `ds.id` — never matching, so this
+      // came back null for every row (found live 2026-08-28 via toSQL()).
+      // Wrapping the inner template keeps it rendered as "projects"."id".
+      nextStagePriceWei: sql<string | null>`${nextStageCol("price_wei")}`,
       stageLabel: sql<string | null>`${currentStageCol("label")}`,
       stageKind: sql<StageKind | null>`${currentStageCol("type")}`,
       stagePriceWei: sql<string | null>`${currentStageCol("price_wei")}`,
