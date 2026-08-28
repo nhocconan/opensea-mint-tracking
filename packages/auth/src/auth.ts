@@ -157,7 +157,8 @@ export function createAuth(options: CreateAuthOptions) {
       // IP-aware, escalating second layer.
       customRules: {
         "/sign-in/email": { window: 60, max: 5 },
-        "/sign-in/passkey": { window: 60, max: 10 },
+        // Real passkey sign-in endpoint (not /sign-in/passkey).
+        "/passkey/verify-authentication": { window: 60, max: 10 },
         "/sign-up/email": { window: 60, max: 3 },
         "/two-factor/*": { window: 60, max: 5 },
       },
@@ -238,16 +239,27 @@ export function createAuth(options: CreateAuthOptions) {
           }
           return;
         }
-        if (ctx.path !== "/sign-in/passkey") {
+        // The @better-auth/passkey plugin's sign-in endpoint is
+        // "/passkey/verify-authentication" (it calls createSession +
+        // setSessionCookie there) — NOT "/sign-in/passkey", which never
+        // fires. Matching the wrong path meant lastAuthMethod was never
+        // stamped, so requireFreshStepUp rejected every arm/import forever
+        // even right after a successful passkey ceremony (found live
+        // 2026-08-28). Match the real endpoint.
+        if (ctx.path !== "/passkey/verify-authentication") {
           return;
         }
         const newSession = ctx.context.newSession;
         if (newSession === undefined || newSession === null) {
           return;
         }
+        // Stamp lastAuthMethod AND refresh createdAt so the step-up freshness
+        // window measures from THIS passkey ceremony, not the original login
+        // (createSession copies the row but the 2-minute gate must key off the
+        // ceremony instant).
         await options.db
           .update(sessionTable)
-          .set({ lastAuthMethod: "passkey" })
+          .set({ lastAuthMethod: "passkey", createdAt: new Date() })
           .where(eq(sessionTable.token, newSession.session.token));
       }),
     },
