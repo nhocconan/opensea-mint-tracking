@@ -4,8 +4,14 @@
  * to run at-least-once.
  */
 
-import { markProviderHealth, unwrapRows } from "@hoodmint/db";
+import {
+  markProviderHealth,
+  resealWalletSigningKey,
+  unwrapRows,
+  walletsWithLegacySealedKey,
+} from "@hoodmint/db";
 import { metrics } from "@hoodmint/observability";
+import { openWalletKey, sealToRecipient, walletPublicKeyFor } from "@hoodmint/secrets";
 import { sql } from "drizzle-orm";
 import type { WorkerContext } from "../context.ts";
 import { resolveOpenSeaKey } from "../credentials.ts";
@@ -15,6 +21,49 @@ export interface MaintenanceSummary {
   scanRunsDeleted: number;
   mintEventsDeleted: number;
   instantKeyRotated: boolean;
+  /** Managed minting keys migrated from the legacy symmetric seal to the
+   *  worker-only envelope this pass (0 when WALLET_KEY_* are unset). */
+  walletKeysResealed: number;
+}
+
+/**
+ * Re-seal any managed minting key still stored under the shared symmetric
+ * APP_ENCRYPTION_KEY to the worker-only X25519 envelope, so the web process
+ * loses the ability to decrypt it. Runs only when the worker holds BOTH
+ * halves (it needs the private key to open the legacy blob and the public
+ * key to re-seal); the keypair is self-checked first so a mismatched pair
+ * can never produce a blob nobody can open. Plaintext is a function-scoped
+ * local, exactly as at fire time. Compare-and-swap on the old blob so a
+ * concurrent revoke wins.
+ */
+export async function resealLegacyWalletKeys(ctx: WorkerContext): Promise<number> {
+  const { db, config, log } = ctx;
+  const pub = config.WALLET_KEY_PUBLIC_KEY;
+  const priv = config.WALLET_KEY_PRIVATE_KEY;
+  if (pub === undefined || priv === undefined) {
+    return 0;
+  }
+  if (walletPublicKeyFor(priv) !== pub) {
+    log.error("WALLET_KEY_PUBLIC_KEY does not match WALLET_KEY_PRIVATE_KEY — refusing to re-seal");
+    return 0;
+  }
+  const legacy = await walletsWithLegacySealedKey(db);
+  let count = 0;
+  for (const row of legacy) {
+    try {
+      const plaintext = openWalletKey(row.sealed, { masterKeyB64: config.APP_ENCRYPTION_KEY });
+      const resealed = JSON.stringify(sealToRecipient(plaintext, pub));
+      if (await resealWalletSigningKey(db, row.id, row.sealed, resealed)) {
+        count += 1;
+      }
+    } catch (error) {
+      log.warn({ walletId: row.id, err: error }, "re-seal of legacy wallet key failed");
+    }
+  }
+  if (count > 0) {
+    log.info({ count }, "managed wallet keys re-sealed to the worker-only envelope");
+  }
+  return count;
 }
 
 // Local rowsOf replaced by the centralized unwrapRows (finding #10) — see
@@ -53,6 +102,13 @@ export async function runMaintenance(ctx: WorkerContext): Promise<MaintenanceSum
     log.warn("instant key rotation check failed (non-fatal)");
   }
 
+  let resealed = 0;
+  try {
+    resealed = await resealLegacyWalletKeys(ctx);
+  } catch (error) {
+    log.warn({ err: error }, "legacy wallet key re-seal pass failed (non-fatal)");
+  }
+
   metrics().inc("hoodmint_scans_total", {
     provider: "maintenance",
     feed: "hourly",
@@ -63,6 +119,7 @@ export async function runMaintenance(ctx: WorkerContext): Promise<MaintenanceSum
     scanRunsDeleted: rowsOf(scanRuns).length,
     mintEventsDeleted: rowsOf(mintEvents).length,
     instantKeyRotated: rotated,
+    walletKeysResealed: resealed,
   };
 }
 

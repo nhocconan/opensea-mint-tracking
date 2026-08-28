@@ -33,3 +33,25 @@ export async function scrubKeyTracesForAddress(db: Db, address: string): Promise
     .returning({ id: auditLogs.id });
   return rows.length;
 }
+
+/**
+ * Postgres keeps the OLD row version (still holding the ciphertext / raw tx)
+ * as a dead tuple after an UPDATE/DELETE until vacuum reclaims it. Run a
+ * plain VACUUM on the three key-bearing tables right after revoke/delete so
+ * the dead copies are dropped promptly rather than on autovacuum's schedule.
+ * Plain VACUUM (not FULL) takes no exclusive lock, so it is safe to run
+ * from a request handler; it cannot run inside a transaction, so this must
+ * be called on the pool, never inside `db.transaction`. Best-effort: the
+ * caller's hygiene already succeeded when this runs, so a failure here is
+ * reported, not thrown.
+ */
+export async function vacuumKeyTables(db: Db): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await db.execute(sql`vacuum wallets`);
+    await db.execute(sql`vacuum mint_plans`);
+    await db.execute(sql`vacuum audit_logs`);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}

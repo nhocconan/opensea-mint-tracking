@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  ASYMMETRIC_ALGORITHM,
   fingerprint,
+  generateWalletKeypair,
   maskTail,
+  openFromRecipient,
   openSecret,
+  openWalletKey,
   redactDeep,
   redactUrl,
   safeEqual,
   sealSecret,
+  sealToRecipient,
+  walletPublicKeyFor,
 } from "./index.ts";
 
 const KEY = Buffer.alloc(32, 3).toString("base64");
@@ -83,5 +89,75 @@ describe("redaction", () => {
     expect(out).not.toContain("jwt.value");
     expect(out).not.toContain("sk-1");
     expect(out).toContain("fine");
+  });
+});
+
+describe("X25519 envelope for managed minting keys (worker-only decrypt)", () => {
+  const PK = `0x${"ab".repeat(32)}`;
+
+  it("round-trips with the private half and rejects the wrong one", () => {
+    const pair = generateWalletKeypair();
+    const other = generateWalletKeypair();
+    const sealed = sealToRecipient(PK, pair.publicKeyB64);
+    expect(sealed.algorithm).toBe(ASYMMETRIC_ALGORITHM);
+    expect(sealed.ciphertext).not.toContain("abab");
+    expect(openFromRecipient(sealed, pair.privateKeyB64)).toBe(PK);
+    expect(() => openFromRecipient(sealed, other.privateKeyB64)).toThrow();
+  });
+
+  it("the public half alone cannot open what it sealed (the whole point)", () => {
+    const pair = generateWalletKeypair();
+    const sealed = sealToRecipient(PK, pair.publicKeyB64);
+    // A 32-byte public key is shape-valid as a "private" key input; it must
+    // still fail authentication, never yield plaintext.
+    expect(() => openFromRecipient(sealed, pair.publicKeyB64)).toThrow();
+  });
+
+  it("uses a fresh ephemeral key per seal and fails closed on tampering", () => {
+    const pair = generateWalletKeypair();
+    const a = sealToRecipient(PK, pair.publicKeyB64);
+    const b = sealToRecipient(PK, pair.publicKeyB64);
+    expect(a.ciphertext).not.toBe(b.ciphertext);
+    const bytes = Buffer.from(a.ciphertext, "base64");
+    const last = bytes[bytes.length - 1];
+    if (last !== undefined) {
+      bytes[bytes.length - 1] = last ^ 0xff;
+    }
+    expect(() =>
+      openFromRecipient({ ...a, ciphertext: bytes.toString("base64") }, pair.privateKeyB64),
+    ).toThrow();
+  });
+
+  it("derives the matching public half from a private half (config self-check)", () => {
+    const pair = generateWalletKeypair();
+    expect(walletPublicKeyFor(pair.privateKeyB64)).toBe(pair.publicKeyB64);
+    expect(Buffer.from(pair.privateKeyB64, "base64")).toHaveLength(32);
+    expect(Buffer.from(pair.publicKeyB64, "base64")).toHaveLength(32);
+  });
+
+  it("openWalletKey dispatches on the stored algorithm tag", () => {
+    const pair = generateWalletKeypair();
+    const legacy = JSON.stringify(sealSecret(PK, KEY));
+    const envelope = JSON.stringify(sealToRecipient(PK, pair.publicKeyB64));
+    expect(openWalletKey(legacy, { masterKeyB64: KEY })).toBe(PK);
+    expect(
+      openWalletKey(envelope, { masterKeyB64: KEY, walletPrivateKeyB64: pair.privateKeyB64 }),
+    ).toBe(PK);
+    expect(() => openWalletKey(envelope, { masterKeyB64: KEY })).toThrow(
+      /WALLET_KEY_PRIVATE_KEY is not configured/,
+    );
+  });
+
+  it("never quotes the stored blob into an error message", () => {
+    const junk = `{"ciphertext":"SECRETBLOB${"x".repeat(40)}"`; // truncated JSON
+    let message = "";
+    try {
+      openWalletKey(junk, { masterKeyB64: KEY });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/not valid JSON/);
+    expect(message).not.toContain("SECRETBLOB");
+    expect(() => openWalletKey('{"foo":1}', { masterKeyB64: KEY })).toThrow(/unexpected shape/);
   });
 });

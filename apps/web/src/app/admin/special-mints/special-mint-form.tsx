@@ -4,7 +4,7 @@ import { mintSpendCeilingWei } from "@hoodmint/core";
 import { useActionState, useMemo, useState } from "react";
 import { type ActionState, createSpecialMintAction } from "@/app/actions.ts";
 import { Countdown } from "@/components/feed-parts.tsx";
-import { formatDateTimeGmt7, formatDateTimeUtc, formatPrice } from "@/lib/format.ts";
+import { formatDateTimeGmt7, formatPrice } from "@/lib/format.ts";
 import { gmt7LocalToUtc, utcToGmt7LocalInput } from "@/lib/mint-target.ts";
 
 export interface StageOption {
@@ -128,7 +128,6 @@ export function SpecialMintForm({
               </span>
               <span className="font-mono text-cyan">{formatPrice(s.priceWei)}</span>
               <span className="font-mono text-ink-muted">{formatDateTimeGmt7(s.startsAt)}</span>
-              <span className="font-mono text-ink-faint">{formatDateTimeUtc(s.startsAt)}</span>
               {s.endsAt !== null ? (
                 <span className="font-mono text-ink-faint">
                   ends {formatDateTimeGmt7(s.endsAt)}
@@ -190,10 +189,6 @@ export function SpecialMintForm({
           <div>
             <dt className="text-[10px] text-ink-faint uppercase">GMT+7</dt>
             <dd className="font-mono text-ink">{formatDateTimeGmt7(fireAtUtcIso)}</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] text-ink-faint uppercase">UTC (stored)</dt>
-            <dd className="font-mono text-ink-muted">{formatDateTimeUtc(fireAtUtcIso)}</dd>
           </div>
           <div>
             <dt className="text-[10px] text-ink-faint uppercase">Countdown</dt>

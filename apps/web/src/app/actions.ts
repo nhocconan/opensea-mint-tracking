@@ -49,6 +49,7 @@ import {
   updateProvider,
   updateWallet,
   user as userTable,
+  vacuumKeyTables,
   wallets as walletsTable,
 } from "@hoodmint/db";
 import {
@@ -69,7 +70,7 @@ import {
   xaiOAuthClientSchema,
 } from "@hoodmint/providers";
 import { enqueueDetail, enqueueMaintenance, enqueueRarity, queues } from "@hoodmint/queues";
-import { fingerprint, sealSecret } from "@hoodmint/secrets";
+import { fingerprint, sealSecret, sealToRecipient } from "@hoodmint/secrets";
 import { generateSessionKey, managedKeyAddress, parseBrowserSignResult } from "@hoodmint/signing";
 import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
@@ -412,7 +413,14 @@ export async function importWalletKeyAction(input: {
       message: "This key does not match the selected wallet's address.",
     };
   }
-  const sealedJson = JSON.stringify(sealSecret(key, config.APP_ENCRYPTION_KEY));
+  // Envelope-seal to the worker's X25519 public key when configured, so this
+  // (internet-facing) process holds nothing that can ever decrypt the key.
+  // Legacy fallback: symmetric APP_ENCRYPTION_KEY (the wallets page flags it).
+  const sealedJson = JSON.stringify(
+    config.WALLET_KEY_PUBLIC_KEY !== undefined
+      ? sealToRecipient(key, config.WALLET_KEY_PUBLIC_KEY)
+      : sealSecret(key, config.APP_ENCRYPTION_KEY),
+  );
   await setWalletSigningKey(db, wallet.id, sealedJson, fingerprint(key));
   await recordAudit(db, {
     actorUserId: actor,
@@ -425,7 +433,13 @@ export async function importWalletKeyAction(input: {
     metadata: { address },
   });
   revalidatePath("/admin/wallets");
-  return { ok: true, message: "Signing key imported and encrypted. Wallet is now managed." };
+  return {
+    ok: true,
+    message:
+      config.WALLET_KEY_PUBLIC_KEY !== undefined
+        ? "Signing key imported and sealed to the worker-only key. Wallet is now managed."
+        : "Signing key imported and encrypted (legacy symmetric — set WALLET_KEY_PUBLIC_KEY for worker-only sealing). Wallet is now managed.",
+  };
 }
 
 /** Remove a managed signing key from a wallet (owner-authorized). */
@@ -451,17 +465,22 @@ export async function revokeWalletKeyAction(walletId: string): Promise<ActionSta
     return { ok: false, message: "Wallet not found." };
   }
   // No-trace hygiene: purge any pre-signed (spend-capable) blobs on this
-  // wallet's plans and scrub key-derived values from its audit rows.
+  // wallet's plans, cancel its open plans (a keyless wallet can never fire
+  // — an armed plan left behind just errors every tick; seen live
+  // 2026-08-28), and scrub key-derived values from its audit rows.
   await clearPresignedForWallet(db, walletId);
+  await cancelOpenPlansForWallet(db, walletId);
   if (walletRow !== undefined) {
     await scrubKeyTracesForAddress(db, walletRow.address);
   }
+  const vacuum = await vacuumKeyTables(db);
   await recordAudit(db, {
     actorUserId: actor,
     action: "wallet.key_revoke",
     targetType: "wallet",
     targetId: walletId,
     result: "success",
+    metadata: { deadTuplesVacuumed: vacuum.ok },
   });
   revalidatePath("/admin/wallets");
   return { ok: true, message: "Signing key removed. Wallet is no longer managed." };
@@ -550,12 +569,14 @@ export async function deleteWalletAction(id: string): Promise<ActionState> {
   if (!deleted) {
     return { ok: false, message: "Wallet not found." };
   }
+  const vacuum = await vacuumKeyTables(db);
   await recordAudit(db, {
     actorUserId: actor,
     action: "wallet.delete",
     targetType: "wallet",
     targetId: id,
     result: "success",
+    metadata: { deadTuplesVacuumed: vacuum.ok },
   });
   revalidatePath("/admin/wallets");
   return { ok: true, message: "Wallet deleted." };

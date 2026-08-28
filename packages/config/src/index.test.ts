@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConfigError, describeConfig, loadEnv, safeLoadEnv } from "./index.ts";
+import { ConfigError, describeConfig, loadEnv, resolveFileSecrets, safeLoadEnv } from "./index.ts";
 
 const KEY = Buffer.alloc(32, 7).toString("base64");
 
@@ -85,5 +85,44 @@ describe("loadEnv", () => {
     expect(described).not.toContain("sk-secret-value");
     expect(described).not.toContain("pat-secret");
     expect(described).toContain('"openseaKeyFromEnv":true');
+  });
+});
+
+describe("managed minting-key envelope config (2026-08-28)", () => {
+  it("treats blank WALLET_KEY_* as unset and validates a real 32-byte key", () => {
+    const blank = loadEnv({
+      source: { ...validSource(), WALLET_KEY_PUBLIC_KEY: "", WALLET_KEY_PRIVATE_KEY: "" },
+    });
+    expect(blank.WALLET_KEY_PUBLIC_KEY).toBeUndefined();
+    expect(blank.WALLET_KEY_PRIVATE_KEY).toBeUndefined();
+    const set = loadEnv({ source: { ...validSource(), WALLET_KEY_PUBLIC_KEY: KEY } });
+    expect(set.WALLET_KEY_PUBLIC_KEY).toBe(KEY);
+    expect(() =>
+      loadEnv({ source: { ...validSource(), WALLET_KEY_PRIVATE_KEY: "c2hvcnQ=" } }),
+    ).toThrow(ConfigError);
+    expect(describeConfig(set)).toMatchObject({
+      walletKeyEnvelopePublic: true,
+      walletKeyEnvelopePrivate: false,
+    });
+  });
+
+  it("reads <NAME>_FILE secrets only when the inline value is unset", () => {
+    const reads: string[] = [];
+    const readFile = (path: string) => {
+      reads.push(path);
+      return `${KEY}\n`;
+    };
+    const resolved = resolveFileSecrets(
+      {
+        APP_ENCRYPTION_KEY: "",
+        APP_ENCRYPTION_KEY_FILE: "/run/secrets/app_key",
+        WALLET_KEY_PRIVATE_KEY: "inline",
+        WALLET_KEY_PRIVATE_KEY_FILE: "/run/secrets/never-read",
+      },
+      readFile,
+    );
+    expect(resolved.APP_ENCRYPTION_KEY).toBe(KEY);
+    expect(resolved.WALLET_KEY_PRIVATE_KEY).toBe("inline");
+    expect(reads).toEqual(["/run/secrets/app_key"]);
   });
 });

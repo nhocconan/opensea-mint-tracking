@@ -321,11 +321,17 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
     }
 
     // 6. Recompute lifecycle (domain purity: status lives in core, PRD §6).
-    const stageRows = await tx
+    const allStageRows = await tx
       .select()
       .from(dropStages)
       .where(eq(dropStages.projectId, projectId))
       .orderBy(asc(dropStages.startsAt));
+    // Paused rows are either provider-paused stages or superseded duplicates
+    // (step 4b). Neither may drive the lifecycle: only the active schedule
+    // does, and the project is PAUSED only when NOTHING active remains
+    // (seen live 2026-08-28: swoki flipped to PAUSED because its stale
+    // duplicate row was paused while the real stage stayed open).
+    const stageRows = allStageRows.filter((s) => !s.paused);
     const latestSupply = await latestSupplyFor(tx, projectId);
     const isoNow = input.now.toISOString();
     const lifecycle = computeLifecycle({
@@ -337,7 +343,7 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
         paused: s.paused,
       })),
       isoNow,
-      paused: stageRows.some((s) => s.paused) ? true : null,
+      paused: allStageRows.length > 0 && stageRows.length === 0 ? true : null,
       supply: {
         minted: latestSupply?.minted ?? null,
         maxSupply: latestSupply?.maxSupply ?? null,
@@ -794,6 +800,11 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
  * Returns rows changed.
  */
 export async function recomputeLifecycles(db: Db): Promise<number> {
+  // SOLD_OUT wins over the schedule (core/status.ts rule, mirrored in SQL):
+  // the latest VERIFIED supply snapshot with minted >= max. A drop whose
+  // supply went in an earlier phase must never sit under /live (seen live
+  // 2026-08-28: crypto2punk2robinhood 5000/5000 shown LIVE; Goat Street
+  // "WL FCFS" armed with zero supply left).
   const rows = await db.execute(sql`
     with st as (
       select p.id,
@@ -801,12 +812,16 @@ export async function recomputeLifecycles(db: Db): Promise<number> {
                   and s.starts_at <= now() and (s.ends_at is null or s.ends_at > now())) as live,
         (select min(s.starts_at) from drop_stages s where s.project_id = p.id and not s.paused
                   and s.starts_at > now()) as next_start,
-        exists (select 1 from drop_stages s where s.project_id = p.id) as has_stages
+        exists (select 1 from drop_stages s where s.project_id = p.id) as has_stages,
+        coalesce((select ss.verified and ss.max_supply is not null and ss.minted >= ss.max_supply
+                    from supply_snapshots ss where ss.project_id = p.id
+                   order by ss.observed_at desc limit 1), false) as sold_out
       from projects p
-      where p.lifecycle_status in ('LIVE', 'NEXT')
+      where p.lifecycle_status in ('LIVE', 'NEXT', 'SOLD_OUT', 'PAUSED')
     )
     update projects p
        set lifecycle_status = case
+             when st.sold_out then 'SOLD_OUT'
              when st.live then 'LIVE'
              when st.next_start is not null then 'NEXT'
              when st.has_stages then 'ENDED'
@@ -817,6 +832,7 @@ export async function recomputeLifecycles(db: Db): Promise<number> {
      where st.id = p.id
        and (
          p.lifecycle_status <> case
+             when st.sold_out then 'SOLD_OUT'
              when st.live then 'LIVE'
              when st.next_start is not null then 'NEXT'
              when st.has_stages then 'ENDED'
@@ -826,6 +842,45 @@ export async function recomputeLifecycles(db: Db): Promise<number> {
     returning p.id
   `);
   return unwrapRows<{ id: string }>(rows).length;
+}
+
+/** LIVE/NEXT projects with a contract — the on-chain supply sweep's targets. */
+export async function supplySweepTargets(
+  db: Db,
+  limit: number,
+): Promise<{ id: string; slug: string | null; contractAddress: string }[]> {
+  const rows = await db
+    .select({ id: projects.id, slug: projects.slug, contractAddress: projects.contractAddress })
+    .from(projects)
+    .where(
+      and(
+        inArray(projects.lifecycleStatus, ["LIVE", "NEXT"]),
+        sql`${projects.contractAddress} is not null`,
+      ),
+    )
+    .orderBy(asc(sql`coalesce(${projects.nextStageStart}, 'infinity'::timestamptz)`))
+    .limit(limit);
+  return rows.filter(
+    (r): r is typeof r & { contractAddress: string } => r.contractAddress !== null,
+  );
+}
+
+/** Record a VERIFIED on-chain supply reading (totalSupply / maxSupply). */
+export async function recordChainSupply(
+  db: Db,
+  projectId: string,
+  reading: { minted: bigint; maxSupply: bigint | null; blockNumber: bigint | null },
+  now: Date,
+): Promise<void> {
+  await db.insert(supplySnapshots).values({
+    projectId,
+    minted: reading.minted,
+    maxSupply: reading.maxSupply,
+    observedAt: now,
+    source: "chain:erc721",
+    verified: reading.maxSupply !== null,
+    blockNumber: reading.blockNumber,
+  });
 }
 
 export interface ProjectDetail {

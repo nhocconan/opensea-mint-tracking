@@ -21,7 +21,8 @@
     "migration": "pnpm --filter @hoodmint/db run migration:generate --",
     "seed": "pnpm --filter @hoodmint/worker exec tsx ../../scripts/seed.ts",
     "bootstrap-token": "pnpm --filter @hoodmint/worker exec tsx ../../scripts/bootstrap-token.ts",
-    "vapid-keys": "pnpm --filter @hoodmint/notifications exec tsx ../../scripts/vapid-keys.ts"
+    "vapid-keys": "pnpm --filter @hoodmint/notifications exec tsx ../../scripts/vapid-keys.ts",
+    "wallet-keys": "pnpm --filter @hoodmint/worker exec tsx ../../scripts/wallet-keys.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.8",

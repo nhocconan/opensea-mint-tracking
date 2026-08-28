@@ -9,6 +9,7 @@
 compose.prod.yaml
 docker-compose.prod.yml
 traefik/acme.json
+secrets/
 traefik/*.local.*
 letsencrypt/
 .state/

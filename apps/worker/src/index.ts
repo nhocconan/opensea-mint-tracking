@@ -30,12 +30,17 @@ import {
 } from "./workers/discovery.ts";
 import { ensureEligibilityRows, runEligibilityPass } from "./workers/eligibility.ts";
 import { runMintExecutionPass, runMintHotLoop } from "./workers/execution.ts";
-import { refreshProviderFreshness, runMaintenance } from "./workers/maintenance.ts";
+import {
+  refreshProviderFreshness,
+  resealLegacyWalletKeys,
+  runMaintenance,
+} from "./workers/maintenance.ts";
 import { runSpeculativePreBuild } from "./workers/pre-build.ts";
 import { runRarityRefresh } from "./workers/rarity.ts";
 import { runRpcHealthCheck } from "./workers/rpc-health.ts";
 import { runSentimentScan } from "./workers/sentiment.ts";
 import { runStageStartingPass } from "./workers/stage-alerts.ts";
+import { runSupplySweep } from "./workers/supply.ts";
 
 const ctx = context();
 const { config, log, db } = ctx;
@@ -144,6 +149,9 @@ async function main(): Promise<void> {
   // DB-only lifecycle recompute so LIVE/NEXT/ENDED follow the clock between
   // OpenSea re-fetches (a drop whose last stage ended must leave /live).
   every(60_000, "lifecycle-recompute", () => recomputeLifecycles(db));
+  // On-chain totalSupply/maxSupply for every LIVE/NEXT drop → SOLD_OUT the
+  // moment the chain says so, whatever OpenSea's schedule still claims.
+  every(120_000, "supply-sweep", () => runSupplySweep(ctx));
   // Delisting/freshness re-check: re-fetch every LIVE/NEXT drop's detail every
   // 15 min so a drop OpenSea hid (drops endpoint → 404) leaves the feeds and
   // renamed/rescheduled drops update. Bounded + paced by the OpenSea limiter.
@@ -190,6 +198,11 @@ async function main(): Promise<void> {
     }),
   );
   every(3_600_000, "maintenance", () => runMaintenance(ctx));
+  // Managed-key hardening: migrate any legacy-sealed minting key to the
+  // worker-only envelope at boot, not on the first hourly tick.
+  void resealLegacyWalletKeys(ctx).catch((error: unknown) =>
+    ctx.log.warn({ err: error }, "boot-time wallet key re-seal failed (non-fatal)"),
+  );
   every(60_000, "freshness", () => refreshProviderFreshness(ctx));
   // ADR 0007: sentiment/risk scan of LIVE/NEXT drops' X mentions. Self-gates
   // to a no-op unless X_SIGNALS_ENABLED + a real bearer token are set; 5-min

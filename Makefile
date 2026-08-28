@@ -1,4 +1,4 @@
-.PHONY: help up down logs ps test lint typecheck verify format migrate migration seed reset-dev backup restore smoke bootstrap token vapid-keys start-dev stop-dev start-prod stop-prod env-setup
+.PHONY: help up down logs ps test lint typecheck verify format migrate migration seed reset-dev backup restore smoke bootstrap token vapid-keys wallet-keys start-dev stop-dev start-prod stop-prod env-setup
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -80,3 +80,6 @@ token-prod: ## Print a one-time /setup bootstrap token for the DOCKERIZED prod s
 
 vapid-keys: ## Generate a VAPID keypair for the Web Push alert channel (run once)
 	pnpm vapid-keys
+
+wallet-keys: ## Generate the X25519 keypair that seals managed minting keys (worker-only decrypt)
+	pnpm wallet-keys

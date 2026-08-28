@@ -34,7 +34,7 @@ export default async function AdminWalletsPage({
     <div className="grid gap-3 md:grid-cols-2">
       <WalletForm prefill={prefill} />
       <BulkWalletForm />
-      <ImportKeyForm />
+      <ImportKeyForm envelopeSealing={config.WALLET_KEY_PUBLIC_KEY !== undefined} />
 
       <section className="rounded-md border border-line bg-base-raised p-4 md:col-span-2">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -92,6 +92,14 @@ export default async function AdminWalletsPage({
                         >
                           managed
                         </span>
+                        {w.signingKeySealedWith === "aes-256-gcm" ? (
+                          <span
+                            className="rounded-xs border border-amber/40 px-1 text-[10px] text-amber"
+                            title="Sealed with the shared APP_ENCRYPTION_KEY (web can decrypt). The worker re-seals it to the worker-only key automatically once WALLET_KEY_* are configured."
+                          >
+                            legacy seal
+                          </span>
+                        ) : null}
                         <RemoveKeyButton walletId={w.id} />
                       </span>
                     ) : (

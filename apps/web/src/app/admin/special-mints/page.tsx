@@ -9,7 +9,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Countdown } from "@/components/feed-parts.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeGmt7, formatDateTimeUtc, shortAddress, toDate } from "@/lib/format.ts";
+import { formatDateTimeGmt7, shortAddress, toDate } from "@/lib/format.ts";
 import { requirePage } from "@/lib/session.ts";
 import { DeleteDraftPlanControl, DisarmControl } from "../execution/mint-plan-controls.tsx";
 import { ArmAllControl } from "./arm-all-control.tsx";
@@ -85,6 +85,20 @@ export default async function AdminSpecialMintsPage({
           maxPerWallet: s.maxPerWallet,
         }));
 
+  // Latest supply snapshot (the worker's on-chain sweep writes one every
+  // 2 min for LIVE/NEXT drops). Sold out = verified minted >= max.
+  const latestSupply =
+    detail === undefined
+      ? undefined
+      : [...detail.supply].sort(
+          (a, b) => toDate(b.observedAt).getTime() - toDate(a.observedAt).getTime(),
+        )[0];
+  const soldOut =
+    latestSupply !== undefined &&
+    latestSupply.verified &&
+    latestSupply.maxSupply !== null &&
+    latestSupply.minted >= latestSupply.maxSupply;
+
   const draftPlans = plans
     .filter((p) => p.status === "draft")
     .map((p) => ({ id: p.id, walletAddress: p.walletAddress, quantity: p.quantity }));
@@ -143,7 +157,22 @@ export default async function AdminSpecialMintsPage({
                 <dt className="text-[10px] text-ink-faint uppercase">Chain</dt>
                 <dd className="font-mono text-ink-muted">{detail.project.chainId}</dd>
               </div>
+              <div>
+                <dt className="text-[10px] text-ink-faint uppercase">Supply (on-chain)</dt>
+                <dd className={`font-mono ${soldOut ? "text-magenta" : "text-ink-muted"}`}>
+                  {latestSupply === undefined
+                    ? "not read yet"
+                    : `${latestSupply.minted.toString()} / ${latestSupply.maxSupply?.toString() ?? "?"}`}
+                  {soldOut ? " · SOLD OUT" : ""}
+                </dd>
+              </div>
             </dl>
+            {soldOut ? (
+              <p className="mt-2 rounded-sm border border-magenta/40 bg-magenta/10 px-2 py-1 text-xs text-magenta">
+                Every token is already minted on-chain — later phases have nothing left to sell.
+                Arming a plan here will fail with “minted out”.
+              </p>
+            ) : null}
           </section>
 
           <SpecialMintForm projectId={detail.project.id} stages={stages} wallets={managedWallets} />
@@ -168,7 +197,7 @@ export default async function AdminSpecialMintsPage({
                       Status
                     </th>
                     <th scope="col" className="py-1 font-normal">
-                      Fires at (GMT+7 / UTC)
+                      Fires at (GMT+7)
                     </th>
                     <th scope="col" className="py-1 font-normal">
                       In
@@ -219,7 +248,6 @@ export default async function AdminSpecialMintsPage({
                         <td className="py-1 text-ink-muted">
                           {formatDateTimeGmt7(fireIso)}
                           <span className="block text-[10px] text-ink-faint">
-                            {formatDateTimeUtc(fireIso)}
                             {p.fireAt !== null
                               ? " · manual"
                               : p.stageLabel !== null
@@ -231,7 +259,7 @@ export default async function AdminSpecialMintsPage({
                           <Countdown iso={fireIso} label="Fire" />
                         </td>
                         <td className="py-1 text-ink-faint">
-                          {p.armedUntil === null ? "—" : formatDateTimeUtc(toDate(p.armedUntil))}
+                          {p.armedUntil === null ? "—" : formatDateTimeGmt7(toDate(p.armedUntil))}
                         </td>
                         <td className={p.presigned ? "py-1 text-acid" : "py-1 text-ink-faint"}>
                           {p.presigned ? "yes" : "no"}

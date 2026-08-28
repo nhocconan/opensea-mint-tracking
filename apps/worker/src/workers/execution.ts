@@ -50,7 +50,7 @@ import {
   fetchFeeContext,
   simulateTransaction,
 } from "@hoodmint/providers";
-import { openSecret, type SealedSecret } from "@hoodmint/secrets";
+import { openWalletKey } from "@hoodmint/secrets";
 import { signExecutorTransaction, signManagedMintTransaction } from "@hoodmint/signing";
 import { eq } from "drizzle-orm";
 import { privateKeyToAccount } from "viem/accounts";
@@ -97,6 +97,11 @@ const MAX_PARALLEL_FIRES = 8;
  * Cheap when idle: one indexed query returning armed-with-stage plans, a
  * pure phase computation each, and only a claim/fire when actually due.
  */
+/** OpenSea's `/drops/{slug}/mint` 422 body when supply is exhausted. */
+export function isMintedOutError(message: string): boolean {
+  return /fully minted out|minted out|sold out/i.test(message);
+}
+
 export async function runMintHotLoop(ctx: WorkerContext): Promise<HotLoopSummary> {
   const { db, config } = ctx;
   const now = Date.now();
@@ -236,10 +241,10 @@ async function runPresignPass(
       if (sealed === undefined) {
         continue;
       }
-      const privateKeyHex = openSecret(
-        JSON.parse(sealed) as SealedSecret,
-        config.APP_ENCRYPTION_KEY,
-      );
+      const privateKeyHex = openWalletKey(sealed, {
+        masterKeyB64: config.APP_ENCRYPTION_KEY,
+        walletPrivateKeyB64: config.WALLET_KEY_PRIVATE_KEY,
+      });
       const signed = await signManagedMintTransaction(
         {
           chainId: tx.chainId,
@@ -497,10 +502,19 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
 
     return { expired, claimed: true, outcome: outcome.stage, planId: plan.id };
   } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown_error";
+    if (isMintedOutError(message)) {
+      // Nothing left to mint — OpenSea says the drop is fully minted out
+      // (Goat Street 2026-08-28: supply went in an earlier phase, the
+      // "next" phase never had any). Terminal: stop hammering the API every
+      // tick and tell the operator plainly.
+      log.warn({ planId: plan.id }, "drop fully minted out — plan failed (terminal)");
+      await record("failed", { errorCode: "minted_out: drop is fully minted out" });
+      await failMintPlanExecution(db, plan.id);
+      return { expired, claimed: true, outcome: "minted_out", planId: plan.id };
+    }
     log.error({ err: error, planId: plan.id }, "mint execution pass failed");
-    await record("failed", {
-      errorCode: error instanceof Error ? error.message.slice(0, 200) : "unknown_error",
-    });
+    await record("failed", { errorCode: message.slice(0, 200) });
     // A thrown error mid-pass (RPC blip, transient read failure) is usually
     // retryable — release to armed rather than stranding the plan in
     // 'executing' (finding #1). If it's genuinely broken it'll fail again
@@ -747,9 +761,12 @@ async function runManagedFire(
     const fees = await fetchFeeContext(rpcUrl, wallet.address);
 
     // Decrypt the sealed key into a function-scoped local, hand it straight to
-    // the chokepoint, and never log it. `openSecret` throws on tamper/wrong key.
-    const sealed = JSON.parse(wallet.encryptedSigningKey) as SealedSecret;
-    const privateKeyHex = openSecret(sealed, ctx.config.APP_ENCRYPTION_KEY);
+    // the chokepoint, and never log it. `openWalletKey` handles both the
+    // worker-only envelope and a legacy symmetric blob; throws on tamper.
+    const privateKeyHex = openWalletKey(wallet.encryptedSigningKey, {
+      masterKeyB64: ctx.config.APP_ENCRYPTION_KEY,
+      walletPrivateKeyB64: ctx.config.WALLET_KEY_PRIVATE_KEY,
+    });
     const signed = await signManagedMintTransaction(
       {
         chainId: outcome.tx.chainId,

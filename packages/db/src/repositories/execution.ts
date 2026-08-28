@@ -206,10 +206,24 @@ export async function armMintPlan(
   return updated[0];
 }
 
+/**
+ * Column patch that drops a plan's pre-signed raw tx. A pre-signed blob is a
+ * spend-capable artifact (ADR 0009 fast path), so EVERY transition into a
+ * terminal status (cancelled / expired / executed / failed) applies this —
+ * key-hygiene finding 2026-08-28: disarm and expiry used to leave the blob
+ * behind until the wallet's key was revoked.
+ */
+const PURGE_PRESIGNED = {
+  presignedRawTx: null,
+  presignedNonce: null,
+  presignedTxHash: null,
+  presignedAt: null,
+} as const;
+
 export async function disarmMintPlan(db: Db, id: string): Promise<MintPlan | undefined> {
   const updated = await db
     .update(mintPlans)
-    .set({ status: "cancelled", updatedAt: new Date() })
+    .set({ status: "cancelled", ...PURGE_PRESIGNED, updatedAt: new Date() })
     .where(and(eq(mintPlans.id, id), eq(mintPlans.status, "armed")))
     .returning();
   return updated[0];
@@ -450,13 +464,7 @@ export async function savePresignedTx(
 export async function clearPresignedTx(db: Db, planId: string): Promise<void> {
   await db
     .update(mintPlans)
-    .set({
-      presignedRawTx: null,
-      presignedNonce: null,
-      presignedTxHash: null,
-      presignedAt: null,
-      updatedAt: new Date(),
-    })
+    .set({ ...PURGE_PRESIGNED, updatedAt: new Date() })
     .where(eq(mintPlans.id, planId));
 }
 
@@ -464,13 +472,7 @@ export async function clearPresignedTx(db: Db, planId: string): Promise<void> {
 export async function clearPresignedForWallet(db: Db, walletId: string): Promise<number> {
   const rows = await db
     .update(mintPlans)
-    .set({
-      presignedRawTx: null,
-      presignedNonce: null,
-      presignedTxHash: null,
-      presignedAt: null,
-      updatedAt: new Date(),
-    })
+    .set({ ...PURGE_PRESIGNED, updatedAt: new Date() })
     .where(eq(mintPlans.walletId, walletId))
     .returning({ id: mintPlans.id });
   return rows.length;
@@ -480,7 +482,7 @@ export async function clearPresignedForWallet(db: Db, walletId: string): Promise
 export async function cancelOpenPlansForWallet(db: Db, walletId: string): Promise<number> {
   const rows = await db
     .update(mintPlans)
-    .set({ status: "cancelled", updatedAt: new Date() })
+    .set({ status: "cancelled", ...PURGE_PRESIGNED, updatedAt: new Date() })
     .where(
       and(
         eq(mintPlans.walletId, walletId),
@@ -646,7 +648,7 @@ export async function claimArmedMintPlan(
 export async function expireStaleMintPlans(db: Db, now: Date): Promise<number> {
   const updated = await db
     .update(mintPlans)
-    .set({ status: "expired", updatedAt: now })
+    .set({ status: "expired", ...PURGE_PRESIGNED, updatedAt: now })
     .where(
       and(
         inArray(mintPlans.status, ["armed", "executing"]),
@@ -683,7 +685,7 @@ export async function releaseMintPlanToArmed(db: Db, id: string, now: Date): Pro
 export async function markMintPlanExecuted(db: Db, id: string): Promise<void> {
   await db
     .update(mintPlans)
-    .set({ status: "executed", updatedAt: new Date() })
+    .set({ status: "executed", ...PURGE_PRESIGNED, updatedAt: new Date() })
     .where(and(eq(mintPlans.id, id), eq(mintPlans.status, "executing")));
 }
 
@@ -692,7 +694,7 @@ export async function markMintPlanExecuted(db: Db, id: string): Promise<void> {
 export async function failMintPlanExecution(db: Db, id: string): Promise<void> {
   await db
     .update(mintPlans)
-    .set({ status: "failed", updatedAt: new Date() })
+    .set({ status: "failed", ...PURGE_PRESIGNED, updatedAt: new Date() })
     .where(and(eq(mintPlans.id, id), eq(mintPlans.status, "executing")));
 }
 
