@@ -27,12 +27,21 @@ export default async function CalendarPage() {
     ...(user !== null ? { userId: user.id } : {}),
   }).catch(() => ({ rows: [], nextCursor: null }));
 
+  // A NEXT project's upcoming stage lives in `nextStageStart`; `stageStartsAt`
+  // is the *currently-active* stage (starts_at <= now()), which is null for
+  // not-yet-started drops — so keying the calendar off it hid every upcoming
+  // drop (found live 2026-08-28). Coalesce: upcoming stage first, else the
+  // live stage.
+  const stageStart = (row: (typeof page.rows)[number]): Date | string | null =>
+    row.nextStageStart ?? row.stageStartsAt;
+
   const groups = new Map<string, typeof page.rows>();
   for (const row of page.rows) {
-    if (row.stageStartsAt === null) {
+    const start = stageStart(row);
+    if (start === null) {
       continue;
     }
-    const dayKey = toDate(row.stageStartsAt).toISOString().slice(0, 10);
+    const dayKey = toDate(start).toISOString().slice(0, 10);
     const bucket = groups.get(dayKey) ?? [];
     bucket.push(row);
     groups.set(dayKey, bucket);
@@ -93,28 +102,29 @@ export default async function CalendarPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line font-mono">
-                  {rows.map((row) => (
-                    <tr
-                      key={`${row.id}:${row.stageStartsAt !== null ? toDate(row.stageStartsAt).toISOString() : ""}`}
-                    >
-                      <td
-                        className="w-24 py-2 pl-3 text-ink-muted"
-                        title={formatDateTimeUtc(row.stageStartsAt)}
-                      >
-                        {formatDateTimeLocal(row.stageStartsAt)}
-                      </td>
-                      <td className="py-2">
-                        <Link href={`/projects/${row.id}`} className="text-ink hover:text-acid">
-                          {row.name}
-                        </Link>
-                      </td>
-                      <td className="py-2 text-ink-faint">{row.stageLabel ?? "—"}</td>
-                      <td className="py-2 text-ink-faint">{formatPrice(row.stagePriceWei)}</td>
-                      <td className="w-20 py-2 pr-3">
-                        <StatusChip status={row.lifecycleStatus} stale={false} />
-                      </td>
-                    </tr>
-                  ))}
+                  {rows.map((row) => {
+                    const start = stageStart(row);
+                    return (
+                      <tr key={`${row.id}:${start !== null ? toDate(start).toISOString() : ""}`}>
+                        <td
+                          className="w-24 py-2 pl-3 text-ink-muted"
+                          title={formatDateTimeUtc(start)}
+                        >
+                          {formatDateTimeLocal(start)}
+                        </td>
+                        <td className="py-2">
+                          <Link href={`/projects/${row.id}`} className="text-ink hover:text-acid">
+                            {row.name}
+                          </Link>
+                        </td>
+                        <td className="py-2 text-ink-faint">{row.stageLabel ?? "—"}</td>
+                        <td className="py-2 text-ink-faint">{formatPrice(row.stagePriceWei)}</td>
+                        <td className="w-20 py-2 pr-3">
+                          <StatusChip status={row.lifecycleStatus} stale={false} />
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </section>
