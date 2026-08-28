@@ -15,7 +15,9 @@ import {
   createCredential,
   findCredentialByType,
   getCredentialSecret,
+  getSetting,
   revokeCredential,
+  setSetting,
   updateCredentialMetadata,
   updateCredentialSecret,
 } from "@hoodmint/db";
@@ -28,6 +30,8 @@ import {
   storedXaiTokenSchema,
   xaiOAuthClientSchema,
 } from "@hoodmint/providers";
+
+const INSTANT_KEY_BACKOFF_SETTING = "opensea_instant_key_backoff_until";
 
 export interface ResolvedKey {
   readonly apiKey: string;
@@ -88,8 +92,29 @@ export async function resolveOpenSeaKey(
   }
 
   // Bootstrap a fresh instant key (free tier; rotated by maintenance).
+  // OpenSea rate-limits KEY CREATION itself ("Key creation rate limit
+  // exceeded", 429). Every worker pass calls this resolver, so without a
+  // cooldown a dead key turns into a hammer on that endpoint that keeps the
+  // 429 alive indefinitely (found live 2026-08-28). Back off 15 min after a
+  // failed bootstrap; passes fail fast (AuthRequired) until then.
+  const backoffUntil = await getSetting<number>(db, INSTANT_KEY_BACKOFF_SETTING);
+  if (backoffUntil !== undefined && backoffUntil > Date.now()) {
+    throw new AppError(
+      "AuthRequired",
+      "no OpenSea key: instant-key issuance is rate-limited — add a Developer API key in Admin → OpenSea",
+      { statusCode: 401 },
+    );
+  }
   const bootstrap = new OpenSeaClient();
-  const created = await bootstrap.createInstantKey();
+  let created: { apiKey: string; expiresAt: Date | null };
+  try {
+    created = await bootstrap.createInstantKey();
+  } catch (error) {
+    await setSetting(db, INSTANT_KEY_BACKOFF_SETTING, Date.now() + 15 * 60 * 1000).catch(
+      () => undefined,
+    );
+    throw error;
+  }
   const expiresAt = created.expiresAt ?? new Date(Date.now() + 6 * 24 * 3600 * 1000);
   await createCredential(db, {
     type: "opensea_instant_key",
