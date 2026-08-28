@@ -5,6 +5,7 @@
  */
 export const ADMIN_NAV = [
   ["/admin", "Overview"],
+  ["/admin/guide", "Guide"],
   ["/admin/sources", "Sources"],
   ["/admin/opensea", "OpenSea"],
   ["/admin/signals", "Signals"],
