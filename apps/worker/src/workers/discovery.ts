@@ -103,7 +103,19 @@ export async function runDiscoveryCycle(
         now,
         feedType,
       });
-      const upserted = await upsertProjectFromSource(db, draft);
+      let upserted: Awaited<ReturnType<typeof upsertProjectFromSource>>;
+      try {
+        upserted = await upsertProjectFromSource(db, draft);
+      } catch (error) {
+        log.warn(
+          {
+            slug: row.collection_slug,
+            err: error instanceof Error ? error.message.slice(0, 160) : "unknown",
+          },
+          "drop upsert failed for one row (skipped)",
+        );
+        continue;
+      }
       if (upserted.created) {
         created += 1;
         // Fresh projects get a detail refresh immediately for full stages.
@@ -244,7 +256,18 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
     let created = 0;
     for (const row of rows) {
       const draft = normalizeCollectionRow(row, { chainId: config.ROBINHOOD_CHAIN_ID, now });
-      const upserted = await upsertProjectFromSource(db, draft);
+      // One bad row must never abort the whole sweep (found live 2026-08-28:
+      // a slug collision failed the pass and marked the provider "down").
+      let upserted: Awaited<ReturnType<typeof upsertProjectFromSource>>;
+      try {
+        upserted = await upsertProjectFromSource(db, draft);
+      } catch (error) {
+        log.warn(
+          { slug: row.slug, err: error instanceof Error ? error.message.slice(0, 160) : "unknown" },
+          "collection upsert failed for one row (skipped)",
+        );
+        continue;
+      }
       if (upserted.created) {
         created += 1;
         // Detail refresh ONLY for newly discovered collections: it's what

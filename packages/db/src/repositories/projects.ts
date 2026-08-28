@@ -156,7 +156,21 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
         .update(projects)
         .set({
           name: input.name,
-          ...(input.slug !== null ? { slug: input.slug } : {}),
+          // Slug-collision guard (found live 2026-08-28): OpenSea re-assigned
+          // the slug "cat-verses" from one Catverse contract to another, so
+          // updating this row's slug hit projects_slug_idx and the whole
+          // collection sweep pass aborted. Only take the slug if no OTHER
+          // project already owns it; otherwise keep ours.
+          ...(input.slug !== null
+            ? {
+                slug: sql<string | null>`case
+                  when exists (select 1 from projects p2
+                                where p2.slug = ${input.slug} and p2.id <> ${projectId})
+                  then ${projects.slug}
+                  else ${input.slug}
+                end`,
+              }
+            : {}),
           ...(input.imageUrl !== null ? { imageUrl: input.imageUrl } : {}),
           confidence: input.confidence,
           lastSeenAt: input.now,
