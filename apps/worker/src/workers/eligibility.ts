@@ -29,7 +29,7 @@ import {
 } from "@hoodmint/notifications";
 import { metrics } from "@hoodmint/observability";
 import { OpenSeaClient } from "@hoodmint/providers";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { WorkerContext } from "../context.ts";
 import { getWalletJwt, resolveOpenSeaKey } from "../credentials.ts";
 
@@ -297,11 +297,14 @@ export async function ensureEligibilityRows(ctx: WorkerContext): Promise<number>
     return 0;
   }
   const cutoff = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  // Cover both upcoming (NEXT) AND currently-minting (LIVE) drops — a LIVE
+  // restricted stage still needs a WL verdict (found live 2026-08-28: only
+  // NEXT was covered, so half of live/next drops never got checked).
   const candidates = await db
     .select({ id: projectsTable.id, slug: projectsTable.slug })
     .from(projectsTable)
-    .where(and(eq(projectsTable.lifecycleStatus, "NEXT")))
-    .limit(200);
+    .where(inArray(projectsTable.lifecycleStatus, ["NEXT", "LIVE"]))
+    .limit(500);
   let created = 0;
   for (const project of candidates) {
     if (project.slug === null) {
