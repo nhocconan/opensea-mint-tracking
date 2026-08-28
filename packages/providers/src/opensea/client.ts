@@ -25,9 +25,11 @@ import {
   exchangeResponseSchema,
   instantKeyResponseSchema,
   matchesChain,
+  type ParsedCollectionSocials,
   type ParsedCollectionsPage,
   type ParsedDropsPage,
   type ParsedNftsPage,
+  parseCollectionSocials,
   parseCollectionsPage,
   parseDropsPage,
   parseEligibility,
@@ -327,6 +329,12 @@ export class OpenSeaClient {
   async getDrop(slug: string): Promise<unknown> {
     const { json } = await this.call(`/api/v2/drops/${encodeURIComponent(slug)}`);
     return json;
+  }
+
+  /** Collection socials + OpenSea verification status (one Read call). */
+  async getCollectionSocials(slug: string): Promise<ParsedCollectionSocials> {
+    const { json } = await this.call(`/api/v2/collections/${encodeURIComponent(slug)}`);
+    return parseCollectionSocials(json);
   }
 
   /**

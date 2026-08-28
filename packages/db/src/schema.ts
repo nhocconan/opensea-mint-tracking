@@ -187,6 +187,15 @@ export const projects = pgTable(
     name: text("name").notNull(),
     slug: text("slug"),
     imageUrl: text("image_url"),
+    // Collection socials from OpenSea `/collections/{slug}` — surfaced in the
+    // feed so a scam check does not need a click-through (user ask
+    // 2026-08-28). `safelistStatus` is OpenSea's OWN verification
+    // ("verified" = blue check), distinct from our `confidence`.
+    twitterUsername: text("twitter_username"),
+    projectUrl: text("project_url"),
+    discordUrl: text("discord_url"),
+    safelistStatus: text("safelist_status"),
+    socialsFetchedAt: timestamp("socials_fetched_at", { withTimezone: true }),
     confidence: text("confidence", {
       enum: ["verified", "corroborated", "single-source", "unverified"],
     })

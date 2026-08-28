@@ -5,7 +5,16 @@ import { useEffect, useState, useTransition } from "react";
 import { toggleWatchAction } from "@/app/actions.ts";
 
 /** Live countdown in local time with UTC tooltip (PRD §5.2). */
-export function Countdown({ iso, label }: { iso: string | null; label: string }) {
+export function Countdown({
+  iso,
+  label,
+  pastPrefix = "ended",
+}: {
+  iso: string | null;
+  label: string;
+  /** Word for a target already in the past — "opened" for a stage start. */
+  pastPrefix?: string;
+}) {
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -40,7 +49,7 @@ export function Countdown({ iso, label }: { iso: string | null; label: string })
       title={`${label}: ${new Date(iso).toISOString()} (UTC)`}
       className="font-mono text-xs text-ink-muted tabular-nums"
     >
-      {past ? "ended " : ""}
+      {past ? `${pastPrefix} ` : ""}
       {text}
       {past ? " ago" : ""}
     </time>

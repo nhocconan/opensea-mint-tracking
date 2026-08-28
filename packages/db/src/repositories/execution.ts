@@ -543,6 +543,12 @@ export async function armedPlansWithStageStart(
  * status+window half of that predicate; the caller still re-checks the
  * ceiling half (which needs the signer row) before proceeding.
  */
+/** How early (ms) a plan may be claimed ahead of its fire target — must
+ *  cover the hot loop's lead + clock-offset correction (a few hundred ms)
+ *  and no more, or the coarse 30s pass fires plans early (seen live: 2s
+ *  tolerance → 1.5s early). */
+const CLAIM_FIRE_TOLERANCE_MS = 500;
+
 export async function claimArmedMintPlan(
   db: Db,
   now: Date,
@@ -559,10 +565,21 @@ export async function claimArmedMintPlan(
   // to `armed` after every non-terminal outcome (apps/worker/execution.ts),
   // and this lease is the crash-recovery backstop for that reset.
   const leaseCutoff = new Date(now.getTime() - leaseMs);
+  // Never claim BEFORE the plan's fire target (operator fire_at override,
+  // else the stage start, else — no target at all — immediately). The
+  // precision hot loop fires a hair early on purpose, hence the small
+  // tolerance. Found live 2026-08-28: the coarse 30s pass claimed an armed
+  // plan on an already-open stage 90s before its fire_at.
+  const fireTolerance = new Date(now.getTime() + CLAIM_FIRE_TOLERANCE_MS);
   const rows = await db.execute(sql`
     with due as (
       select id from mint_plans
        where armed_until > ${now.toISOString()}
+         and coalesce(
+               fire_at,
+               (select s.starts_at from drop_stages s where s.id = mint_plans.stage_id),
+               armed_at
+             ) <= ${fireTolerance.toISOString()}
          and (
            status = 'armed'
            or (status = 'executing' and updated_at < ${leaseCutoff.toISOString()})

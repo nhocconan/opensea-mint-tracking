@@ -4,7 +4,7 @@
  * module only maps and validates shapes, preserving provenance hooks.
  */
 import { createHash } from "node:crypto";
-import type { Confidence, StageKind } from "@hoodmint/core";
+import { type Confidence, normalizeStageId, type StageKind } from "@hoodmint/core";
 import type { ProjectUpsert, StageUpsert } from "@hoodmint/db";
 import type { z } from "zod";
 import {
@@ -73,7 +73,7 @@ export function stageTypeToKind(stageType: string): StageKind {
 
 function toStageUpsert(stage: z.infer<typeof stageSchema>): StageUpsert {
   return {
-    providerStageId: stage.uuid,
+    providerStageId: normalizeStageId(stage.uuid),
     label: stage.label ?? stage.stage_type,
     kind: stageTypeToKind(stage.stage_type),
     priceWei: stage.price ?? null,
@@ -236,12 +236,13 @@ export function normalizeEligibility(
   const results: EligibilityStageResult[] = [];
   let unknownStages = 0;
   for (const stage of parsed.stages) {
-    const known = stagesByUuid.get(stage.stage_uuid);
+    const stageUuid = normalizeStageId(stage.stage_uuid);
+    const known = stagesByUuid.get(stageUuid);
     if (known === undefined) {
       unknownStages += 1;
     }
     results.push({
-      stageUuid: stage.stage_uuid,
+      stageUuid,
       eligible: stage.is_eligible,
       maxMintable:
         stage.max_total_mintable_by_wallet ?? stage.max_total_mintable_by_wallet_per_token ?? null,

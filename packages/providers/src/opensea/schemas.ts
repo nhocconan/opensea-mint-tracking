@@ -108,6 +108,37 @@ export const collectionRowSchema = z.object({
   created_date: z.string().nullable().optional(),
 });
 
+/** `GET /api/v2/collections/{slug}` — the socials/verification subset. */
+export const collectionDetailSchema = z.object({
+  collection: z.string().min(1),
+  twitter_username: z.string().nullable().optional(),
+  project_url: z.string().nullable().optional(),
+  discord_url: z.string().nullable().optional(),
+  safelist_status: z.string().nullable().optional(),
+});
+
+export interface ParsedCollectionSocials {
+  readonly twitterUsername: string | null;
+  readonly projectUrl: string | null;
+  readonly discordUrl: string | null;
+  /** OpenSea's own status: "verified" | "approved" | "requested" | "not_requested" | … */
+  readonly safelistStatus: string | null;
+}
+
+const blankToNull = (v: string | null | undefined): string | null =>
+  v === undefined || v === null || v.trim() === "" ? null : v.trim();
+
+export function parseCollectionSocials(payload: unknown): ParsedCollectionSocials {
+  const row = collectionDetailSchema.parse(payload);
+  const twitter = blankToNull(row.twitter_username)?.replace(/^@/, "") ?? null;
+  return {
+    twitterUsername: twitter,
+    projectUrl: blankToNull(row.project_url),
+    discordUrl: blankToNull(row.discord_url),
+    safelistStatus: blankToNull(row.safelist_status),
+  };
+}
+
 export const collectionsResponseSchema = z.object({
   collections: z.array(z.unknown()).default([]),
   next: z.string().nullable().optional(),
@@ -198,11 +229,32 @@ export const instantKeyResponseSchema = z.object({
  * *recipient*, independent of whoever signs/broadcasts, which is exactly
  * the shape a Zodiac-Roles-scoped session key needs (ADR 0004).
  */
-export const dropMintResponseSchema = z.object({
-  target: z.string().regex(/^0x[0-9a-fA-F]{40}$/, "target must be an address"),
-  calldata: z.string().regex(/^0x[0-9a-fA-F]*$/, "calldata must be hex"),
-  value: weiString,
-});
+const addressHex = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "target must be an address");
+const calldataHex = z.string().regex(/^0x[0-9a-fA-F]*$/, "calldata must be hex");
+
+/**
+ * `POST /api/v2/drops/{slug}/mint` actually answers `{to, data, value, chain}`
+ * (captured live 2026-08-28 — the `target`/`calldata` spelling this schema
+ * originally assumed never matched, so no managed mint could ever build).
+ * Both spellings accepted, normalized to target/calldata.
+ */
+export const dropMintResponseSchema = z
+  .object({
+    target: addressHex.optional(),
+    calldata: calldataHex.optional(),
+    to: addressHex.optional(),
+    data: calldataHex.optional(),
+    value: weiString,
+  })
+  .transform((raw, ctx) => {
+    const target = raw.target ?? raw.to;
+    const calldata = raw.calldata ?? raw.data;
+    if (target === undefined || calldata === undefined) {
+      ctx.addIssue({ code: "custom", message: "mint response has no to/data (target/calldata)" });
+      return z.NEVER;
+    }
+    return { target, calldata, value: raw.value };
+  });
 
 export interface ParsedDropsPage {
   readonly rows: z.infer<typeof dropRowSchema>[];

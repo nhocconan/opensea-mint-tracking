@@ -11,6 +11,7 @@ import {
   type EligibilityCheckResult,
   eligibilityRetryDelayMs,
   isAppError,
+  normalizeStageId,
 } from "@hoodmint/core";
 import {
   dropStages,
@@ -124,7 +125,7 @@ export async function runEligibilityPass(
         .where(eq(dropStages.projectId, first.projectId));
       const stagesByUuid = new Map(
         stageRows.map((stage) => [
-          stage.providerStageId,
+          normalizeStageId(stage.providerStageId),
           {
             label: stage.label,
             kind: stage.type,
@@ -137,7 +138,7 @@ export async function runEligibilityPass(
 
       const results: EligibilityCheckResult[] = [];
       for (const stage of parsed.stages) {
-        const known = stagesByUuid.get(stage.stage_uuid);
+        const known = stagesByUuid.get(normalizeStageId(stage.stage_uuid));
         if (known === undefined) {
           results.push({
             stageLabel: stage.stage_uuid.slice(0, 8),
@@ -157,9 +158,9 @@ export async function runEligibilityPass(
       }
       const verdict = classifyEligibility({ checks: results, authAvailable: true });
 
-      const stageById = new Map(stageRows.map((s) => [s.providerStageId, s]));
+      const stageById = new Map(stageRows.map((s) => [normalizeStageId(s.providerStageId), s]));
       for (const stage of parsed.stages) {
-        const stageRow = stageById.get(stage.stage_uuid);
+        const stageRow = stageById.get(normalizeStageId(stage.stage_uuid));
         if (stageRow === undefined) {
           continue;
         }
@@ -229,10 +230,10 @@ export async function runEligibilityPass(
       // stage, ended stage) was never rewritten, so it stayed due forever
       // and — with enough of them — filled every pass's window so newer
       // checks never ran. Park such rows: UNKNOWN, retry in 6h.
-      const returned = new Set(parsed.stages.map((s) => s.stage_uuid));
+      const returned = new Set(parsed.stages.map((s) => normalizeStageId(s.stage_uuid)));
       for (const check of checks) {
         const row = stageRows.find((s) => s.id === check.stageId);
-        if (row !== undefined && !returned.has(row.providerStageId)) {
+        if (row !== undefined && !returned.has(normalizeStageId(row.providerStageId))) {
           await upsertEligibilityCheck(db, {
             walletId: check.walletId,
             projectId: check.projectId,

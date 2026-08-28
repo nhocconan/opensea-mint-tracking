@@ -211,17 +211,32 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
 
     // 4. Stages: version bumps only on material change.
     for (const stage of input.stages) {
+      // Match on the CANONICAL stage id (lowercase, dashless) so the dashed
+      // and dashless spellings OpenSea uses on different endpoints resolve
+      // to one row; rows stored in an old spelling are re-keyed on update.
       const currentRows = await tx
         .select()
         .from(dropStages)
         .where(
           and(
             eq(dropStages.projectId, projectId),
-            eq(dropStages.providerStageId, stage.providerStageId),
+            sql`lower(replace(${dropStages.providerStageId}, '-', '')) = ${stage.providerStageId}`,
           ),
+        )
+        // Prefer the row already in canonical spelling (unique index safety),
+        // then the freshest.
+        .orderBy(
+          desc(sql`(${dropStages.providerStageId} = ${stage.providerStageId})`),
+          desc(dropStages.updatedAt),
         )
         .limit(1);
       const current = currentRows[0];
+      if (current !== undefined && current.providerStageId !== stage.providerStageId) {
+        await tx
+          .update(dropStages)
+          .set({ providerStageId: stage.providerStageId })
+          .where(eq(dropStages.id, current.id));
+      }
       const materialChange =
         current === undefined ||
         current.label !== stage.label ||
@@ -252,6 +267,7 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
           .update(dropStages)
           .set({
             version: current.version + 1,
+            providerStageId: stage.providerStageId,
             label: stage.label,
             type: stage.kind,
             priceWei: stage.priceWei,
@@ -265,6 +281,30 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
           })
           .where(eq(dropStages.id, current.id));
       }
+    }
+
+    // 4b. A DETAIL fetch is OpenSea's authoritative, complete stage list: any
+    // stage row we hold that it no longer returns is stale (re-issued stage
+    // uuid, removed phase) — pause it so feeds/eligibility/auto-mint stop
+    // trusting it (kept for history, never deleted). Rows still stored in a
+    // non-canonical spelling are duplicates of the (re-keyed) canonical row
+    // and are paused too. List rows are partial (active/next only) and must
+    // not do this.
+    if (input.evidence?.kind === "drops:detail" && input.stages.length > 0) {
+      const keep = input.stages.map((s) => s.providerStageId);
+      await tx
+        .update(dropStages)
+        .set({ paused: true, updatedAt: input.now })
+        .where(
+          and(
+            eq(dropStages.projectId, projectId),
+            eq(dropStages.paused, false),
+            sql`(${dropStages.providerStageId} not in (${sql.join(
+              keep.map((k) => sql`${k}`),
+              sql`, `,
+            )}) or ${dropStages.providerStageId} <> lower(replace(${dropStages.providerStageId}, '-', '')))`,
+          ),
+        );
     }
 
     // 5. Supply snapshot with provenance.
@@ -358,6 +398,44 @@ export interface FeedFilters {
   readonly cursor?: string | undefined;
 }
 
+export interface ProjectSocials {
+  readonly twitterUsername: string | null;
+  readonly projectUrl: string | null;
+  readonly discordUrl: string | null;
+  readonly safelistStatus: string | null;
+}
+
+/** When the socials were last fetched (null = never), for refresh pacing. */
+export async function projectSocialsFetchedAt(
+  db: Db,
+  slug: string,
+): Promise<{ id: string; fetchedAt: Date | null } | undefined> {
+  const rows = await db
+    .select({ id: projects.id, fetchedAt: projects.socialsFetchedAt })
+    .from(projects)
+    .where(eq(projects.slug, slug))
+    .limit(1);
+  return rows[0];
+}
+
+export async function updateProjectSocials(
+  db: Db,
+  projectId: string,
+  socials: ProjectSocials,
+  now: Date,
+): Promise<void> {
+  await db
+    .update(projects)
+    .set({
+      twitterUsername: socials.twitterUsername,
+      projectUrl: socials.projectUrl,
+      discordUrl: socials.discordUrl,
+      safelistStatus: socials.safelistStatus,
+      socialsFetchedAt: now,
+    })
+    .where(eq(projects.id, projectId));
+}
+
 export interface FeedRow {
   readonly id: string;
   readonly chainId: number;
@@ -365,6 +443,10 @@ export interface FeedRow {
   readonly name: string;
   readonly slug: string | null;
   readonly imageUrl: string | null;
+  readonly twitterUsername: string | null;
+  readonly projectUrl: string | null;
+  readonly discordUrl: string | null;
+  readonly safelistStatus: string | null;
   readonly confidence: Confidence;
   readonly lifecycleStatus: LifecycleStatus;
   readonly nextStageStart: Date | null;
@@ -631,19 +713,25 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
 
   // Scalar per-column subqueries: Postgres has no tuple-projection syntax
   // for correlated subqueries; each field repeats the (cheap, indexed) lookup.
+  // Both exclude paused stages: a stage OpenSea no longer publishes is
+  // paused (not deleted) by the detail refresh, and a paused/stale row must
+  // never be the one whose price/label the feed shows (found live
+  // 2026-08-28: swoki showed a stale "FREE" from a superseded stage row).
   const currentStageCol = (col: string): SQL =>
     sql`(select ds.${sql.raw(col)} from drop_stages ds
       where ds.project_id = ${projects.id}
+        and not ds.paused
         and ds.starts_at <= now()
         and (ds.ends_at is null or ds.ends_at > now())
-      order by ds.starts_at asc limit 1)`;
+      order by ds.updated_at desc, ds.starts_at asc limit 1)`;
   // The NEXT (not-yet-open) stage — what an upcoming drop will cost / when
   // it opens. Null once every stage has started.
   const nextStageCol = (col: string): SQL =>
     sql`(select ds.${sql.raw(col)} from drop_stages ds
       where ds.project_id = ${projects.id}
+        and not ds.paused
         and ds.starts_at > now()
-      order by ds.starts_at asc limit 1)`;
+      order by ds.starts_at asc, ds.updated_at desc limit 1)`;
 
   const rows = await db
     .select({
@@ -653,6 +741,10 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       name: projects.name,
       slug: projects.slug,
       imageUrl: projects.imageUrl,
+      twitterUsername: projects.twitterUsername,
+      projectUrl: projects.projectUrl,
+      discordUrl: projects.discordUrl,
+      safelistStatus: projects.safelistStatus,
       confidence: projects.confidence,
       lifecycleStatus: projects.lifecycleStatus,
       nextStageStart: projects.nextStageStart,
