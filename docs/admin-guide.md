@@ -15,9 +15,14 @@ once, with a one-time bootstrap token:
 
 1. Generate a token on the server (valid 30 min, single use):
    ```
-   make token
+   make token-prod     # Dockerized prod stack (this deployment)
    ```
-   (or the direct form in `docs/ops-setup.md` if the stack runs unpublished DB ports).
+   Use `make token-prod` for the containerized production stack — it mints the
+   token straight into Postgres via the running `postgres` container. (Plain
+   `make token` is LOCAL-DEV only: it runs on the host and needs
+   APP_ENCRYPTION_KEY / DATABASE_URL / VALKEY_URL in the shell plus a reachable
+   DB, which the prod-behind-Traefik topology deliberately does not expose — it
+   will fail with "Invalid environment configuration" there.)
 2. Open **`/setup`**, paste the token, and create your admin email + password
    (min 12 chars). `/setup` closes itself once an admin exists; public signup
    stays disabled.

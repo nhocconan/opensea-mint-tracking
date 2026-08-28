@@ -41,7 +41,8 @@ export default function AdminGuidePage() {
       <Step n={1} title="First login — no default password">
         <p>
           There is <strong>no seeded admin</strong> by design. Create the first admin once with a
-          one-time bootstrap token: run <code className="text-acid">make token</code> on the server,
+          one-time bootstrap token: run <code className="text-acid">make token-prod</code> on the
+          server (the Dockerized-stack command; plain <code>make token</code> is local-dev only),
           open{" "}
           <Link href="/setup" className="text-acid underline">
             /setup

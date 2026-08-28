@@ -72,8 +72,11 @@ restore: ## Restore PostgreSQL from backups/<file>: make restore file=...
 smoke: ## Clean-start Docker smoke test: boot, wait healthy, probe endpoints
 	@bash scripts/smoke.sh
 
-token: ## Print a one-time /setup bootstrap token
+token: ## Print a one-time /setup bootstrap token (LOCAL DEV — needs env + reachable DB)
 	pnpm bootstrap-token
+
+token-prod: ## Print a one-time /setup bootstrap token for the DOCKERIZED prod stack
+	bash scripts/prod-token.sh
 
 vapid-keys: ## Generate a VAPID keypair for the Web Push alert channel (run once)
 	pnpm vapid-keys
