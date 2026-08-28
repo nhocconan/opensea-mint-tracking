@@ -6,6 +6,9 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import { dropStages, mintPlans, projects, signals, wallets } from "../schema.ts";
 
+/** Qualified outer-row reference for select-list subqueries (see note in the query). */
+const PID = sql.raw('"projects"."id"');
+
 export interface AutoMintStageRow {
   readonly projectId: string;
   readonly projectName: string;
@@ -43,22 +46,26 @@ export async function autoMintCandidateStages(
       startsAt: dropStages.startsAt,
       endsAt: dropStages.endsAt,
       paused: dropStages.paused,
+      // NOTE: correlated subselects in a select list must reference the outer
+      // row via sql.raw('"projects"."id"') — `${projects.id}` renders as a bare
+      // "id" here and would resolve to the subquery's own table (found live
+      // 2026-08-28), which would make every candidate look un-curated / unscanned.
       riskScore: sql<number | null>`
         (select s.score from signals s
-          where s.project_id = ${projects.id} and s.kind = 'risk'
+          where s.project_id = ${PID} and s.kind = 'risk'
           order by s.observed_at desc limit 1)`,
       hypeScore: sql<number | null>`
         (select s.score from signals s
-          where s.project_id = ${projects.id} and s.kind = 'hype'
+          where s.project_id = ${PID} and s.kind = 'hype'
           order by s.observed_at desc limit 1)`,
       // Listed by OpenSea's own curated /drops feeds (featured / upcoming /
       // recently_minted) — vs. only found by the chain-wide collection sweep.
       curated: sql<boolean>`
         exists (select 1 from evidence e
-          where e.project_id = ${projects.id} and e.kind like 'drops:%')`,
+          where e.project_id = ${PID} and e.kind like 'drops:%')`,
       uniqueMinters1h: sql<number>`
         coalesce((select count(distinct m.recipient)::int from mint_events m
-          where m.project_id = ${projects.id}
+          where m.project_id = ${PID}
             and m.observed_at > now() - interval '1 hour'), 0)`,
     })
     .from(dropStages)

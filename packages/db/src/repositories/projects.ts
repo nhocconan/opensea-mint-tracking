@@ -901,6 +901,24 @@ export async function upcomingDropStages(
   return rows;
 }
 
+/**
+ * Look a project up by its collection contract address. Addresses are stored
+ * lowercased by the upsert path, so the caller's input is lowercased here
+ * rather than relying on a case-insensitive comparison that could not use
+ * the `projects_chain_contract_idx` unique index.
+ */
+export async function findProjectByContractAddress(
+  db: Db,
+  contractAddress: string,
+): Promise<typeof projects.$inferSelect | undefined> {
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.contractAddress, contractAddress.toLowerCase()))
+    .limit(1);
+  return rows[0];
+}
+
 export async function findProjectBySlugOrId(
   db: Db,
   key: string,

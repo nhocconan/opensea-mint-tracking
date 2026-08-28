@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatDateTimeGmt7,
   formatDateTimeUtc,
   formatPrice,
   formatSupply,
@@ -11,6 +12,15 @@ describe("UI-boundary formatting (PRD §14: UTC storage, locale at edge)", () =>
   it("formats UTC timestamps stably", () => {
     expect(formatDateTimeUtc("2026-08-16T12:34:56.000Z")).toBe("2026-08-16 12:34 UTC");
     expect(formatDateTimeUtc(null)).toBe("—");
+  });
+
+  it("renders the operator's GMT+7 wall clock alongside UTC", () => {
+    expect(formatDateTimeGmt7("2026-08-16T12:34:56.000Z")).toBe("2026-08-16 19:34 GMT+7");
+    // Crosses midnight forward: 17:00 UTC is 00:00 the next day in GMT+7.
+    expect(formatDateTimeGmt7("2026-08-16T17:00:00.000Z")).toBe("2026-08-17 00:00 GMT+7");
+    expect(formatDateTimeGmt7(new Date("2026-12-31T23:00:00.000Z"))).toBe("2027-01-01 06:00 GMT+7");
+    expect(formatDateTimeGmt7(null)).toBe("—");
+    expect(formatDateTimeGmt7("not a date")).toBe("—");
   });
 
   it("price display: free vs wei-derived", () => {

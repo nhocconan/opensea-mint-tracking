@@ -11,6 +11,7 @@
  * exactly-once dispatch under at-least-once worker semantics, never a
  * status check split across two queries.
  */
+import { coerceDate } from "@hoodmint/core";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Db, unwrapRows } from "../client.ts";
 import {
@@ -151,6 +152,9 @@ export interface CreateMintPlanInput {
   readonly signerId?: string;
   readonly quantity?: number;
   readonly perPlanCeilingWei: string;
+  /** Explicit fire instant (UTC) — overrides the stage start in the
+   *  precision hot loop. Omit to auto-detect from `stageId`. */
+  readonly fireAt?: Date;
 }
 
 export async function createMintPlan(db: Db, input: CreateMintPlanInput): Promise<MintPlan> {
@@ -161,6 +165,7 @@ export async function createMintPlan(db: Db, input: CreateMintPlanInput): Promis
       walletId: input.walletId,
       ...(input.stageId !== undefined ? { stageId: input.stageId } : {}),
       ...(input.signerId !== undefined ? { signerId: input.signerId } : {}),
+      ...(input.fireAt !== undefined ? { fireAt: input.fireAt } : {}),
       quantity: input.quantity ?? 1,
       perPlanCeilingWei: input.perPlanCeilingWei,
       status: "draft",
@@ -258,6 +263,96 @@ export async function listMintPlans(db: Db, limit = 100): Promise<MintPlan[]> {
   return db.select().from(mintPlans).orderBy(desc(mintPlans.createdAt)).limit(limit);
 }
 
+/** Single plan by id — the arm-window computation in Admin → Special mints
+ *  reads the plan's own stage/fire_at rather than trusting a client-supplied
+ *  window. Not part of the hot loop. */
+export async function getMintPlan(db: Db, id: string): Promise<MintPlan | undefined> {
+  const [row] = await db.select().from(mintPlans).where(eq(mintPlans.id, id)).limit(1);
+  return row;
+}
+
+/** One status-board row per plan for a single target collection. */
+export interface MintPlanBoardRow {
+  readonly id: string;
+  readonly walletId: string;
+  readonly walletAddress: string;
+  readonly walletLabel: string | null;
+  readonly hasSigningKey: boolean;
+  readonly quantity: number;
+  readonly status: MintPlan["status"];
+  readonly stageId: string | null;
+  readonly stageLabel: string | null;
+  readonly fireAt: Date | string | null;
+  readonly stageStartsAt: Date | string | null;
+  readonly armedUntil: Date | string | null;
+  readonly presigned: boolean;
+  readonly perPlanCeilingWei: string;
+  readonly createdAt: Date | string;
+}
+
+/**
+ * The mint plans targeting one project, joined to their wallet and stage —
+ * the Admin → Special mints status board. `presigned` is a boolean derived
+ * server-side; the pre-signed blob itself is spend-capable and never leaves
+ * the worker (ADR 0009), so it is deliberately not projected here.
+ */
+export async function listMintPlansForProject(
+  db: Db,
+  projectId: string,
+  limit = 200,
+): Promise<MintPlanBoardRow[]> {
+  return db
+    .select({
+      id: mintPlans.id,
+      walletId: wallets.id,
+      walletAddress: wallets.address,
+      walletLabel: wallets.label,
+      hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
+      quantity: mintPlans.quantity,
+      status: mintPlans.status,
+      stageId: mintPlans.stageId,
+      stageLabel: dropStages.label,
+      fireAt: mintPlans.fireAt,
+      stageStartsAt: dropStages.startsAt,
+      armedUntil: mintPlans.armedUntil,
+      presigned: sql<boolean>`${mintPlans.presignedRawTx} is not null`,
+      perPlanCeilingWei: mintPlans.perPlanCeilingWei,
+      createdAt: mintPlans.createdAt,
+    })
+    .from(mintPlans)
+    .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
+    .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
+    .where(eq(mintPlans.projectId, projectId))
+    .orderBy(desc(mintPlans.createdAt))
+    .limit(limit);
+}
+
+/**
+ * Most recent execution attempt per plan for the given plan ids — the "last
+ * attempt" column of the status board. One indexed query plus a first-wins
+ * reduce over the descending order, rather than N per-plan queries.
+ */
+export async function latestAttemptPerPlan(
+  db: Db,
+  planIds: readonly string[],
+): Promise<Map<string, ExecutionAttempt>> {
+  const latest = new Map<string, ExecutionAttempt>();
+  if (planIds.length === 0) {
+    return latest;
+  }
+  const rows = await db
+    .select()
+    .from(executionAttempts)
+    .where(inArray(executionAttempts.planId, [...planIds]))
+    .orderBy(desc(executionAttempts.attemptAt));
+  for (const row of rows) {
+    if (!latest.has(row.planId)) {
+      latest.set(row.planId, row);
+    }
+  }
+  return latest;
+}
+
 /**
  * Delete a mint plan — DRAFT status ONLY. The `status = 'draft'` guard is in
  * the WHERE clause, not just the action layer, so an armed/executing/executed
@@ -282,16 +377,23 @@ export interface PresignCandidate {
 
 /**
  * Armed, in-window plans on MANAGED wallets (those with a sealed signing
- * key) whose stage has a known start — the pre-sign pass's candidate list.
+ * key) with a known fire instant — the pre-sign pass's candidate list.
  * Never selects the key blob; the worker fetches it per plan at sign time.
+ *
+ * Fire target is `coalesce(mint_plans.fire_at, drop_stages.starts_at)`, the
+ * same precedence the hot loop uses: an operator-typed override always wins
+ * over whatever OpenSea published for the stage. LEFT JOIN (not inner) so a
+ * `fire_at`-only plan with no linked stage still pre-signs; the coalesce
+ * `is not null` guard is what keeps plans with neither out.
  */
 export async function armedManagedPlansForPresign(db: Db, now: Date): Promise<PresignCandidate[]> {
+  const fireTarget = sql<Date>`coalesce(${mintPlans.fireAt}, ${dropStages.startsAt})`;
   const rows = await db
     .select({
       planId: mintPlans.id,
       walletId: wallets.id,
       walletAddress: wallets.address,
-      startsAt: dropStages.startsAt,
+      fireTargetAt: fireTarget,
       presignedAt: mintPlans.presignedAt,
       presignedNonce: mintPlans.presignedNonce,
       cachedTx: mintPlans.cachedTx,
@@ -300,12 +402,13 @@ export async function armedManagedPlansForPresign(db: Db, now: Date): Promise<Pr
       quantity: mintPlans.quantity,
     })
     .from(mintPlans)
-    .innerJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
+    .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
     .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
     .where(
       and(
         eq(mintPlans.status, "armed"),
         sql`${mintPlans.armedUntil} > ${now.toISOString()}`,
+        sql`coalesce(${mintPlans.fireAt}, ${dropStages.startsAt}) is not null`,
         sql`${wallets.encryptedSigningKey} is not null`,
         eq(wallets.enabled, true),
       ),
@@ -314,7 +417,10 @@ export async function armedManagedPlansForPresign(db: Db, now: Date): Promise<Pr
     planId: r.planId,
     walletId: r.walletId,
     walletAddress: r.walletAddress,
-    stageStartMs: r.startsAt.getTime(),
+    // Every timestamptz comes back as a string from a raw SQL fragment even
+    // though the column type says Date (PRD §14 / coerceDate) — normalize
+    // before touching .getTime().
+    stageStartMs: coerceDate(r.fireTargetAt).getTime(),
     presignedAt: r.presignedAt,
     presignedNonce: r.presignedNonce,
     cachedTx: r.cachedTx,
@@ -394,22 +500,39 @@ export async function deleteMintPlan(db: Db, id: string): Promise<boolean> {
 }
 
 /**
- * Armed, in-window plans that have a linked stage with a known start time —
- * the precision hot-loop's candidate list (packages/core/fire-schedule.ts).
- * Returns the stage start in epoch ms so the worker can compute the exact
- * clock-corrected fire instant without re-reading the stage row. Plans with
- * no stageId (or a stage since deleted) are excluded — they simply ride the
- * coarse 30s claim instead of precision firing. */
+ * Armed, in-window plans with a known fire instant — the precision
+ * hot-loop's candidate list (packages/core/fire-schedule.ts). Returns that
+ * instant in epoch ms so the worker can compute the exact clock-corrected
+ * fire phase without re-reading the stage row.
+ *
+ * The fire target is `coalesce(mint_plans.fire_at, drop_stages.starts_at)`:
+ * an operator-typed override (Admin → Special mints) always wins over the
+ * provider-published stage start, and a plan may carry a `fire_at` with no
+ * stage at all — hence LEFT JOIN, not the inner join this used before.
+ * Plans with NEITHER a fire_at nor a stage start are still excluded by the
+ * coalesce `is not null` guard: they simply ride the coarse 30s claim
+ * instead of precision firing, exactly as before. */
 export async function armedPlansWithStageStart(
   db: Db,
   now: Date,
 ): Promise<{ id: string; stageStartMs: number }[]> {
   const rows = await db
-    .select({ id: mintPlans.id, startsAt: dropStages.startsAt })
+    .select({
+      id: mintPlans.id,
+      fireTargetAt: sql<Date>`coalesce(${mintPlans.fireAt}, ${dropStages.startsAt})`,
+    })
     .from(mintPlans)
-    .innerJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
-    .where(and(eq(mintPlans.status, "armed"), sql`${mintPlans.armedUntil} > ${now.toISOString()}`));
-  return rows.map((r) => ({ id: r.id, stageStartMs: r.startsAt.getTime() }));
+    .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
+    .where(
+      and(
+        eq(mintPlans.status, "armed"),
+        sql`${mintPlans.armedUntil} > ${now.toISOString()}`,
+        sql`coalesce(${mintPlans.fireAt}, ${dropStages.startsAt}) is not null`,
+      ),
+    );
+  // Raw SQL fragments hand back timestamptz as a string at runtime whatever
+  // the declared type says (PRD §14) — coerceDate before .getTime().
+  return rows.map((r) => ({ id: r.id, stageStartMs: coerceDate(r.fireTargetAt).getTime() }));
 }
 
 /**
@@ -456,6 +579,7 @@ export async function claimArmedMintPlan(
       p.id,
       p.project_id as "projectId",
       p.stage_id as "stageId",
+      p.fire_at as "fireAt",
       p.signer_id as "signerId",
       p.wallet_id as "walletId",
       p.quantity,

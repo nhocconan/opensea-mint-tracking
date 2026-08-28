@@ -1,0 +1,1 @@
+ALTER TABLE "mint_plans" ADD COLUMN "fire_at" timestamp with time zone;

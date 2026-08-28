@@ -97,6 +97,19 @@ async function main(): Promise<void> {
     metrics().inc("hoodmint_jobs_retries_total", { queue: QUEUE_NAMES.discovery });
     log.warn({ jobId: job?.id, err: error.message }, "discovery job failed");
   });
+  // Detail jobs failed SILENTLY before this (no handler + removeOnFail), which
+  // hid a broken delisting re-check for hours (2026-08-28). Always log.
+  detailsWorker.on("failed", (job, error) => {
+    metrics().inc("hoodmint_jobs_retries_total", { queue: QUEUE_NAMES.details });
+    log.warn(
+      {
+        jobId: job?.id,
+        slug: (job?.data as { slug?: string } | undefined)?.slug,
+        err: error.message,
+      },
+      "detail refresh job failed",
+    );
+  });
   rarityWorker.on("failed", (job, error) => {
     metrics().inc("hoodmint_jobs_retries_total", { queue: QUEUE_NAMES.rarity });
     log.warn({ jobId: job?.id, err: error.message }, "rarity job failed");

@@ -30,7 +30,11 @@ export async function projectBySlugWithStageCount(
     .select({
       id: projects.id,
       lifecycle: projects.lifecycleStatus,
-      stages: sql<number>`(select count(*)::int from drop_stages ds where ds.project_id = ${projects.id})`,
+      // `sql.raw('"projects"."id"')`, NOT `${projects.id}`: inside a select-list
+      // subquery Drizzle renders the latter as an unqualified "id", which
+      // resolves to ds.id and silently returns 0 (found live 2026-08-28 — it
+      // hid every delisting).
+      stages: sql<number>`(select count(*)::int from drop_stages ds where ds.project_id = ${sql.raw('"projects"."id"')})`,
     })
     .from(projects)
     .where(eq(projects.slug, slug))

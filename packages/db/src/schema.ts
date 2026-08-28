@@ -659,6 +659,13 @@ export const mintPlans = pgTable(
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
     stageId: uuid("stage_id").references(() => dropStages.id, { onDelete: "set null" }),
+    /** Operator-supplied fire instant (Admin → Special mints), stored UTC.
+     *  Overrides the linked stage's `startsAt` as the precision hot-loop's
+     *  fire target — `coalesce(fire_at, drop_stages.starts_at)`. Null means
+     *  "auto-detect from the stage", which stays the default everywhere
+     *  else. A plan may carry a `fire_at` with NO stage at all (a mint whose
+     *  phase OpenSea never published) and still be precision-timed. */
+    fireAt: timestamp("fire_at", { withTimezone: true }),
     signerId: uuid("signer_id").references(() => signers.id, { onDelete: "set null" }),
     walletId: uuid("wallet_id")
       .notNull()

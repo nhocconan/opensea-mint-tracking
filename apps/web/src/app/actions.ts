@@ -22,9 +22,13 @@ import {
   disarmMintPlan,
   ensureProvider,
   findCredentialByType,
+  findProjectByContractAddress,
+  findProjectBySlugOrId,
   getCredentialSecret,
   getDropStage,
+  getMintPlan,
   getSigner,
+  listWallets,
   markAuthRequiredChecksDue,
   markExecutionAttemptBroadcast,
   markProviderHealth,
@@ -73,6 +77,7 @@ import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { isUuid } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
+import { gmt7LocalToUtc, parseMintTarget } from "@/lib/mint-target.ts";
 import { getSessionUser, requireApi, requireFreshStepUp } from "@/lib/session.ts";
 
 export interface ActionState {
@@ -2106,6 +2111,382 @@ export async function deleteMintPlanAction(id: string): Promise<ActionState> {
   });
   revalidatePath("/admin/execution");
   return { ok: true, message: "Draft mint plan deleted." };
+}
+
+/* ── Admin → Special mints (admin-only sniper console) ───────────────────── */
+
+/** Max plans one Special-mints submit may create, mirroring the 50-wallet
+ *  cap `createMintPlanAction` already enforces. */
+const SPECIAL_MINT_MAX_WALLETS = 50;
+/** Per-wallet quantity ceiling — a slip of the keyboard must not turn a
+ *  1-of-1 into a 500-mint spend. */
+const SPECIAL_MINT_MAX_QUANTITY = 20;
+/** Hard cap on any arm window (PRD §15 / ADR 0008: an arm always expires). */
+const SPECIAL_MINT_MAX_ARM_MINUTES = 24 * 60;
+/** How long past a manually-typed fire time a plan stays armed. */
+const MANUAL_FIRE_ARM_TAIL_MS = 4 * 60 * 60 * 1000;
+
+export interface SpecialMintTargetState extends ActionState {
+  /** Set only when the target resolved to a project already in the DB. */
+  readonly projectId?: string;
+}
+
+/**
+ * Resolve what the operator pasted into the Special-mints target box — an
+ * OpenSea collection URL, a bare slug, or a raw contract address — to a
+ * project already in the DB. When a slug isn't tracked yet it enqueues the
+ * same detail fetch `trackDropAction` uses (worker → getDrop → upsert
+ * project + stages) and asks the operator to retry; a bare contract address
+ * has no slug to fetch by, so that case says so plainly rather than
+ * enqueueing a guess.
+ */
+export async function resolveSpecialMintTargetAction(input: {
+  target: string;
+}): Promise<SpecialMintTargetState> {
+  const { db, config } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("execution:configure");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const target = parseMintTarget(input.target);
+  if (target === null) {
+    return {
+      ok: false,
+      message:
+        "Paste an OpenSea collection URL, a collection slug, or a 0x… contract address (40 hex characters).",
+    };
+  }
+  const project =
+    target.kind === "slug"
+      ? await findProjectBySlugOrId(db, target.slug)
+      : await findProjectByContractAddress(db, target.address);
+  if (project !== undefined) {
+    await recordAudit(db, {
+      actorUserId: actor,
+      action: "execution.special_mint.resolve",
+      targetType: "project",
+      targetId: project.id,
+      result: "success",
+      metadata: { kind: target.kind },
+    });
+    return { ok: true, message: `Resolved "${project.name}".`, projectId: project.id };
+  }
+  if (target.kind === "contract") {
+    return {
+      ok: false,
+      message:
+        "That contract isn't tracked yet. Paste the OpenSea collection URL (or its slug) instead — a fetch can only be requested by slug.",
+    };
+  }
+  await enqueueDetail(config.VALKEY_URL, { slug: target.slug, freshnessBucket: "hot" });
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "execution.special_mint.enqueue_detail",
+    targetType: "project",
+    targetId: target.slug,
+    result: "success",
+    metadata: { slug: target.slug },
+  });
+  return {
+    ok: false,
+    message: `"${target.slug}" isn't tracked yet — fetching it from OpenSea now. Retry in ~30s. If it never resolves it isn't an OpenSea drop.`,
+  };
+}
+
+export interface SpecialMintWalletInput {
+  readonly walletId: string;
+  readonly quantity: number;
+}
+
+/**
+ * Creates ONE draft plan per selected wallet, each with its own quantity, a
+ * shared per-plan spend ceiling, and an optional operator-typed fire instant
+ * that overrides the stage start in the worker's precision hot loop
+ * (`coalesce(mint_plans.fire_at, drop_stages.starts_at)`).
+ *
+ * `fireAtGmt7` is the RAW `<input type="datetime-local">` value, and the
+ * GMT+7 → UTC conversion happens HERE, server-side. It deliberately is not a
+ * pre-converted `fireAtUtc` from the browser: a client-side conversion would
+ * silently inherit whatever timezone the operator's laptop happens to be in,
+ * and a mis-set laptop clock zone would move a mint by hours with nothing to
+ * catch it. Storage is UTC (PRD §14); GMT+7 is a display/entry convention.
+ *
+ * Fails closed on every branch, is audited per plan, and — like
+ * `createMintPlanAction` — creates `draft` rows only. Nothing here can fire;
+ * arming is the separate passkey-gated step below.
+ */
+export async function createSpecialMintAction(input: {
+  projectId: string;
+  stageId?: string;
+  fireAtGmt7?: string;
+  wallets: SpecialMintWalletInput[];
+  perPlanCeilingWei: string;
+}): Promise<ActionState> {
+  const { db } = container();
+  let actor: string;
+  try {
+    const user = await requireApi("execution:configure");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  if (!isUuid(input.projectId)) {
+    return { ok: false, message: "Pick a target collection first." };
+  }
+  if (!/^[0-9]+$/.test(input.perPlanCeilingWei) || input.perPlanCeilingWei === "0") {
+    return { ok: false, message: "Per-plan ceiling must be a positive wei amount." };
+  }
+
+  // Stage (optional): must belong to the chosen project.
+  const stageIdRaw = input.stageId?.trim() ?? "";
+  let stageId: string | undefined;
+  if (stageIdRaw !== "") {
+    if (!isUuid(stageIdRaw)) {
+      return { ok: false, message: "Invalid stage selection." };
+    }
+    const stage = await getDropStage(db, stageIdRaw);
+    if (stage === undefined || stage.projectId !== input.projectId) {
+      return { ok: false, message: "Selected stage does not belong to the chosen collection." };
+    }
+    stageId = stageIdRaw;
+  }
+
+  // Manual fire time (optional): GMT+7 in, UTC out.
+  const fireAtRaw = input.fireAtGmt7?.trim() ?? "";
+  let fireAt: Date | undefined;
+  if (fireAtRaw !== "") {
+    const converted = gmt7LocalToUtc(fireAtRaw);
+    if (converted === null) {
+      return { ok: false, message: "Manual fire time must be a real date/time (GMT+7)." };
+    }
+    fireAt = converted;
+  }
+  if (stageId === undefined && fireAt === undefined) {
+    return {
+      ok: false,
+      message: "Pick a phase or type a manual fire time — a special mint needs a fire instant.",
+    };
+  }
+
+  // Wallets: managed (a sealed signing key) and enabled only. A wallet with
+  // no key cannot fire autonomously at the open instant, which is the entire
+  // point of this console — refuse rather than silently create a plan that
+  // will sit waiting for a browser signature nobody is watching for.
+  const rawWallets = input.wallets ?? [];
+  const seen = new Set<string>();
+  const selections: SpecialMintWalletInput[] = [];
+  for (const entry of rawWallets) {
+    const walletId = entry.walletId.trim();
+    if (walletId === "" || seen.has(walletId)) {
+      continue;
+    }
+    if (!isUuid(walletId)) {
+      return { ok: false, message: "Invalid wallet selection." };
+    }
+    if (!Number.isFinite(entry.quantity)) {
+      return { ok: false, message: "Every selected wallet needs a numeric quantity." };
+    }
+    const quantity = Math.floor(entry.quantity);
+    if (quantity < 1 || quantity > SPECIAL_MINT_MAX_QUANTITY) {
+      return {
+        ok: false,
+        message: `Quantity must be between 1 and ${SPECIAL_MINT_MAX_QUANTITY} per wallet.`,
+      };
+    }
+    seen.add(walletId);
+    selections.push({ walletId, quantity });
+  }
+  if (selections.length === 0) {
+    return { ok: false, message: "Select at least one managed wallet." };
+  }
+  if (selections.length > SPECIAL_MINT_MAX_WALLETS) {
+    return {
+      ok: false,
+      message: `Too many wallets selected (${selections.length}) — max ${SPECIAL_MINT_MAX_WALLETS} per submit.`,
+    };
+  }
+  const managed = new Set(
+    (await listWallets(db, { enabledOnly: true }))
+      .filter((w) => w.hasSigningKey)
+      .map((w) => w.id),
+  );
+  const unusable = selections.filter((s) => !managed.has(s.walletId));
+  if (unusable.length > 0) {
+    return {
+      ok: false,
+      message: `${unusable.length} selected wallet(s) are not enabled managed wallets — import a minting key on Admin → Wallets first.`,
+    };
+  }
+
+  const createdIds: string[] = [];
+  for (const selection of selections) {
+    const created = await createMintPlanRepo(db, {
+      projectId: input.projectId,
+      walletId: selection.walletId,
+      ...(stageId !== undefined ? { stageId } : {}),
+      ...(fireAt !== undefined ? { fireAt } : {}),
+      quantity: selection.quantity,
+      perPlanCeilingWei: input.perPlanCeilingWei,
+    });
+    createdIds.push(created.id);
+    await recordAudit(db, {
+      actorUserId: actor,
+      action: "execution.special_mint.create",
+      targetType: "mint_plan",
+      targetId: created.id,
+      result: "success",
+      metadata: {
+        projectId: input.projectId,
+        walletId: selection.walletId,
+        stageId: stageId ?? null,
+        quantity: selection.quantity,
+        fireAt: fireAt?.toISOString() ?? null,
+        perPlanCeilingWei: input.perPlanCeilingWei,
+      },
+    });
+  }
+  revalidatePath("/admin/special-mints");
+  revalidatePath("/admin/execution");
+  return {
+    ok: true,
+    message: `${createdIds.length} draft plan${createdIds.length === 1 ? "" : "s"} created${
+      fireAt === undefined ? " (fire time auto-detected from the phase)" : " with a manual fire time"
+    }. Not armed yet.`,
+  };
+}
+
+/**
+ * Compute a plan's arm window from the plan's OWN timing, never from a
+ * client-supplied number: until the stage ends (capped at 24h) for an
+ * auto-detected phase, or the manual fire instant plus a 4h tail. Returns
+ * null when the plan has no future fire instant left at all.
+ */
+function specialMintArmMinutes(
+  now: number,
+  plan: { fireAt: Date | string | null },
+  stage: { startsAt: Date | string; endsAt: Date | string | null } | undefined,
+): number | null {
+  const ms = (value: Date | string): number =>
+    (value instanceof Date ? value : new Date(value)).getTime();
+  let untilMs: number;
+  if (plan.fireAt !== null) {
+    // An override wins over the stage everywhere, including here.
+    untilMs = ms(plan.fireAt) + MANUAL_FIRE_ARM_TAIL_MS;
+  } else if (stage === undefined) {
+    return null;
+  } else if (stage.endsAt !== null) {
+    untilMs = ms(stage.endsAt);
+  } else {
+    untilMs = ms(stage.startsAt) + MANUAL_FIRE_ARM_TAIL_MS;
+  }
+  const minutes = Math.ceil((untilMs - now) / 60_000);
+  if (!Number.isFinite(minutes) || minutes < 1) {
+    return null;
+  }
+  return Math.min(minutes, SPECIAL_MINT_MAX_ARM_MINUTES);
+}
+
+export interface SpecialMintArmResult {
+  readonly planId: string;
+  readonly ok: boolean;
+  readonly message: string;
+}
+
+export interface SpecialMintArmState extends ActionState {
+  readonly results: SpecialMintArmResult[];
+}
+
+/**
+ * Arm every draft plan of one special mint from a SINGLE passkey ceremony.
+ * The step-up is re-verified server-side here (`requireFreshStepUp` — the
+ * same gate `armMintPlanAction` uses, not a weaker one) and is valid for two
+ * minutes, which is why arming the batch sequentially in one call is safe:
+ * the proof is checked once, up front, for the whole batch, and every plan
+ * still goes through the same `armMintPlan` draft-only transition.
+ *
+ * The per-plan window is derived server-side from the plan's own stage /
+ * fire_at; nothing about the window is taken from the client.
+ */
+export async function armSpecialMintPlansAction(planIds: string[]): Promise<SpecialMintArmState> {
+  const { db } = container();
+  let actor: string;
+  try {
+    const user = await requireFreshStepUp("execution:configure");
+    actor = user.id;
+  } catch (error) {
+    return {
+      ok: false,
+      message: isAppError(error) ? error.message : "Step-up re-authentication required.",
+      results: [],
+    };
+  }
+  const ids = [...new Set(planIds.map((id) => id.trim()))].filter((id) => id !== "");
+  if (ids.length === 0) {
+    return { ok: false, message: "No draft plans to arm.", results: [] };
+  }
+  if (ids.length > SPECIAL_MINT_MAX_WALLETS) {
+    return {
+      ok: false,
+      message: `Too many plans in one arm (${ids.length}) — max ${SPECIAL_MINT_MAX_WALLETS}.`,
+      results: [],
+    };
+  }
+  const now = Date.now();
+  const results: SpecialMintArmResult[] = [];
+  for (const planId of ids) {
+    if (!isUuid(planId)) {
+      results.push({ planId, ok: false, message: "Invalid plan id." });
+      continue;
+    }
+    const plan = await getMintPlan(db, planId);
+    if (plan === undefined) {
+      results.push({ planId, ok: false, message: "Plan not found." });
+      continue;
+    }
+    const stage = plan.stageId === null ? undefined : await getDropStage(db, plan.stageId);
+    const windowMinutes = specialMintArmMinutes(now, plan, stage);
+    if (windowMinutes === null) {
+      results.push({
+        planId,
+        ok: false,
+        message: "Fire time has already passed — create a fresh plan.",
+      });
+      await recordAudit(db, {
+        actorUserId: actor,
+        action: "execution.special_mint.arm",
+        targetType: "mint_plan",
+        targetId: planId,
+        result: "failure",
+        metadata: { reason: "fire_time_passed" },
+      });
+      continue;
+    }
+    const armed = await armMintPlan(db, planId, actor, windowMinutes);
+    if (armed === undefined) {
+      results.push({ planId, ok: false, message: "Not in draft status — nothing to arm." });
+      continue;
+    }
+    await recordAudit(db, {
+      actorUserId: actor,
+      action: "execution.special_mint.arm",
+      targetType: "mint_plan",
+      targetId: planId,
+      result: "success",
+      metadata: { windowMinutes },
+    });
+    results.push({ planId, ok: true, message: `Armed for ${windowMinutes} min.` });
+  }
+  const armedCount = results.filter((r) => r.ok).length;
+  revalidatePath("/admin/special-mints");
+  revalidatePath("/admin/execution");
+  return {
+    ok: armedCount > 0,
+    message: `${armedCount} of ${results.length} plan(s) armed.`,
+    results,
+  };
 }
 
 /**

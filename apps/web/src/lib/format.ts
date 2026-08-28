@@ -16,6 +16,36 @@ export function formatDateTimeUtc(iso: string | Date | null): string {
   return `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
+/**
+ * The operator's own wall clock (Asia/Ho_Chi_Minh, a fixed UTC+07:00 with no
+ * DST). Storage stays UTC everywhere (PRD §14); this is a display-only
+ * projection, always rendered alongside the UTC value so a mint time can
+ * never be read ambiguously. `hourCycle: "h23"` and `formatToParts` pin the
+ * output shape across ICU versions instead of trusting a locale's default
+ * ordering or a 24:00 midnight rendering.
+ */
+export function formatDateTimeGmt7(iso: string | Date | null): string {
+  if (iso === null) {
+    return "—";
+  }
+  const date = typeof iso === "string" ? new Date(iso) : iso;
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const at = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${at("year")}-${at("month")}-${at("day")} ${at("hour")}:${at("minute")} GMT+7`;
+}
+
 export function formatDateTimeLocal(iso: string | Date | null): string {
   if (iso === null) {
     return "—";
