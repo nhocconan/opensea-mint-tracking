@@ -1,5 +1,6 @@
 "use client";
 
+import { mintSpendCeilingWei } from "@hoodmint/core";
 import { useActionState, useMemo, useState } from "react";
 import { type ActionState, createSpecialMintAction } from "@/app/actions.ts";
 import { Countdown } from "@/components/feed-parts.tsx";
@@ -25,14 +26,11 @@ export interface ManagedWalletOption {
 const initial: ActionState = { ok: false, message: "" };
 const MAX_QUANTITY = 20;
 
-/** Stage price × quantity, or "1" wei for a free mint so the ceiling is
- *  always a positive amount the action will accept. */
+/** (Stage price + OpenSea mint fee allowance) × quantity — a "free" mint
+ *  still pays OpenSea's ~0.00008 ETH SeaDrop fee, so a 1-wei ceiling would
+ *  refuse every fire (found live 2026-08-28). */
 function defaultCeilingWei(priceWei: string | null, quantity: number): string {
-  if (priceWei === null || !/^[0-9]+$/.test(priceWei)) {
-    return "1";
-  }
-  const total = BigInt(priceWei) * BigInt(Math.max(1, quantity));
-  return total === 0n ? "1" : total.toString();
+  return mintSpendCeilingWei(priceWei, quantity);
 }
 
 /**

@@ -71,6 +71,13 @@
       "when": 1787923649312,
       "tag": "0009_mint_plan_fire_at",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788000000000,
+      "tag": "0010_project_socials",
+      "breakpoints": true
     }
   ]
 }

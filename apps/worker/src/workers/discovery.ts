@@ -14,10 +14,12 @@ import {
   markProjectDelisted,
   markProviderHealth,
   projectBySlugWithStageCount,
+  projectSocialsFetchedAt,
   publishEvent,
   setSetting,
   startScanRun,
   unwrapRows,
+  updateProjectSocials,
   upsertProjectFromSource,
 } from "@hoodmint/db";
 import { metrics } from "@hoodmint/observability";
@@ -421,7 +423,41 @@ export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promis
     now: new Date(),
   });
   await upsertProjectFromSource(db, draft);
+  await refreshProjectSocials(ctx, client, slug);
   await publishEvent(db, { type: "projects.invalidated", at: new Date().toISOString() });
+}
+
+/** Re-fetch collection socials at most this often (one Read call each). */
+const SOCIALS_TTL_MS = 24 * 3_600_000;
+
+/**
+ * Collection socials + OpenSea verification (`/collections/{slug}`), shown in
+ * the feed so a scam check needs no click-through. Best-effort: a failure
+ * here must never fail the detail refresh that carries the stage schedule.
+ */
+async function refreshProjectSocials(
+  ctx: WorkerContext,
+  client: OpenSeaClient,
+  slug: string,
+): Promise<void> {
+  const { db, log } = ctx;
+  const known = await projectSocialsFetchedAt(db, slug);
+  if (known === undefined) {
+    return;
+  }
+  const now = new Date();
+  if (known.fetchedAt !== null && now.getTime() - known.fetchedAt.getTime() < SOCIALS_TTL_MS) {
+    return;
+  }
+  try {
+    const socials = await client.getCollectionSocials(slug);
+    await updateProjectSocials(db, known.id, socials, now);
+  } catch (error) {
+    log.warn(
+      { slug, err: error instanceof Error ? error.message : String(error) },
+      "socials refresh failed",
+    );
+  }
 }
 
 export const DISCOVERY_QUEUE = QUEUE_NAMES.discovery;

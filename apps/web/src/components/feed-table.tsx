@@ -6,6 +6,61 @@ import Link from "next/link";
 import { formatPrice, formatSupply, formatVelocity, shortAddress } from "@/lib/format.ts";
 import { CopyButton, Countdown, WatchButton } from "./feed-parts.tsx";
 
+/**
+ * Collection socials + OpenSea's own verification, inline so a scam check
+ * needs no click-through (user ask 2026-08-28). "OS ✓" is OpenSea's
+ * safelist "verified" — the blue check — not our data confidence.
+ */
+function SocialLinks({ row }: { row: FeedRow }) {
+  const links: { href: string; label: string; text: string }[] = [];
+  if (row.twitterUsername !== null) {
+    links.push({
+      href: `https://x.com/${row.twitterUsername}`,
+      label: `X profile @${row.twitterUsername}`,
+      text: `@${row.twitterUsername}`,
+    });
+  }
+  if (row.projectUrl !== null) {
+    let host = row.projectUrl;
+    try {
+      host = new URL(row.projectUrl).host.replace(/^www\./, "");
+    } catch {
+      // keep the raw value
+    }
+    links.push({ href: row.projectUrl, label: `Project website ${host}`, text: host });
+  }
+  if (row.discordUrl !== null) {
+    links.push({ href: row.discordUrl, label: "Discord", text: "discord" });
+  }
+  const verified = row.safelistStatus === "verified";
+  if (links.length === 0 && !verified) {
+    return row.safelistStatus === null ? null : (
+      <span className="font-mono text-[10px] text-amber">no X / no website</span>
+    );
+  }
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 font-mono text-[10px]">
+      {verified ? (
+        <span className="text-emerald" title="OpenSea verified collection (blue check)">
+          OS ✓
+        </span>
+      ) : null}
+      {links.map((l) => (
+        <a
+          key={l.href}
+          href={l.href}
+          target="_blank"
+          rel="noreferrer noopener"
+          aria-label={l.label}
+          className="text-ink-faint underline-offset-2 hover:text-cyan hover:underline"
+        >
+          {l.text}
+        </a>
+      ))}
+    </span>
+  );
+}
+
 export interface FeedTableProps {
   readonly rows: readonly FeedRow[];
   readonly eligibilityByProject: ReadonlyMap<string, string>;
@@ -195,6 +250,7 @@ export function FeedTable({
                           no contract yet
                         </span>
                       )}
+                      <SocialLinks row={row} />
                     </div>
                   </div>
                 </td>
@@ -241,6 +297,7 @@ export function FeedTable({
                       return start !== null ? coerceDate(start).toISOString() : null;
                     })()}
                     label="Stage start"
+                    pastPrefix="opened"
                   />
                   {row.stageEndsAt !== null ? (
                     <div>

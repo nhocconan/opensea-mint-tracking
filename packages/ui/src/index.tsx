@@ -104,9 +104,21 @@ export function ConfidenceTag({ confidence }: { confidence: string }) {
     "single-source": "neutral",
     unverified: "warn",
   };
+  // Data-provenance confidence of OUR record — NOT OpenSea's blue-check
+  // collection verification. "verified" used to render verbatim and read as
+  // the latter (user report 2026-08-28), so spell it out.
+  const label: Record<string, string> = {
+    verified: "OS synced",
+    corroborated: "2 sources",
+    "single-source": "1 source",
+    unverified: "unverified",
+  };
   return (
-    <Chip tone={tone[confidence] ?? "neutral"} title={`Claim confidence: ${confidence}`}>
-      {confidence}
+    <Chip
+      tone={tone[confidence] ?? "neutral"}
+      title={`Data confidence: ${confidence} (how well our record matches OpenSea — not OpenSea's verified badge)`}
+    >
+      {label[confidence] ?? confidence}
     </Chip>
   );
 }

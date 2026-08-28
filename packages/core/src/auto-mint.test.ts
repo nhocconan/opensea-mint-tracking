@@ -36,9 +36,9 @@ const base: AutoMintCandidate = {
 };
 
 describe("decideAutoMint", () => {
-  it("plans a free public stage with a 1-wei ceiling and arms until stage end", () => {
+  it("plans a free public stage with the OpenSea fee allowance as ceiling and arms until stage end", () => {
     const d = decideAutoMint(policy, base, NOW);
-    expect(d).toEqual({ plan: true, ceilingWei: "1", armMinutes: 60 });
+    expect(d).toEqual({ plan: true, ceilingWei: "100000000000000", armMinutes: 60 });
   });
 
   it("refuses when the policy is disabled", () => {
@@ -53,7 +53,7 @@ describe("decideAutoMint", () => {
   it("allows a paid stage under the configured max and uses the price as ceiling", () => {
     const p = { ...policy, maxPriceWei: "2000000000000000" };
     const d = decideAutoMint(p, { ...base, priceWei: "1000000000000000" }, NOW);
-    expect(d).toEqual({ plan: true, ceilingWei: "1000000000000000", armMinutes: 60 });
+    expect(d).toEqual({ plan: true, ceilingWei: "1100000000000000", armMinutes: 60 });
   });
 
   it("refuses non-public stages in publicOnly mode, allows them otherwise", () => {
@@ -95,7 +95,18 @@ describe("decideAutoMint", () => {
     // no hype signal is NOT blocked by the hype floor
     expect(decideAutoMint(hype, { ...base, hypeScore: null }, NOW).plan).toBe(true);
     const demand = { ...policy, minUniqueMintersLive: 25 };
-    const live = { ...base, startsAtMs: NOW - 60_000 };
+    // Open 30 min: past the demand grace window, so demand gates apply.
+    const live = { ...base, startsAtMs: NOW - 30 * 60_000 };
+    // Open 1 min with nobody yet: that is the moment to fire, not a dead drop.
+    expect(decideAutoMint(demand, { ...base, startsAtMs: NOW - 60_000 }, NOW).plan).toBe(true);
+    // Open 5 hours, 0 minters in the last hour: dead drop even with no min set.
+    expect(
+      decideAutoMint(
+        { ...demand, minUniqueMintersLive: 0 },
+        { ...base, startsAtMs: NOW - 5 * 3_600_000, uniqueMinters1h: 0 },
+        NOW,
+      ),
+    ).toMatchObject({ plan: false, reason: expect.stringContaining("dead drop") });
     expect(decideAutoMint(demand, { ...live, uniqueMinters1h: 3 }, NOW).plan).toBe(false);
     expect(decideAutoMint(demand, { ...live, uniqueMinters1h: 40 }, NOW).plan).toBe(true);
     // demand gate only applies once live
@@ -104,6 +115,6 @@ describe("decideAutoMint", () => {
 
   it("caps the arm window at 24h when a stage has no end", () => {
     const d = decideAutoMint(policy, { ...base, endsAtMs: null }, NOW);
-    expect(d).toEqual({ plan: true, ceilingWei: "1", armMinutes: 24 * 60 });
+    expect(d).toEqual({ plan: true, ceilingWei: "100000000000000", armMinutes: 24 * 60 });
   });
 });

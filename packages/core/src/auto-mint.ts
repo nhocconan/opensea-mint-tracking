@@ -1,3 +1,5 @@
+import { mintSpendCeilingWei } from "./stage-id.ts";
+
 /**
  * Auto-mint policy (owner ask 2026-08-28): with a funded burner wallet,
  * automatically plan + arm mints for drops that match a policy — by default
@@ -8,7 +10,7 @@
  * Safety model: the policy can only ever create plans on MANAGED wallets the
  * operator explicitly listed, the fire path is still gated by
  * LIVE_EXECUTION_ENABLED, every plan carries a per-plan ceiling
- * (`maxPriceWei`, "1" wei for free mints so value 0 ≤ ceiling), and daily
+ * (price + OpenSea mint-fee allowance per token, see `mintSpendCeilingWei`), and daily
  * caps bound the blast radius of a mis-config.
  */
 export const AUTO_MINT_POLICY_SETTING_KEY = "auto_mint_policy";
@@ -131,6 +133,18 @@ export type AutoMintDecision =
   | { readonly plan: false; readonly reason: string };
 
 /** Pure per-(policy, candidate) decision. Wallet-level caps are checked by the caller. */
+/** How long a live stage may be open before we demand visible minting. */
+export const LIVE_DEMAND_GRACE_MS = 15 * 60_000;
+
+function formatOpenFor(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 120) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
 export function decideAutoMint(
   policy: AutoMintPolicy,
   c: AutoMintCandidate,
@@ -168,21 +182,28 @@ export function decideAutoMint(
   if (policy.minHypeScore > 0 && c.hypeScore !== null && c.hypeScore < policy.minHypeScore) {
     return { plan: false, reason: `hype ${c.hypeScore} < min ${policy.minHypeScore}` };
   }
+  // Demand gates apply only once a live stage has been open long enough for
+  // demand to show: a stage that opened seconds ago legitimately has zero
+  // minters (that is the moment to fire). A stage open for hours with
+  // nobody minting is a dead drop — never worth gas, whatever the policy.
   const isLive = c.startsAtMs <= nowMs;
-  if (
-    isLive &&
-    policy.minUniqueMintersLive > 0 &&
-    c.uniqueMinters1h < policy.minUniqueMintersLive
-  ) {
-    return {
-      plan: false,
-      reason: `only ${c.uniqueMinters1h} unique minters/1h < min ${policy.minUniqueMintersLive}`,
-    };
+  const openForMs = nowMs - c.startsAtMs;
+  if (isLive && openForMs > LIVE_DEMAND_GRACE_MS) {
+    const openFor = formatOpenFor(openForMs);
+    if (c.uniqueMinters1h === 0) {
+      return { plan: false, reason: `open ${openFor} with 0 minters in the last hour (dead drop)` };
+    }
+    if (policy.minUniqueMintersLive > 0 && c.uniqueMinters1h < policy.minUniqueMintersLive) {
+      return {
+        plan: false,
+        reason: `open ${openFor}, only ${c.uniqueMinters1h} unique minters/1h < min ${policy.minUniqueMintersLive}`,
+      };
+    }
   }
-  // Ceiling must be > 0 for canFireMintPlan; a free mint's value (0) still
-  // satisfies value ≤ ceiling with a 1-wei ceiling.
-  const ceilingWei =
-    price > 0n ? price.toString(10) : policy.maxPriceWei !== "0" ? policy.maxPriceWei : "1";
+  // Price × quantity plus OpenSea's per-token mint fee allowance: a "free"
+  // stage still costs the SeaDrop fee (~0.00008 ETH), so a 1-wei ceiling
+  // refused every fire (found live 2026-08-28).
+  const ceilingWei = mintSpendCeilingWei(price.toString(10), policy.quantity);
   // Arm until the stage ends (or 24h), never less than a minute; the hot
   // loop / pre-sign path takes it from there.
   const endMs = c.endsAtMs ?? nowMs + 24 * 3_600_000;
