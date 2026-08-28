@@ -212,6 +212,33 @@ export async function runEligibilityPass(
     } catch (error) {
       const errorCode = isAppError(error) ? error.category : "unknown";
       log.warn({ errCode: errorCode, pairKey }, "eligibility check failed");
+      metrics().inc("hoodmint_provider_errors_total", {
+        provider: "opensea-eligibility",
+        category: errorCode,
+      });
+      if (errorCode === "RateLimited") {
+        // A 429 is transient quota exhaustion, NOT a real verdict error —
+        // never overwrite a resolved chip (or leave a scary "ERROR") because
+        // the free-tier quota ran out mid-cycle. Preserve any real verdict,
+        // demote unresolved ones to AUTH_REQUIRED (retryable "AUTH NEEDED"),
+        // schedule a short retry, and STOP the pass so we don't hammer the
+        // 429 for every remaining pair this cycle.
+        for (const check of checks) {
+          const resolved =
+            check.currentStatus === "ELIGIBLE_RESTRICTED" ||
+            check.currentStatus === "INELIGIBLE_RESTRICTED" ||
+            check.currentStatus === "PUBLIC_ONLY";
+          await upsertEligibilityCheck(db, {
+            walletId: check.walletId,
+            projectId: check.projectId,
+            stageId: check.stageId,
+            status: resolved ? check.currentStatus : "AUTH_REQUIRED",
+            checkedAt: new Date(),
+            nextDueAt: addMs(new Date(), 5 * 60 * 1000),
+          });
+        }
+        break;
+      }
       for (const check of checks) {
         await upsertEligibilityCheck(db, {
           walletId: check.walletId,
@@ -223,10 +250,6 @@ export async function runEligibilityPass(
           nextDueAt: addMs(new Date(), 30 * 60 * 1000),
         });
       }
-      metrics().inc("hoodmint_provider_errors_total", {
-        provider: "opensea-eligibility",
-        category: errorCode,
-      });
     }
   }
 

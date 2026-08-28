@@ -234,6 +234,9 @@ export interface DueCheck {
   readonly stageKind: string;
   readonly stageStartsAt: Date;
   readonly currentlyEligible: boolean;
+  /** Prior persisted verdict — so a transient rate-limit can preserve a
+   *  resolved chip instead of overwriting it with ERROR. */
+  readonly currentStatus: EligibilityState;
   readonly lifecycle: string;
 }
 
@@ -277,6 +280,7 @@ export async function dueEligibilityChecks(db: Db, now: Date, limit: number): Pr
     stageKind: row.stageKind,
     stageStartsAt: row.stageStartsAt,
     currentlyEligible: row.currentStatus === "ELIGIBLE_RESTRICTED",
+    currentStatus: row.currentStatus as EligibilityState,
     lifecycle: row.lifecycle,
   }));
 }

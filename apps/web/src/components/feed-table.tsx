@@ -219,11 +219,14 @@ export function FeedTable({
                 <td className="px-3 py-2 font-mono text-xs">{formatPrice(row.stagePriceWei)}</td>
                 <td className="px-3 py-2">
                   <Countdown
-                    iso={
-                      row.stageStartsAt !== null
-                        ? coerceDate(row.stageStartsAt).toISOString()
-                        : null
-                    }
+                    iso={(() => {
+                      // NEXT/upcoming drops have their start in nextStageStart;
+                      // stageStartsAt is the currently-active stage (null until
+                      // it opens) — coalesce so upcoming drops show a start
+                      // time/countdown instead of blank (found live 2026-08-28).
+                      const start = row.nextStageStart ?? row.stageStartsAt;
+                      return start !== null ? coerceDate(start).toISOString() : null;
+                    })()}
                     label="Stage start"
                   />
                   {row.stageEndsAt !== null ? (

@@ -10,6 +10,7 @@ import {
   Layers,
   LogIn,
   Search,
+  Shield,
   ShieldCheck,
   Sparkles,
   Star,
@@ -113,6 +114,13 @@ export function AppShell({
           {signedIn ? (
             <>
               <Link
+                href="/admin"
+                className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-acid"
+              >
+                <Shield className="size-3" aria-hidden />
+                Admin
+              </Link>
+              <Link
                 href="/admin/account"
                 className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
               >
@@ -156,6 +164,23 @@ export function AppShell({
             <Search className="size-4" aria-hidden />
           </button>
           <ThemeToggle initialTheme={theme} />
+          {signedIn ? (
+            <Link
+              href="/admin"
+              aria-label="Admin console"
+              className="rounded-sm p-1.5 text-ink-muted hover:bg-base-overlay hover:text-acid"
+            >
+              <UserCog className="size-4" aria-hidden />
+            </Link>
+          ) : (
+            <Link
+              href="/login"
+              aria-label="Sign in"
+              className="rounded-sm p-1.5 text-ink-muted hover:bg-base-overlay hover:text-acid"
+            >
+              <LogIn className="size-4" aria-hidden />
+            </Link>
+          )}
         </div>
       </header>
 
