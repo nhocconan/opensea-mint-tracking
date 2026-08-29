@@ -7,11 +7,17 @@ export type Db = PostgresJsDatabase<typeof schema>;
 /** Transaction handle accepted by repository methods (PRD §14). */
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
-export function createDb(url: string, options: { max?: number } = {}): Db {
+export interface DbPoolOptions {
+  readonly max?: number;
+  readonly applicationName?: string;
+}
+
+export function createDb(url: string, options: DbPoolOptions = {}): Db {
   const client = postgres(url, {
     max: options.max ?? 10,
     idle_timeout: 20,
     connect_timeout: 10,
+    connection: { application_name: options.applicationName ?? "hoodmint" },
     // bigint columns must arrive as bigint, not number.
     types: {
       bigint: {
@@ -49,9 +55,9 @@ export function unwrapRows<T>(result: unknown): T[] {
 const globalForDb = globalThis as unknown as { __hoodmintDb?: Db };
 
 /** Process-wide singleton for request handling; scripts may create their own. */
-export function getDb(url: string): Db {
+export function getDb(url: string, options: DbPoolOptions = {}): Db {
   if (globalForDb.__hoodmintDb === undefined) {
-    globalForDb.__hoodmintDb = createDb(url);
+    globalForDb.__hoodmintDb = createDb(url, options);
   }
   return globalForDb.__hoodmintDb;
 }
@@ -96,14 +102,27 @@ export async function subscribeEvents(
   url: string,
   onEvent: (event: RadarEvent) => void,
 ): Promise<() => void> {
-  const client = postgres(url, { max: 1, idle_timeout: 0 });
-  await client.listen(EVENTS_CHANNEL, (payload) => {
-    try {
-      onEvent(JSON.parse(payload) as RadarEvent);
-    } catch {
-      // Ignore malformed notifications; SSE clients fall back to polling.
-    }
+  const client = postgres(url, {
+    max: 1,
+    idle_timeout: 0,
+    connect_timeout: 10,
+    connection: { application_name: "hoodmint-events" },
   });
+  try {
+    await client.listen(EVENTS_CHANNEL, (payload) => {
+      try {
+        onEvent(JSON.parse(payload) as RadarEvent);
+      } catch {
+        // Ignore malformed notifications; SSE clients fall back to polling.
+      }
+    });
+  } catch (error) {
+    // A failed LISTEN used to leak this dedicated client. The web reconnect
+    // loop then created one more client every five seconds until PostgreSQL's
+    // max_connections=100 was exhausted after a transient DB/network event.
+    await client.end({ timeout: 5 }).catch(() => undefined);
+    throw error;
+  }
   // Ending the dedicated connection implicitly unsubscribes.
   return () => {
     void client.end({ timeout: 5 });

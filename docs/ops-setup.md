@@ -67,3 +67,8 @@ The app never asks for a seed phrase or private key.
 - `GET /health/live` — process up
 - `GET /health/ready` — dependencies
 - `GET /setup` — first-admin form or “already completed”
+
+PostgreSQL connections carry `application_name` values `hoodmint-web`, `hoodmint-worker`, and
+`hoodmint-events`. The default single-process production budget is 6 web pool connections, 8
+worker pool connections, and 1 dedicated LISTEN connection. Diagnose unexpected growth with
+`pg_stat_activity`; do not raise `max_connections` before identifying the client name and state.

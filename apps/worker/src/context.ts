@@ -16,7 +16,7 @@ export function context(): WorkerContext {
     const config = loadEnv();
     globalForContext.__hoodmintWorker = {
       config,
-      db: getDb(config.DATABASE_URL),
+      db: getDb(config.DATABASE_URL, { max: 8, applicationName: "hoodmint-worker" }),
       log: getLogger("worker"),
     };
   }
