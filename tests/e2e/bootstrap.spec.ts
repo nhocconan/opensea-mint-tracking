@@ -71,8 +71,8 @@ test.describe("bootstrap and primary flows", () => {
   test("WL and official-link filters persist in feed and calendar URLs", async ({ page }) => {
     await page.goto("/next");
     await page.getByLabel("Filter by tracked-wallet whitelist hit").selectOption("none");
-    await expect(page).toHaveURL(/\/next\?.*wl=none/);
     await page.getByLabel("Filter by official social links").selectOption("either");
+    await expect(page).toHaveURL(/\/next\?.*wl=none/);
     await expect(page).toHaveURL(/\/next\?.*social=either/);
     await page.reload();
     await expect(page.getByLabel("Filter by tracked-wallet whitelist hit")).toHaveValue("none");

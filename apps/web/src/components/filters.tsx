@@ -2,7 +2,7 @@
 
 import { Search } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useTransition } from "react";
+import { useCallback, useEffect, useRef, useTransition } from "react";
 
 /**
  * URL-state filters (PRD §5.1): tab, filters, sort, page size, and search all
@@ -12,10 +12,17 @@ export function FilterBar({ view, showSort = true }: { view: string; showSort?: 
   const router = useRouter();
   const params = useSearchParams();
   const [pending, startTransition] = useTransition();
+  const latestQuery = useRef(params.toString());
+
+  useEffect(() => {
+    latestQuery.current = params.toString();
+  }, [params]);
 
   const setParam = useCallback(
     (key: string, value: string) => {
-      const next = new URLSearchParams(params.toString());
+      // `useSearchParams` updates after navigation. Keep an eager copy so two
+      // quick select changes merge instead of the second replacing the first.
+      const next = new URLSearchParams(latestQuery.current);
       if (value === "") {
         next.delete(key);
       } else {
@@ -23,11 +30,12 @@ export function FilterBar({ view, showSort = true }: { view: string; showSort?: 
       }
       next.delete("cursor");
       const query = next.toString();
+      latestQuery.current = query;
       startTransition(() =>
         router.replace(query === "" ? `/${view}` : `/${view}?${query}`, { scroll: false }),
       );
     },
-    [params, router, view],
+    [router, view],
   );
 
   const search = params.get("q") ?? "";
@@ -38,15 +46,16 @@ export function FilterBar({ view, showSort = true }: { view: string; showSort?: 
   const hasFilters = search !== "" || price !== "" || wl !== "" || social !== "";
 
   const clearFilters = useCallback(() => {
-    const next = new URLSearchParams(params.toString());
+    const next = new URLSearchParams(latestQuery.current);
     for (const key of ["q", "price", "wl", "social", "cursor"]) {
       next.delete(key);
     }
     const query = next.toString();
+    latestQuery.current = query;
     startTransition(() =>
       router.replace(query === "" ? `/${view}` : `/${view}?${query}`, { scroll: false }),
     );
-  }, [params, router, view]);
+  }, [router, view]);
 
   return (
     <form
