@@ -35,3 +35,11 @@ apps/worker/__*.mts
 # backups contain secrets (encrypted) — never in git
 backups/
 restored-config/
+
+# Server-local ingress stack (Traefik) — real ACME account data + operator
+# email live here; created on the host, never tracked.
+infra/ingress/.env
+
+# Host-specific hardening script — contains admin source IPs.
+infra/host/
+infra/ingress/
