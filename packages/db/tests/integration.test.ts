@@ -37,6 +37,7 @@ import {
   insertSignal,
   latestSignal,
   latestSignalsForProject,
+  listCalendarStages,
   markAlertSent,
   markMintPlanExecuted,
   mintEvents,
@@ -54,6 +55,7 @@ import {
   saveRaritySnapshot,
   scrubKeyTracesForAddress,
   setWalletSigningKey,
+  trackedWalletEligibilityForProjects,
   unfinalizeFromBlock,
   upsertEligibilityCheck,
   upsertProjectFromSource,
@@ -239,6 +241,12 @@ describe("feed queries (PRD §5/§9)", () => {
 
     const next = await queryFeed(db, { view: "next", sort: "starting", limit: 2 });
     expect(next.rows).toHaveLength(2);
+    expect(next.rows[0]).toMatchObject({
+      nextStageLabel: "WL",
+      nextStageKind: "allowlist",
+      nextStagePriceWei: "1",
+      nextStageMaxPerWallet: 1,
+    });
     expect(next.nextCursor).not.toBeNull();
     const page2 = await queryFeed(db, {
       view: "next",
@@ -248,6 +256,14 @@ describe("feed queries (PRD §5/§9)", () => {
     });
     const allNames = [...next.rows, ...page2.rows].map((r) => r.name);
     expect(new Set(allNames).size).toBe(allNames.length);
+
+    const calendar = await listCalendarStages(db, NOW, 20);
+    expect(calendar.filter((stage) => stage.projectName.startsWith("Next "))).toHaveLength(3);
+    expect(calendar.find((stage) => stage.projectName === "Next 0")).toMatchObject({
+      stageLabel: "WL",
+      stageKind: "allowlist",
+      stagePriceWei: "1",
+    });
 
     const search = await queryFeed(db, { view: "all", search: "Live One" });
     expect(search.rows.every((row) => row.name.includes("Live") || row.name === "Live One")).toBe(
@@ -266,6 +282,15 @@ describe("eligibility scoping (perf finding, 2026-08-22)", () => {
       .values({ address: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`, enabled: true })
       .returning();
     if (wallet === undefined) throw new Error("wallet insert returned no row");
+    const [uncheckedWallet] = await db
+      .insert(wallets)
+      .values({
+        address: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+        label: "Unchecked",
+        enabled: true,
+      })
+      .returning();
+    if (uncheckedWallet === undefined) throw new Error("unchecked wallet insert returned no row");
 
     const scoped = await upsertProjectFromSource(db, {
       ...baseProject,
@@ -359,6 +384,21 @@ describe("eligibility scoping (perf finding, 2026-08-22)", () => {
     const chips = await walletChipsForProjects(db, [wallet.id]);
     expect(chips.get(`${wallet.id}:${scoped.projectId}`)).toBe("ELIGIBLE_RESTRICTED");
     expect(chips.get(`${wallet.id}:${unscoped.projectId}`)).toBe("PUBLIC_ONLY");
+
+    const visibleWallets = await trackedWalletEligibilityForProjects(db, [scoped.projectId]);
+    expect(visibleWallets.get(scoped.projectId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          walletId: wallet.id,
+          status: "ELIGIBLE_RESTRICTED",
+        }),
+        expect.objectContaining({
+          walletId: uncheckedWallet.id,
+          walletLabel: "Unchecked",
+          status: "UNKNOWN",
+        }),
+      ]),
+    );
   });
 });
 

@@ -1,3 +1,4 @@
+import { can } from "@hoodmint/auth";
 import {
   chainAddressUrl,
   chainTxUrl,
@@ -18,8 +19,10 @@ import { ConfidenceTag, EligibilityChip, SourceBadge, StatusChip } from "@hoodmi
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CopyButton, Countdown } from "@/components/feed-parts.tsx";
+import { MintActions, ProjectSocialLinks } from "@/components/mint-decision.tsx";
 import { container } from "@/lib/container.ts";
 import { formatDateTimeLocal, formatDateTimeUtc, formatPrice, shortAddress } from "@/lib/format.ts";
+import { getSessionUser } from "@/lib/session.ts";
 import { RarityRefreshButton } from "./rarity-refresh-button.tsx";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +30,7 @@ export const dynamic = "force-dynamic";
 export default async function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const { db } = container();
+  const user = await getSessionUser();
   const detail = await getProjectDetail(db, id);
   if (detail === undefined) {
     notFound();
@@ -93,16 +97,19 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
             <p className="mt-1 font-mono text-xs text-ink-faint">contract not yet known</p>
           )}
         </div>
-        {project.slug !== null ? (
-          <a
-            href={`https://opensea.io/collection/${project.slug}/overview`}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="rounded-sm border border-acid/40 bg-acid/10 px-3 py-1.5 font-mono text-xs text-acid hover:bg-acid/20"
-          >
-            Verified mint link ↗
-          </a>
-        ) : null}
+        <div className="space-y-2">
+          <ProjectSocialLinks
+            twitterUsername={project.twitterUsername}
+            projectUrl={project.projectUrl}
+            discordUrl={project.discordUrl}
+            safelistStatus={project.safelistStatus}
+          />
+          <MintActions
+            projectId={project.id}
+            slug={project.slug}
+            specialMintEnabled={can(user?.role, "execution:configure")}
+          />
+        </div>
       </header>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -150,6 +157,15 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
                 </dl>
                 <div className="mt-1">
                   <Countdown iso={stage.startsAt.toISOString()} label="Start" />
+                </div>
+                <div className="mt-2">
+                  <MintActions
+                    projectId={project.id}
+                    slug={project.slug}
+                    specialMintEnabled={can(user?.role, "execution:configure")}
+                    stageId={stage.id}
+                    compact
+                  />
                 </div>
               </li>
             ))}

@@ -43,12 +43,17 @@ export function SpecialMintForm({
   projectId,
   stages,
   wallets,
+  initialStageId,
 }: {
   projectId: string;
   stages: StageOption[];
   wallets: ManagedWalletOption[];
+  initialStageId: string | null;
 }) {
-  const [stageId, setStageId] = useState<string>(stages[0]?.id ?? "");
+  const selectedInitialStage = stages.some((stage) => stage.id === initialStageId)
+    ? (initialStageId ?? "")
+    : (stages[0]?.id ?? "");
+  const [stageId, setStageId] = useState<string>(selectedInitialStage);
   const [manualFire, setManualFire] = useState(false);
   const [fireAtGmt7, setFireAtGmt7] = useState<string>("");
   const [quantities, setQuantities] = useState<Record<string, number>>({});

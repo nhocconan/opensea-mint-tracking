@@ -207,6 +207,70 @@ export async function bestEligibilityByProject(
   return best;
 }
 
+export interface TrackedWalletEligibility {
+  readonly walletId: string;
+  readonly walletAddress: string;
+  readonly walletLabel: string | null;
+  readonly status: EligibilityState;
+}
+
+/**
+ * Decision-ready wallet verdicts for a bounded set of projects.
+ *
+ * Unlike `bestEligibilityByProject`, this intentionally preserves every
+ * enabled wallet so the UI cannot hide an ineligible/unknown wallet behind a
+ * different wallet's WL hit. Wallets with no completed check are returned as
+ * UNKNOWN. The implementation is two bounded queries, never one query per
+ * card.
+ */
+export async function trackedWalletEligibilityForProjects(
+  db: Db,
+  projectIds: readonly string[],
+): Promise<Map<string, TrackedWalletEligibility[]>> {
+  const result = new Map<string, TrackedWalletEligibility[]>();
+  if (projectIds.length === 0) {
+    return result;
+  }
+
+  const enabledWallets = await db
+    .select({ id: wallets.id, address: wallets.address, label: wallets.label })
+    .from(wallets)
+    .where(eq(wallets.enabled, true))
+    .orderBy(asc(wallets.createdAt));
+
+  const checks = await db
+    .select({
+      projectId: eligibilityChecks.projectId,
+      walletId: eligibilityChecks.walletId,
+      status: eligibilityChecks.status,
+    })
+    .from(eligibilityChecks)
+    .innerJoin(wallets, eq(wallets.id, eligibilityChecks.walletId))
+    .where(and(eq(wallets.enabled, true), inArray(eligibilityChecks.projectId, projectIds)));
+
+  const bestByWalletProject = new Map<string, EligibilityState>();
+  for (const check of checks) {
+    const key = `${check.projectId}:${check.walletId}`;
+    const current = bestByWalletProject.get(key);
+    if (current === undefined || ELIGIBLE_RANK[check.status] < ELIGIBLE_RANK[current]) {
+      bestByWalletProject.set(key, check.status);
+    }
+  }
+
+  for (const projectId of projectIds) {
+    result.set(
+      projectId,
+      enabledWallets.map((wallet) => ({
+        walletId: wallet.id,
+        walletAddress: wallet.address,
+        walletLabel: wallet.label,
+        status: bestByWalletProject.get(`${projectId}:${wallet.id}`) ?? "UNKNOWN",
+      })),
+    );
+  }
+  return result;
+}
+
 /** Feed-level wallet chips: best (most alarming) status per project. */
 export async function walletChipsForProjects(
   db: Db,

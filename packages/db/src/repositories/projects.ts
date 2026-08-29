@@ -463,12 +463,20 @@ export interface FeedRow {
   readonly supplyVerified: boolean;
   readonly velocity1h: number;
   readonly uniqueMinters1h: number;
+  readonly stageId: string | null;
   readonly stageLabel: string | null;
   readonly stageKind: StageKind | null;
   readonly stagePriceWei: string | null;
-  /** Price of the NEXT (not-yet-open) stage — what an upcoming drop will
-   *  cost; `stagePriceWei` is the active stage's and is null before open. */
+  readonly stageMaxPerWallet: number | null;
+  /** Fields for the NEXT (not-yet-open) stage. The active-stage fields above
+   * are null before open, so presentation code must deliberately fall back to
+   * this complete set rather than showing an invented/blank phase. */
+  readonly nextStageId: string | null;
+  readonly nextStageLabel: string | null;
+  readonly nextStageKind: StageKind | null;
   readonly nextStagePriceWei: string | null;
+  readonly nextStageMaxPerWallet: number | null;
+  readonly nextStageEndsAt: Date | null;
   readonly stageStartsAt: Date | null;
   readonly stageEndsAt: Date | null;
 }
@@ -767,10 +775,17 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       // correlated subselect resolves to `ds.id` — never matching, so this
       // came back null for every row (found live 2026-08-28 via toSQL()).
       // Wrapping the inner template keeps it rendered as "projects"."id".
+      nextStageId: sql<string | null>`${nextStageCol("id")}`,
+      nextStageLabel: sql<string | null>`${nextStageCol("label")}`,
+      nextStageKind: sql<StageKind | null>`${nextStageCol("type")}`,
       nextStagePriceWei: sql<string | null>`${nextStageCol("price_wei")}`,
+      nextStageMaxPerWallet: sql<number | null>`${nextStageCol("max_per_wallet")}`,
+      nextStageEndsAt: sql<Date | null>`${nextStageCol("ends_at")}`,
+      stageId: sql<string | null>`${currentStageCol("id")}`,
       stageLabel: sql<string | null>`${currentStageCol("label")}`,
       stageKind: sql<StageKind | null>`${currentStageCol("type")}`,
       stagePriceWei: sql<string | null>`${currentStageCol("price_wei")}`,
+      stageMaxPerWallet: sql<number | null>`${currentStageCol("max_per_wallet")}`,
       stageStartsAt: sql<Date | null>`${currentStageCol("starts_at")}`,
       stageEndsAt: sql<Date | null>`${currentStageCol("ends_at")}`,
     })
@@ -1060,6 +1075,57 @@ export async function upcomingDropStages(
     )
     .orderBy(asc(dropStages.startsAt));
   return rows;
+}
+
+export interface CalendarStage {
+  readonly stageId: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectSlug: string | null;
+  readonly projectImageUrl: string | null;
+  readonly twitterUsername: string | null;
+  readonly projectUrl: string | null;
+  readonly discordUrl: string | null;
+  readonly safelistStatus: string | null;
+  readonly confidence: Confidence;
+  readonly lifecycleStatus: LifecycleStatus;
+  readonly lastSeenAt: Date;
+  readonly stageLabel: string;
+  readonly stageKind: StageKind;
+  readonly stagePriceWei: string | null;
+  readonly stageMaxPerWallet: number | null;
+  readonly startsAt: Date;
+  readonly endsAt: Date | null;
+}
+
+/** Bounded, phase-level agenda for the calendar (one row per mint stage). */
+export async function listCalendarStages(db: Db, now: Date, limit = 250): Promise<CalendarStage[]> {
+  return db
+    .select({
+      stageId: dropStages.id,
+      projectId: dropStages.projectId,
+      projectName: projects.name,
+      projectSlug: projects.slug,
+      projectImageUrl: projects.imageUrl,
+      twitterUsername: projects.twitterUsername,
+      projectUrl: projects.projectUrl,
+      discordUrl: projects.discordUrl,
+      safelistStatus: projects.safelistStatus,
+      confidence: projects.confidence,
+      lifecycleStatus: projects.lifecycleStatus,
+      lastSeenAt: projects.lastSeenAt,
+      stageLabel: dropStages.label,
+      stageKind: dropStages.type,
+      stagePriceWei: dropStages.priceWei,
+      stageMaxPerWallet: dropStages.maxPerWallet,
+      startsAt: dropStages.startsAt,
+      endsAt: dropStages.endsAt,
+    })
+    .from(dropStages)
+    .innerJoin(projects, eq(projects.id, dropStages.projectId))
+    .where(and(gt(dropStages.startsAt, now), eq(dropStages.paused, false)))
+    .orderBy(asc(dropStages.startsAt), asc(dropStages.id))
+    .limit(Math.min(Math.max(limit, 1), 500));
 }
 
 /**

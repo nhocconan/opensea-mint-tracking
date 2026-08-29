@@ -1,9 +1,9 @@
 import { can } from "@hoodmint/auth";
 import {
-  bestEligibilityByProject,
   type FeedSort,
   type FeedView,
   queryFeed,
+  trackedWalletEligibilityForProjects,
   watchedProjectIds,
 } from "@hoodmint/db";
 import { Suspense } from "react";
@@ -55,7 +55,7 @@ export async function FeedPage({
     searchParams.price === "free" || searchParams.price === "paid" ? searchParams.price : undefined;
 
   // queryFeed and watchedProjectIds are independent — run them together.
-  // bestEligibilityByProject waits on queryFeed's result on purpose: it
+  // Wallet eligibility waits on queryFeed's result on purpose: it
   // scopes the eligibility scan to just this page's project ids instead of
   // every eligibility row in the system (see the doc comment on
   // bestEligibilityByProject — this was a real load-test-confirmed
@@ -72,7 +72,7 @@ export async function FeedPage({
     }),
     user !== null ? watchedProjectIds(db, user.id) : Promise.resolve(new Set<string>()),
   ]);
-  const eligibility = await bestEligibilityByProject(
+  const eligibility = await trackedWalletEligibilityForProjects(
     db,
     page.rows.map((row) => row.id),
   );
@@ -137,6 +137,7 @@ export async function FeedPage({
           eligibilityByProject={eligibility}
           watchedIds={watched}
           watchEnabled={user !== null}
+          specialMintEnabled={can(user?.role, "execution:configure")}
           view={view}
         />
       </Suspense>

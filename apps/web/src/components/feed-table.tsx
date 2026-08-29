@@ -1,71 +1,23 @@
 import { coerceDate, mintConcentrationSeverity } from "@hoodmint/core";
-import type { FeedRow } from "@hoodmint/db";
-import { ConfidenceTag, EligibilityChip, SourceBadge, StatusChip } from "@hoodmint/ui";
+import type { FeedRow, TrackedWalletEligibility } from "@hoodmint/db";
+import { ConfidenceTag, SourceBadge, StatusChip } from "@hoodmint/ui";
 import { ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { formatPrice, formatSupply, formatVelocity, shortAddress } from "@/lib/format.ts";
 import { CopyButton, Countdown, WatchButton } from "./feed-parts.tsx";
-
-/**
- * Collection socials + OpenSea's own verification, inline so a scam check
- * needs no click-through (user ask 2026-08-28). "OS ✓" is OpenSea's
- * safelist "verified" — the blue check — not our data confidence.
- */
-function SocialLinks({ row }: { row: FeedRow }) {
-  const links: { href: string; label: string; text: string }[] = [];
-  if (row.twitterUsername !== null) {
-    links.push({
-      href: `https://x.com/${row.twitterUsername}`,
-      label: `X profile @${row.twitterUsername}`,
-      text: `@${row.twitterUsername}`,
-    });
-  }
-  if (row.projectUrl !== null) {
-    let host = row.projectUrl;
-    try {
-      host = new URL(row.projectUrl).host.replace(/^www\./, "");
-    } catch {
-      // keep the raw value
-    }
-    links.push({ href: row.projectUrl, label: `Project website ${host}`, text: host });
-  }
-  if (row.discordUrl !== null) {
-    links.push({ href: row.discordUrl, label: "Discord", text: "discord" });
-  }
-  const verified = row.safelistStatus === "verified";
-  if (links.length === 0 && !verified) {
-    return row.safelistStatus === null ? null : (
-      <span className="font-mono text-[10px] text-amber">no X / no website</span>
-    );
-  }
-  return (
-    <span className="flex flex-wrap items-center gap-x-2 font-mono text-[10px]">
-      {verified ? (
-        <span className="text-emerald" title="OpenSea verified collection (blue check)">
-          OS ✓
-        </span>
-      ) : null}
-      {links.map((l) => (
-        <a
-          key={l.href}
-          href={l.href}
-          target="_blank"
-          rel="noreferrer noopener"
-          aria-label={l.label}
-          className="text-ink-faint underline-offset-2 hover:text-cyan hover:underline"
-        >
-          {l.text}
-        </a>
-      ))}
-    </span>
-  );
-}
+import {
+  decisionStage,
+  MintActions,
+  ProjectSocialLinks,
+  WalletEligibilityList,
+} from "./mint-decision.tsx";
 
 export interface FeedTableProps {
   readonly rows: readonly FeedRow[];
-  readonly eligibilityByProject: ReadonlyMap<string, string>;
+  readonly eligibilityByProject: ReadonlyMap<string, readonly TrackedWalletEligibility[]>;
   readonly watchedIds: ReadonlySet<string>;
   readonly watchEnabled: boolean;
+  readonly specialMintEnabled: boolean;
   readonly view: string;
 }
 
@@ -122,6 +74,7 @@ export function FeedTable({
   eligibilityByProject,
   watchedIds,
   watchEnabled,
+  specialMintEnabled,
 }: FeedTableProps) {
   if (rows.length === 0) {
     return (
@@ -136,200 +89,271 @@ export function FeedTable({
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="hood-table w-full min-w-[900px] text-left text-sm">
-        <thead>
-          <tr className="text-[11px] tracking-wide text-ink-faint uppercase">
-            <th scope="col" className="px-3 py-2 font-normal">
-              Watch
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Project
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Status
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Source
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Stage
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Price
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Starts
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Supply
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Velocity
-            </th>
-            <th scope="col" className="px-3 py-2 font-normal">
-              Wallet
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const eligibility = eligibilityByProject.get(row.id);
-            // row.lastSeenAt is typed Date but is actually a string at
-            // runtime (every Drizzle timestamp column is — found live via
-            // a production load test, 2026-08-22, not by typecheck).
-            const stale =
-              Date.now() - coerceDate(row.lastSeenAt).getTime() > 3 * 60 * 60 * 1000 &&
-              row.lifecycleStatus !== "ENDED";
-            return (
-              <tr key={row.id} className="align-middle">
-                <td className="px-3 py-2">
-                  <WatchButton
-                    projectId={row.id}
-                    watched={watchedIds.has(row.id)}
-                    enabled={watchEnabled}
+    <>
+      <div className="space-y-3 p-3 md:hidden">
+        {rows.map((row) => {
+          const stage = decisionStage(row);
+          const stale =
+            Date.now() - coerceDate(row.lastSeenAt).getTime() > 3 * 60 * 60 * 1000 &&
+            row.lifecycleStatus !== "ENDED";
+          return (
+            <article key={row.id} className="rounded-md border border-line bg-base-raised p-3">
+              <div className="flex items-start gap-2">
+                <WatchButton
+                  projectId={row.id}
+                  watched={watchedIds.has(row.id)}
+                  enabled={watchEnabled}
+                />
+                <div className="min-w-0 flex-1">
+                  <Link href={`/projects/${row.id}`} className="font-medium hover:text-acid">
+                    {row.name}
+                  </Link>
+                  <ProjectSocialLinks
+                    twitterUsername={row.twitterUsername}
+                    projectUrl={row.projectUrl}
+                    discordUrl={row.discordUrl}
+                    safelistStatus={row.safelistStatus}
                   />
-                </td>
-                <td className="max-w-[260px] px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    {row.imageUrl !== null ? (
-                      // Remote images restricted to the CSP allowlist with
-                      // fixed box to avoid layout shift (PRD §14). Plain <img>
-                      // is deliberate: provider CDN hosts are allowlisted in
-                      // CSP, and next/image adds optimization deps we don't
-                      // need for 28px tiles.
-                      // biome-ignore lint/performance/noImgElement: allowlisted provider CDN thumbnails
-                      <img
-                        src={row.imageUrl}
-                        alt=""
-                        width={28}
-                        height={28}
-                        loading="lazy"
-                        className="size-7 rounded-xs border border-line object-cover"
-                      />
-                    ) : (
-                      <div
-                        className="size-7 rounded-xs border border-line bg-base-overlay"
-                        aria-hidden
-                      />
-                    )}
-                    <div className="min-w-0">
-                      <Link
-                        href={`/projects/${row.id}`}
-                        className="block truncate font-medium hover:text-acid"
-                      >
-                        {row.name}
-                      </Link>
-                      {row.slug !== null ? (
-                        <a
-                          href={`https://opensea.io/collection/${row.slug}/overview`}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="mt-0.5 inline-flex items-center gap-1 rounded-xs border border-acid/40 px-1.5 py-0.5 font-mono text-[10px] text-acid hover:bg-acid/10"
-                        >
-                          Mint on OpenSea
-                          <ExternalLink className="size-3" aria-hidden />
-                        </a>
-                      ) : null}
-                      {row.contractAddress !== null ? (
-                        <span className="flex items-center gap-1 font-mono text-[11px] text-ink-faint">
-                          {shortAddress(row.contractAddress)}
-                          <CopyButton value={row.contractAddress} label="Contract" />
-                          <a
-                            href={`${EXPLORER}/address/${row.contractAddress}`}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            aria-label="View contract on explorer"
-                            className="text-ink-faint hover:text-cyan"
-                          >
-                            <ExternalLink className="size-3" aria-hidden />
-                          </a>
-                        </span>
-                      ) : (
-                        <span className="font-mono text-[11px] text-ink-faint">
-                          no contract yet
-                        </span>
-                      )}
-                      <SocialLinks row={row} />
-                    </div>
+                </div>
+                <StatusChip status={row.lifecycleStatus} stale={stale} />
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 rounded-sm border border-line bg-base px-2.5 py-2">
+                <div>
+                  <div className="font-mono text-[10px] text-ink-faint uppercase">Phase</div>
+                  <div className="text-xs text-ink">{stage.label ?? "Unknown phase"}</div>
+                  <div className="font-mono text-[10px] text-ink-faint uppercase">
+                    {stage.kind ?? "unknown"}
+                    {stage.maxPerWallet !== null ? ` · max ${stage.maxPerWallet}` : ""}
                   </div>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="flex items-center gap-1">
-                    <StatusChip status={row.lifecycleStatus} stale={stale} />
-                    {stale ? (
-                      <span className="font-mono text-[10px] text-ink-faint">
-                        seen{" "}
-                        {coerceDate(row.lastSeenAt).toISOString().slice(5, 16).replace("T", " ")}
-                      </span>
-                    ) : null}
-                  </div>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="flex items-center gap-1">
-                    <SourceBadge kind="opensea" />
-                    <ConfidenceTag confidence={row.confidence} />
-                  </div>
-                </td>
-                <td className="px-3 py-2">
-                  {row.stageLabel !== null ? (
-                    <div>
-                      <div className="text-xs">{row.stageLabel}</div>
-                      <div className="font-mono text-[10px] text-ink-faint uppercase">
-                        {row.stageKind}
-                      </div>
-                    </div>
-                  ) : (
-                    <span className="text-ink-faint">—</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 font-mono text-xs">
-                  {formatPrice(row.stagePriceWei ?? row.nextStagePriceWei)}
-                </td>
-                <td className="px-3 py-2">
+                </div>
+                <div>
+                  <div className="font-mono text-[10px] text-ink-faint uppercase">Price</div>
+                  <div className="font-mono text-sm text-acid">{formatPrice(stage.priceWei)}</div>
                   <Countdown
-                    iso={(() => {
-                      // NEXT/upcoming drops have their start in nextStageStart;
-                      // stageStartsAt is the currently-active stage (null until
-                      // it opens) — coalesce so upcoming drops show a start
-                      // time/countdown instead of blank (found live 2026-08-28).
-                      const start = row.nextStageStart ?? row.stageStartsAt;
-                      return start !== null ? coerceDate(start).toISOString() : null;
-                    })()}
+                    iso={stage.startsAt !== null ? coerceDate(stage.startsAt).toISOString() : null}
                     label="Stage start"
                     pastPrefix="opened"
                   />
-                  {row.stageEndsAt !== null ? (
-                    <div>
-                      <Countdown
-                        iso={coerceDate(row.stageEndsAt).toISOString()}
-                        label="Stage end"
-                      />
+                </div>
+              </div>
+              <div className="mt-2">
+                <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
+                  Tracked wallet WL
+                </div>
+                <WalletEligibilityList wallets={eligibilityByProject.get(row.id)} />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-ink-faint">
+                <span>{formatSupply(row.minted, row.maxSupply, row.supplyVerified)}</span>
+                <span>{formatVelocity(row.velocity1h, row.uniqueMinters1h)}</span>
+                <span className="inline-flex items-center gap-1">
+                  <SourceBadge kind="opensea" />
+                  <ConfidenceTag confidence={row.confidence} />
+                </span>
+              </div>
+              <div className="mt-3">
+                <MintActions
+                  projectId={row.id}
+                  slug={row.slug}
+                  specialMintEnabled={specialMintEnabled}
+                  stageId={stage.id}
+                  compact
+                />
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      <div className="hidden overflow-x-auto md:block">
+        <table className="hood-table w-full min-w-[900px] text-left text-sm">
+          <thead>
+            <tr className="text-[11px] tracking-wide text-ink-faint uppercase">
+              <th scope="col" className="px-3 py-2 font-normal">
+                Watch
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Project
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Status
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Source
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Stage
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Price
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Starts
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Supply
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Velocity
+              </th>
+              <th scope="col" className="px-3 py-2 font-normal">
+                Wallet
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const stage = decisionStage(row);
+              // row.lastSeenAt is typed Date but is actually a string at
+              // runtime (every Drizzle timestamp column is — found live via
+              // a production load test, 2026-08-22, not by typecheck).
+              const stale =
+                Date.now() - coerceDate(row.lastSeenAt).getTime() > 3 * 60 * 60 * 1000 &&
+                row.lifecycleStatus !== "ENDED";
+              return (
+                <tr key={row.id} className="align-middle">
+                  <td className="px-3 py-2">
+                    <WatchButton
+                      projectId={row.id}
+                      watched={watchedIds.has(row.id)}
+                      enabled={watchEnabled}
+                    />
+                  </td>
+                  <td className="max-w-[260px] px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      {row.imageUrl !== null ? (
+                        // Remote images restricted to the CSP allowlist with
+                        // fixed box to avoid layout shift (PRD §14). Plain <img>
+                        // is deliberate: provider CDN hosts are allowlisted in
+                        // CSP, and next/image adds optimization deps we don't
+                        // need for 28px tiles.
+                        // biome-ignore lint/performance/noImgElement: allowlisted provider CDN thumbnails
+                        <img
+                          src={row.imageUrl}
+                          alt=""
+                          width={28}
+                          height={28}
+                          loading="lazy"
+                          className="size-7 rounded-xs border border-line object-cover"
+                        />
+                      ) : (
+                        <div
+                          className="size-7 rounded-xs border border-line bg-base-overlay"
+                          aria-hidden
+                        />
+                      )}
+                      <div className="min-w-0">
+                        <Link
+                          href={`/projects/${row.id}`}
+                          className="block truncate font-medium hover:text-acid"
+                        >
+                          {row.name}
+                        </Link>
+                        <div className="mt-1">
+                          <MintActions
+                            projectId={row.id}
+                            slug={row.slug}
+                            specialMintEnabled={specialMintEnabled}
+                            stageId={stage.id}
+                            compact
+                          />
+                        </div>
+                        {row.contractAddress !== null ? (
+                          <span className="flex items-center gap-1 font-mono text-[11px] text-ink-faint">
+                            {shortAddress(row.contractAddress)}
+                            <CopyButton value={row.contractAddress} label="Contract" />
+                            <a
+                              href={`${EXPLORER}/address/${row.contractAddress}`}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              aria-label="View contract on explorer"
+                              className="text-ink-faint hover:text-cyan"
+                            >
+                              <ExternalLink className="size-3" aria-hidden />
+                            </a>
+                          </span>
+                        ) : (
+                          <span className="font-mono text-[11px] text-ink-faint">
+                            no contract yet
+                          </span>
+                        )}
+                        <ProjectSocialLinks
+                          twitterUsername={row.twitterUsername}
+                          projectUrl={row.projectUrl}
+                          discordUrl={row.discordUrl}
+                          safelistStatus={row.safelistStatus}
+                        />
+                      </div>
                     </div>
-                  ) : null}
-                </td>
-                <td className="px-3 py-2 font-mono text-xs">
-                  {formatSupply(row.minted, row.maxSupply, row.supplyVerified)}
-                </td>
-                <td className="px-3 py-2 font-mono text-xs">
-                  {formatVelocity(row.velocity1h, row.uniqueMinters1h)}
-                  <ConcentrationBadge
-                    quantity={row.velocity1h}
-                    uniqueRecipients={row.uniqueMinters1h}
-                  />
-                </td>
-                <td className="px-3 py-2">
-                  {eligibility !== undefined ? (
-                    <EligibilityChip state={eligibility} />
-                  ) : (
-                    <EligibilityChip state="UNKNOWN" />
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1">
+                      <StatusChip status={row.lifecycleStatus} stale={stale} />
+                      {stale ? (
+                        <span className="font-mono text-[10px] text-ink-faint">
+                          seen{" "}
+                          {coerceDate(row.lastSeenAt).toISOString().slice(5, 16).replace("T", " ")}
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1">
+                      <SourceBadge kind="opensea" />
+                      <ConfidenceTag confidence={row.confidence} />
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    {stage.label !== null ? (
+                      <div>
+                        <div className="text-xs">{stage.label}</div>
+                        <div className="font-mono text-[10px] text-ink-faint uppercase">
+                          {stage.kind}
+                          {stage.maxPerWallet !== null ? ` · max ${stage.maxPerWallet}` : ""}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-ink-faint">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">{formatPrice(stage.priceWei)}</td>
+                  <td className="px-3 py-2">
+                    <Countdown
+                      iso={(() => {
+                        // NEXT/upcoming drops have their start in nextStageStart;
+                        // stageStartsAt is the currently-active stage (null until
+                        // it opens) — coalesce so upcoming drops show a start
+                        // time/countdown instead of blank (found live 2026-08-28).
+                        return stage.startsAt !== null
+                          ? coerceDate(stage.startsAt).toISOString()
+                          : null;
+                      })()}
+                      label="Stage start"
+                      pastPrefix="opened"
+                    />
+                    {stage.endsAt !== null ? (
+                      <div>
+                        <Countdown iso={coerceDate(stage.endsAt).toISOString()} label="Stage end" />
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {formatSupply(row.minted, row.maxSupply, row.supplyVerified)}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {formatVelocity(row.velocity1h, row.uniqueMinters1h)}
+                    <ConcentrationBadge
+                      quantity={row.velocity1h}
+                      uniqueRecipients={row.uniqueMinters1h}
+                    />
+                  </td>
+                  <td className="px-3 py-2">
+                    <WalletEligibilityList wallets={eligibilityByProject.get(row.id)} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

@@ -52,6 +52,7 @@ export default async function AdminSpecialMintsPage({
   await requirePage("execution:configure");
   const params = await searchParams;
   const projectId = isUuidParam(params.projectId) ? params.projectId : null;
+  const requestedStageId = isUuidParam(params.stageId) ? params.stageId : null;
   const { db, config } = container();
 
   const [detail, walletRows] = await Promise.all([
@@ -177,7 +178,12 @@ export default async function AdminSpecialMintsPage({
             ) : null}
           </section>
 
-          <SpecialMintForm projectId={detail.project.id} stages={stages} wallets={managedWallets} />
+          <SpecialMintForm
+            projectId={detail.project.id}
+            stages={stages}
+            wallets={managedWallets}
+            initialStageId={requestedStageId}
+          />
 
           {draftPlans.length > 0 ? <ArmAllControl plans={draftPlans} /> : null}
 

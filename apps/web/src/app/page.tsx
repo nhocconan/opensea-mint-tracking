@@ -1,9 +1,23 @@
-import { bestEligibilityByProject, listProviders, queryFeed, recentScanRuns } from "@hoodmint/db";
+import { can } from "@hoodmint/auth";
+import {
+  bestEligibilityByProject,
+  listProviders,
+  queryFeed,
+  recentScanRuns,
+  type TrackedWalletEligibility,
+  trackedWalletEligibilityForProjects,
+} from "@hoodmint/db";
 import { StatusChip } from "@hoodmint/ui";
 import type { Metadata } from "next";
 import Link from "next/link";
+import {
+  decisionStage,
+  MintActions,
+  ProjectSocialLinks,
+  WalletEligibilityList,
+} from "@/components/mint-decision.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTimeUtc, formatPrice } from "@/lib/format.ts";
 import { getSessionUser } from "@/lib/session.ts";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +41,7 @@ export default async function PulsePage({
   let nextCount = 0;
   let latest: Awaited<ReturnType<typeof queryFeed>>["rows"] = [];
   let eligibility = new Map<string, string>();
+  let latestWallets = new Map<string, TrackedWalletEligibility[]>();
   let dbUp = true;
   try {
     [providers, scans, eligibility] = await Promise.all([
@@ -42,6 +57,10 @@ export default async function PulsePage({
     liveCount = live.rows.length;
     nextCount = next.rows.length;
     latest = latestPage.rows;
+    latestWallets = await trackedWalletEligibilityForProjects(
+      db,
+      latest.map((row) => row.id),
+    );
   } catch {
     dbUp = false;
   }
@@ -188,17 +207,53 @@ export default async function PulsePage({
               Latest discoveries
             </h2>
             <ul className="divide-y divide-line">
-              {latest.map((row) => (
-                <li key={row.id} className="flex items-center justify-between gap-3 py-1.5 text-sm">
-                  <Link href={`/projects/${row.id}`} className="truncate hover:text-acid">
-                    {row.name}
-                  </Link>
-                  <span className="flex shrink-0 items-center gap-2 font-mono text-[11px] text-ink-faint">
-                    {formatDateTimeUtc(row.firstSeenAt)}
-                    <StatusChip status={row.lifecycleStatus} />
-                  </span>
-                </li>
-              ))}
+              {latest.map((row) => {
+                const stage = decisionStage(row);
+                return (
+                  <li key={row.id} className="grid gap-2 py-2 text-sm lg:grid-cols-[1fr_auto]">
+                    <div className="min-w-0">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <Link href={`/projects/${row.id}`} className="font-medium hover:text-acid">
+                          {row.name}
+                        </Link>
+                        <StatusChip status={row.lifecycleStatus} />
+                      </span>
+                      <ProjectSocialLinks
+                        twitterUsername={row.twitterUsername}
+                        projectUrl={row.projectUrl}
+                        discordUrl={row.discordUrl}
+                        safelistStatus={row.safelistStatus}
+                      />
+                      <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]">
+                        <span>
+                          <span className="text-ink-faint">Phase </span>
+                          {stage.label ?? "unknown"}
+                          {stage.kind !== null ? ` · ${stage.kind}` : ""}
+                        </span>
+                        <span>
+                          <span className="text-ink-faint">Price </span>
+                          <span className="text-acid">{formatPrice(stage.priceWei)}</span>
+                        </span>
+                        <span className="text-ink-faint">
+                          seen {formatDateTimeUtc(row.firstSeenAt)}
+                        </span>
+                      </span>
+                      <div className="mt-1">
+                        <WalletEligibilityList wallets={latestWallets.get(row.id)} />
+                      </div>
+                    </div>
+                    <div className="self-center">
+                      <MintActions
+                        projectId={row.id}
+                        slug={row.slug}
+                        specialMintEnabled={can(user?.role, "execution:configure")}
+                        stageId={stage.id}
+                        compact
+                      />
+                    </div>
+                  </li>
+                );
+              })}
               {latest.length === 0 ? (
                 <li className="py-2 text-xs text-ink-faint">
                   Nothing discovered yet — run a scan from Admin → System.
