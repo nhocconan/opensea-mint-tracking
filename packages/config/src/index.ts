@@ -169,6 +169,17 @@ export const envSchema = z.object({
   /** Keep re-firing this many ms past stage open before giving up — the
    *  "chạy liên tục để compete" burst on a FIFO chain. */
   MINT_FIRE_CONTINUE_MS: positiveInt.default(4_000),
+  /** Signature burst (signed/allowlist stages): OpenSea only issues the
+   *  mintSigned signature once ITS clock flips the stage active, and the
+   *  whole FCFS supply goes in the first ~2-3s (Goat Street 2026-08-28:
+   *  1,331 mints in 26 blocks). From T-1s the fire path polls `/mint` in
+   *  parallel across every Developer key at this cadence, unpaced, and
+   *  broadcasts the first signature it gets — for up to this many ms. */
+  MINT_SIGNATURE_BURST_MS: positiveInt.default(12_000),
+  MINT_SIGNATURE_BURST_CADENCE_MS: positiveInt.default(80),
+  /** At T-0 skip eth_call simulation for managed fires (one RPC round-trip
+   *  saved; the sequencer is the judge; a revert costs only gas). */
+  MINT_FIRE_SKIP_SIMULATION: bool.default(true),
   /** ADR 0009 fast path (managed_wallet_key): pre-sign the raw tx this far
    *  before the clock-corrected stage open so the fire instant is a single
    *  sendRawTransaction. 45s covers nonce/fee fetch + sign with margin. */

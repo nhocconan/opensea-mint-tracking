@@ -97,8 +97,7 @@ export default async function AdminSpecialMintsPage({
           (a, b) => toDate(b.observedAt).getTime() - toDate(a.observedAt).getTime(),
         )[0];
   const soldOut =
-    latestSupply !== undefined &&
-    latestSupply.verified &&
+    latestSupply?.verified === true &&
     latestSupply.maxSupply !== null &&
     latestSupply.minted >= latestSupply.maxSupply;
 

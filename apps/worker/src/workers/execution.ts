@@ -27,6 +27,7 @@ import {
   armedPlansWithStageStart,
   claimArmedMintPlan,
   clearPresignedTx,
+  dropStages as dropStagesTable,
   expireStaleMintPlans,
   failMintPlanExecution,
   getCredentialSecret,
@@ -55,7 +56,7 @@ import { signExecutorTransaction, signManagedMintTransaction } from "@hoodmint/s
 import { eq } from "drizzle-orm";
 import { privateKeyToAccount } from "viem/accounts";
 import type { WorkerContext } from "../context.ts";
-import { buildOpenSeaMintTx } from "../mint-tx.ts";
+import { buildOpenSeaMintTx, burstBuildOpenSeaMintTx } from "../mint-tx.ts";
 import { CACHE_TTL_MS } from "./pre-build.ts";
 import { resolveBestRpcUrl, resolveBroadcastRpcUrls } from "./rpc-health.ts";
 
@@ -97,6 +98,30 @@ const MAX_PARALLEL_FIRES = 8;
  * Cheap when idle: one indexed query returning armed-with-stage plans, a
  * pure phase computation each, and only a claim/fire when actually due.
  */
+/** ± window around the fire target inside which a pass is "the race". */
+const FIRE_BURST_WINDOW_MS = 20_000;
+
+/**
+ * True when now is within ±window of the plan's fire target —
+ * coalesce(fire_at, stage start). A plan with neither is never "near".
+ */
+async function isNearFireInstant(
+  db: WorkerContext["db"],
+  plan: { fireAt: Date | string | null; stageId: string | null },
+  windowMs: number,
+): Promise<boolean> {
+  let targetMs: number | null = plan.fireAt === null ? null : coerceDate(plan.fireAt).getTime();
+  if (targetMs === null && plan.stageId !== null) {
+    const [stage] = await db
+      .select({ startsAt: dropStagesTable.startsAt })
+      .from(dropStagesTable)
+      .where(eq(dropStagesTable.id, plan.stageId))
+      .limit(1);
+    targetMs = stage === undefined ? null : coerceDate(stage.startsAt).getTime();
+  }
+  return targetMs !== null && Math.abs(Date.now() - targetMs) <= windowMs;
+}
+
 /** OpenSea's `/drops/{slug}/mint` 422 body when supply is exhausted. */
 export function isMintedOutError(message: string): boolean {
   return /fully minted out|minted out|sold out/i.test(message);
@@ -388,6 +413,11 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     // type — coerceDate before any date math, same lesson as line ~121.
     const cachedAt = plan.cachedTxAt === null ? null : coerceDate(plan.cachedTxAt);
     const cacheIsFresh = cachedAt !== null && Date.now() - cachedAt.getTime() < CACHE_TTL_MS;
+    // Are we AT the fire instant (operator fire_at, else stage open)? Then
+    // this pass is the race: burst-poll OpenSea for the signature instead of
+    // one paced call, and skip simulation downstream. Outside that window
+    // (coarse 30s re-tries, hopeless plans) stay cheap and paced.
+    const nearFire = await isNearFireInstant(db, plan, FIRE_BURST_WINDOW_MS);
     const tx =
       cacheIsFresh && plan.cachedTx !== null
         ? {
@@ -398,14 +428,20 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
             expectedFrom: wallet.address,
           }
         : await (async () => {
-            // Shared build helper (finding #8) — identical to what the
-            // pre-build pass caches, so cache-hit and cache-miss can't drift.
-            const built = await buildOpenSeaMintTx(ctx, {
+            const target = {
               slug: project.slug as string,
               chainId: project.chainId,
               minter: wallet.address,
               quantity: plan.quantity,
-            });
+            };
+            // Shared build helper (finding #8) — identical to what the
+            // pre-build pass caches, so cache-hit and cache-miss can't drift.
+            const built = nearFire
+              ? await burstBuildOpenSeaMintTx(ctx, target, {
+                  maxMs: config.MINT_SIGNATURE_BURST_MS,
+                  cadenceMs: config.MINT_SIGNATURE_BURST_CADENCE_MS,
+                })
+              : await buildOpenSeaMintTx(ctx, target);
             return { ...built, expectedFrom: wallet.address };
           })();
 
@@ -494,7 +530,7 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       });
     } else if (outcome.stage === "ready_for_delegated_signature") {
       if (signerScheme === "managed_wallet_key") {
-        await runManagedFire(ctx, plan, outcome, wallet, rpcUrl, record);
+        await runManagedFire(ctx, plan, outcome, wallet, rpcUrl, record, { nearFire });
       } else {
         await runDelegatedFire(ctx, plan, outcome, delegatedSignerRow, rpcUrl, record);
       }
@@ -675,6 +711,7 @@ async function runManagedFire(
       txHash?: string;
     },
   ) => Promise<unknown>,
+  mode: { nearFire: boolean } = { nearFire: false },
 ): Promise<void> {
   const { db, log } = ctx;
   if (wallet.encryptedSigningKey === null) {
@@ -739,15 +776,28 @@ async function runManagedFire(
     }
   }
   try {
-    // Simulate the REAL direct mint tx from the burner wallet — same bytes,
-    // same sender we broadcast. Authoritative gate for this path.
-    const sim = await simulateTransaction({
-      rpcUrl,
-      from: wallet.address,
-      to: outcome.tx.to,
-      data: outcome.tx.data,
-      valueWei: outcome.tx.valueWei,
-    });
+    // At the fire instant every RPC round-trip is a lost block (100ms
+    // blocks, FIFO sequencer): fetch nonce/fees IN PARALLEL with the
+    // simulation, and skip the simulation entirely when configured — the
+    // sequencer is the judge and a revert costs only gas. Off the fire
+    // instant keep the authoritative eth_call gate.
+    const skipSim = mode.nearFire && ctx.config.MINT_FIRE_SKIP_SIMULATION;
+    const [sim, fees] = await Promise.all([
+      skipSim
+        ? Promise.resolve({
+            ok: true as const,
+            gasEstimate: BigInt(ctx.config.MINT_PRESIGN_GAS_LIMIT),
+          })
+        : simulateTransaction({
+            rpcUrl,
+            from: wallet.address,
+            to: outcome.tx.to,
+            data: outcome.tx.data,
+            valueWei: outcome.tx.valueWei,
+          }),
+      // Fresh nonce/fee for THIS wallet right before signing (per-wallet nonce).
+      fetchFeeContext(rpcUrl, wallet.address),
+    ]);
     if (!sim.ok) {
       await record("simulated_revert", {
         errorCode: sim.revertReason,
@@ -756,9 +806,6 @@ async function runManagedFire(
       await releaseMintPlanToArmed(db, plan.id, new Date());
       return;
     }
-
-    // Fresh nonce/fee for THIS wallet right before signing (per-wallet nonce).
-    const fees = await fetchFeeContext(rpcUrl, wallet.address);
 
     // Decrypt the sealed key into a function-scoped local, hand it straight to
     // the chokepoint, and never log it. `openWalletKey` handles both the
@@ -781,11 +828,20 @@ async function runManagedFire(
       privateKeyHex,
     );
 
-    const broadcast = await broadcastRawTransaction(rpcUrl, signed.rawTx);
+    // Race-broadcast to every healthy RPC (same as the pre-signed fast path):
+    // first acceptance wins, duplicates are harmless on a FIFO sequencer.
+    const urls = await resolveBroadcastRpcUrls(db, ctx.config.ROBINHOOD_CHAIN_ID, rpcUrl);
+    const rawTx = signed.rawTx;
+    const broadcast = await Promise.any(
+      (urls.length > 0 ? urls : [rpcUrl]).map((url) => broadcastRawTransaction(url, rawTx)),
+    ).catch((aggregate: unknown) => {
+      const first = aggregate instanceof AggregateError ? aggregate.errors[0] : aggregate;
+      throw first instanceof Error ? first : new Error(String(first));
+    });
     await record("broadcast", { txHash: broadcast.txHash });
     await markMintPlanExecuted(db, plan.id);
     log.info(
-      { planId: plan.id, walletId: wallet.id, txHash: broadcast.txHash },
+      { planId: plan.id, walletId: wallet.id, txHash: broadcast.txHash, nearFire: mode.nearFire },
       "managed-key mint transaction broadcast",
     );
     await publishEvent(db, {

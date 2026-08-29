@@ -28,3 +28,6 @@ test-results/
 .gstack/
 .env.bak*
 .env.*.bak
+
+# throwaway in-network probe scripts
+apps/worker/__*.mts
