@@ -1,13 +1,16 @@
 import { can } from "@hoodmint/auth";
 import {
+  type FeedSocialFilter,
   type FeedSort,
   type FeedView,
+  type FeedWlFilter,
   queryFeed,
-  trackedWalletEligibilityForProjects,
+  trackedWalletEligibilityForStages,
   watchedProjectIds,
 } from "@hoodmint/db";
 import { Suspense } from "react";
 import { container } from "@/lib/container.ts";
+import { decisionStage } from "@/lib/mint-presentation.ts";
 import { getSessionUser } from "@/lib/session.ts";
 import { FeedTable } from "./feed-table.tsx";
 import { CursorPager, FilterBar } from "./filters.tsx";
@@ -16,6 +19,8 @@ export interface FeedSearchParams {
   readonly q?: string;
   readonly sort?: string;
   readonly price?: string;
+  readonly wl?: string;
+  readonly social?: string;
   readonly confidence?: string;
   readonly cursor?: string;
 }
@@ -53,6 +58,13 @@ export async function FeedPage({
     : undefined;
   const price =
     searchParams.price === "free" || searchParams.price === "paid" ? searchParams.price : undefined;
+  const wl: FeedWlFilter | undefined =
+    searchParams.wl === "hit" || searchParams.wl === "none" ? searchParams.wl : undefined;
+  const social: FeedSocialFilter | undefined = ["twitter", "website", "either", "both"].includes(
+    searchParams.social ?? "",
+  )
+    ? (searchParams.social as FeedSocialFilter)
+    : undefined;
 
   // queryFeed and watchedProjectIds are independent — run them together.
   // Wallet eligibility waits on queryFeed's result on purpose: it
@@ -67,15 +79,36 @@ export async function FeedPage({
       search: searchParams.q,
       sort,
       price,
+      wl,
+      social,
       cursor: searchParams.cursor,
       limit: 50,
     }),
     user !== null ? watchedProjectIds(db, user.id) : Promise.resolve(new Set<string>()),
   ]);
-  const eligibility = await trackedWalletEligibilityForProjects(
-    db,
-    page.rows.map((row) => row.id),
-  );
+  const eligibilityScopes = page.rows.map((row) => ({
+    projectId: row.id,
+    stageId: decisionStage(row).id,
+  }));
+  const eligibility = await trackedWalletEligibilityForStages(db, eligibilityScopes);
+
+  const exportQuery = new URLSearchParams();
+  for (const [key, value] of Object.entries({
+    q: searchParams.q,
+    sort,
+    price,
+    wl,
+    social,
+  })) {
+    if (value !== undefined && value !== "") {
+      exportQuery.set(key, value);
+    }
+  }
+  const exportHref = (format: "csv" | "json"): string => {
+    const params = new URLSearchParams(exportQuery);
+    params.set("format", format);
+    return `/api/v1/exports/${view}?${params.toString()}`;
+  };
 
   return (
     <section>
@@ -98,14 +131,14 @@ export async function FeedPage({
           {can(user?.role, "exports:read") ? (
             <>
               <a
-                href={`/api/v1/exports/${view}?format=csv`}
+                href={exportHref("csv")}
                 title="Export this view as CSV (PRD §7.7)"
                 className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
               >
                 CSV
               </a>
               <a
-                href={`/api/v1/exports/${view}?format=json`}
+                href={exportHref("json")}
                 title="Export this view as JSON (PRD §7.7)"
                 className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
               >
@@ -134,7 +167,7 @@ export async function FeedPage({
       >
         <FeedTable
           rows={page.rows}
-          eligibilityByProject={eligibility}
+          eligibilityByStage={eligibility}
           watchedIds={watched}
           watchEnabled={user !== null}
           specialMintEnabled={can(user?.role, "execution:configure")}

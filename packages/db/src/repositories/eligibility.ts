@@ -193,9 +193,22 @@ export async function bestEligibilityByProject(
     .from(eligibilityChecks)
     .innerJoin(wallets, eq(wallets.id, eligibilityChecks.walletId))
     .where(
-      projectIds === undefined
-        ? eq(wallets.enabled, true)
-        : and(eq(wallets.enabled, true), inArray(eligibilityChecks.projectId, projectIds)),
+      and(
+        eq(wallets.enabled, true),
+        ...(projectIds === undefined ? [] : [inArray(eligibilityChecks.projectId, projectIds)]),
+        // Scope the aggregate to the same current-or-next phase the feed
+        // renders. An ended-phase WL hit must never drive Pulse/API truth.
+        sql`${eligibilityChecks.stageId} = coalesce(
+          (select ds.id from drop_stages ds
+            where ds.project_id = ${eligibilityChecks.projectId}
+              and not ds.paused and ds.starts_at <= now()
+              and (ds.ends_at is null or ds.ends_at > now())
+            order by ds.updated_at desc, ds.starts_at asc limit 1),
+          (select ds.id from drop_stages ds
+            where ds.project_id = ${eligibilityChecks.projectId}
+              and not ds.paused and ds.starts_at > now()
+            order by ds.starts_at asc, ds.updated_at desc limit 1))`,
+      ),
     );
   const best = new Map<string, EligibilityState>();
   for (const row of rows) {
@@ -214,23 +227,40 @@ export interface TrackedWalletEligibility {
   readonly status: EligibilityState;
 }
 
+export interface EligibilityStageScope {
+  readonly projectId: string;
+  readonly stageId: string | null;
+}
+
+export function eligibilityStageScopeKey(projectId: string, stageId: string | null): string {
+  return `${projectId}:${stageId ?? "none"}`;
+}
+
 /**
- * Decision-ready wallet verdicts for a bounded set of projects.
+ * Decision-ready wallet verdicts for exact project + displayed-stage pairs.
  *
  * Unlike `bestEligibilityByProject`, this intentionally preserves every
  * enabled wallet so the UI cannot hide an ineligible/unknown wallet behind a
- * different wallet's WL hit. Wallets with no completed check are returned as
- * UNKNOWN. The implementation is two bounded queries, never one query per
- * card.
+ * different wallet's WL hit. Requiring `stageId` prevents a hit from an old
+ * phase being shown beside the current/next phase. Wallets with no completed
+ * check for that exact phase are UNKNOWN. Two bounded queries, never N+1.
  */
-export async function trackedWalletEligibilityForProjects(
+export async function trackedWalletEligibilityForStages(
   db: Db,
-  projectIds: readonly string[],
+  scopes: readonly EligibilityStageScope[],
 ): Promise<Map<string, TrackedWalletEligibility[]>> {
   const result = new Map<string, TrackedWalletEligibility[]>();
-  if (projectIds.length === 0) {
+  if (scopes.length === 0) {
     return result;
   }
+
+  const uniqueScopes = new Map(
+    scopes.map((scope) => [eligibilityStageScopeKey(scope.projectId, scope.stageId), scope]),
+  );
+  const projectIds = [...new Set(scopes.map((scope) => scope.projectId))];
+  const stageIds = [
+    ...new Set(scopes.flatMap((scope) => (scope.stageId === null ? [] : [scope.stageId]))),
+  ];
 
   const enabledWallets = await db
     .select({ id: wallets.id, address: wallets.address, label: wallets.label })
@@ -238,33 +268,47 @@ export async function trackedWalletEligibilityForProjects(
     .where(eq(wallets.enabled, true))
     .orderBy(asc(wallets.createdAt));
 
-  const checks = await db
-    .select({
-      projectId: eligibilityChecks.projectId,
-      walletId: eligibilityChecks.walletId,
-      status: eligibilityChecks.status,
-    })
-    .from(eligibilityChecks)
-    .innerJoin(wallets, eq(wallets.id, eligibilityChecks.walletId))
-    .where(and(eq(wallets.enabled, true), inArray(eligibilityChecks.projectId, projectIds)));
+  const checks =
+    stageIds.length === 0
+      ? []
+      : await db
+          .select({
+            projectId: eligibilityChecks.projectId,
+            stageId: eligibilityChecks.stageId,
+            walletId: eligibilityChecks.walletId,
+            status: eligibilityChecks.status,
+          })
+          .from(eligibilityChecks)
+          .innerJoin(wallets, eq(wallets.id, eligibilityChecks.walletId))
+          .where(
+            and(
+              eq(wallets.enabled, true),
+              inArray(eligibilityChecks.projectId, projectIds),
+              inArray(eligibilityChecks.stageId, stageIds),
+            ),
+          );
 
-  const bestByWalletProject = new Map<string, EligibilityState>();
+  const bestByWalletStage = new Map<string, EligibilityState>();
   for (const check of checks) {
-    const key = `${check.projectId}:${check.walletId}`;
-    const current = bestByWalletProject.get(key);
+    const scopeKey = eligibilityStageScopeKey(check.projectId, check.stageId);
+    if (!uniqueScopes.has(scopeKey)) {
+      continue;
+    }
+    const key = `${scopeKey}:${check.walletId}`;
+    const current = bestByWalletStage.get(key);
     if (current === undefined || ELIGIBLE_RANK[check.status] < ELIGIBLE_RANK[current]) {
-      bestByWalletProject.set(key, check.status);
+      bestByWalletStage.set(key, check.status);
     }
   }
 
-  for (const projectId of projectIds) {
+  for (const [scopeKey] of uniqueScopes) {
     result.set(
-      projectId,
+      scopeKey,
       enabledWallets.map((wallet) => ({
         walletId: wallet.id,
         walletAddress: wallet.address,
         walletLabel: wallet.label,
-        status: bestByWalletProject.get(`${projectId}:${wallet.id}`) ?? "UNKNOWN",
+        status: bestByWalletStage.get(`${scopeKey}:${wallet.id}`) ?? "UNKNOWN",
       })),
     );
   }

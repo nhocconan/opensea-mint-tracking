@@ -235,7 +235,7 @@ Roles: `admin`, `operator`, and `viewer`. Operators may manage watchlists, walle
 
 ### 7.7 Search, filters, and exports
 
-Search name, slug, and exact contract/address. Filters include status, source, confidence, price/free, eligibility, watched, and first-seen range. Sort by start time, latest seen, mint velocity, minted percentage, and name. Admin can export the current normalized result set as CSV or JSON without raw provider secrets.
+Search name, slug, and exact contract/address. Filters include status, source, confidence, current-phase price/free, exact-phase tracked-wallet WL hit/no-hit, X/website presence, watched, and first-seen range. Sort by start time, latest seen, mint velocity, minted percentage, and name. Admin can export the current normalized result set as CSV or JSON without raw provider secrets. Public-only and unresolved eligibility are never presented as WL hits.
 
 ## 8. Technical architecture
 

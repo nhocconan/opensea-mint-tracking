@@ -1,10 +1,18 @@
 import { can } from "@hoodmint/auth";
 import { coerceDate } from "@hoodmint/core";
-import { listCalendarStages, trackedWalletEligibilityForProjects } from "@hoodmint/db";
+import {
+  eligibilityStageScopeKey,
+  type FeedSocialFilter,
+  type FeedWlFilter,
+  listCalendarStages,
+  trackedWalletEligibilityForStages,
+} from "@hoodmint/db";
 import { ConfidenceTag, SourceBadge, StatusChip } from "@hoodmint/ui";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Suspense } from "react";
 import { Countdown } from "@/components/feed-parts.tsx";
+import { FilterBar } from "@/components/filters.tsx";
 import {
   MintActions,
   ProjectSocialLinks,
@@ -12,6 +20,7 @@ import {
 } from "@/components/mint-decision.tsx";
 import { container } from "@/lib/container.ts";
 import { formatDateTimeLocal, formatDateTimeUtc, formatPrice } from "@/lib/format.ts";
+import { singleValue } from "@/lib/search-params.ts";
 import { getSessionUser } from "@/lib/session.ts";
 
 export const dynamic = "force-dynamic";
@@ -19,13 +28,39 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Minting calendar" };
 
 /** Phase-level agenda: one row per upcoming stage, never one row per project. */
-export default async function CalendarPage() {
+export default async function CalendarPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = singleValue(await searchParams);
   const { db } = container();
   const user = await getSessionUser();
-  const stages = await listCalendarStages(db, new Date(), 250).catch(() => []);
-  const eligibility = await trackedWalletEligibilityForProjects(db, [
-    ...new Set(stages.map((stage) => stage.projectId)),
-  ]).catch(() => new Map());
+  const price = params.price === "free" || params.price === "paid" ? params.price : undefined;
+  const wl: FeedWlFilter | undefined =
+    params.wl === "hit" || params.wl === "none" ? params.wl : undefined;
+  const social: FeedSocialFilter | undefined = ["twitter", "website", "either", "both"].includes(
+    params.social ?? "",
+  )
+    ? (params.social as FeedSocialFilter)
+    : undefined;
+  const hasFilters =
+    (params.q !== undefined && params.q.trim() !== "") ||
+    price !== undefined ||
+    wl !== undefined ||
+    social !== undefined;
+  const stages = await listCalendarStages(db, {
+    now: new Date(),
+    limit: 250,
+    ...(params.q !== undefined ? { search: params.q } : {}),
+    ...(price !== undefined ? { price } : {}),
+    ...(wl !== undefined ? { wl } : {}),
+    ...(social !== undefined ? { social } : {}),
+  }).catch(() => []);
+  const eligibility = await trackedWalletEligibilityForStages(
+    db,
+    stages.map((stage) => ({ projectId: stage.projectId, stageId: stage.stageId })),
+  ).catch(() => new Map());
 
   const groups = new Map<string, typeof stages>();
   for (const stage of stages) {
@@ -55,12 +90,28 @@ export default async function CalendarPage() {
         </Link>
       </header>
 
+      <Suspense fallback={<div className="h-12" aria-hidden />}>
+        <FilterBar view="calendar" showSort={false} />
+      </Suspense>
+
       {days.length === 0 ? (
-        <div className="rounded-md border border-line bg-base-raised p-5 text-sm text-ink-faint">
-          <p>No upcoming mint phases have been discovered yet.</p>
-          <p className="mt-1 font-mono text-xs">
-            Run a scan in Admin → System or track a specific OpenSea collection in Admin → Sources.
-          </p>
+        <div className="rounded-md border border-line bg-base-raised p-5 text-sm text-ink-muted">
+          {hasFilters ? (
+            <>
+              <p>No upcoming mint phases match these filters.</p>
+              <Link href="/calendar" className="mt-1 inline-block font-mono text-xs text-cyan">
+                Clear filters →
+              </Link>
+            </>
+          ) : (
+            <>
+              <p>No upcoming mint phases have been discovered yet.</p>
+              <p className="mt-1 font-mono text-xs">
+                Run a scan in Admin → System or track a specific OpenSea collection in Admin →
+                Sources.
+              </p>
+            </>
+          )}
         </div>
       ) : (
         <div className="space-y-5">
@@ -141,7 +192,11 @@ export default async function CalendarPage() {
                         <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
                           Tracked wallet WL
                         </div>
-                        <WalletEligibilityList wallets={eligibility.get(stage.projectId)} />
+                        <WalletEligibilityList
+                          wallets={eligibility.get(
+                            eligibilityStageScopeKey(stage.projectId, stage.stageId),
+                          )}
+                        />
                       </div>
 
                       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">

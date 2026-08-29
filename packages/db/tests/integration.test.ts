@@ -55,8 +55,9 @@ import {
   saveRaritySnapshot,
   scrubKeyTracesForAddress,
   setWalletSigningKey,
-  trackedWalletEligibilityForProjects,
+  trackedWalletEligibilityForStages,
   unfinalizeFromBlock,
+  updateProjectSocials,
   upsertEligibilityCheck,
   upsertProjectFromSource,
   user,
@@ -257,7 +258,7 @@ describe("feed queries (PRD §5/§9)", () => {
     const allNames = [...next.rows, ...page2.rows].map((r) => r.name);
     expect(new Set(allNames).size).toBe(allNames.length);
 
-    const calendar = await listCalendarStages(db, NOW, 20);
+    const calendar = await listCalendarStages(db, { now: NOW, limit: 20 });
     expect(calendar.filter((stage) => stage.projectName.startsWith("Next "))).toHaveLength(3);
     expect(calendar.find((stage) => stage.projectName === "Next 0")).toMatchObject({
       stageLabel: "WL",
@@ -272,6 +273,108 @@ describe("feed queries (PRD §5/§9)", () => {
 
     const free = await queryFeed(db, { view: "all", price: "free" });
     expect(free.rows.some((row) => row.name === "Live One")).toBe(true);
+  });
+
+  it("filters WL and social presence against the exact displayed phase", async () => {
+    const project = await upsertProjectFromSource(db, {
+      ...baseProject,
+      contractAddress: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+      externalId: `it-stage-filter-${randomUUID().slice(0, 6)}`,
+      name: "Stage scoped WL",
+      stages: [
+        {
+          providerStageId: "ended-wl",
+          label: "Old WL",
+          kind: "allowlist",
+          priceWei: "1",
+          currency: null,
+          maxPerWallet: 1,
+          startsAt: new Date(NOW.getTime() - 2 * H),
+          endsAt: new Date(NOW.getTime() - H),
+          paused: false,
+        },
+        {
+          providerStageId: "next-wl",
+          label: "Current decision phase",
+          kind: "allowlist",
+          priceWei: "2",
+          currency: null,
+          maxPerWallet: 1,
+          startsAt: new Date(NOW.getTime() + H),
+          endsAt: new Date(NOW.getTime() + 2 * H),
+          paused: false,
+        },
+      ],
+      supply: null,
+      now: NOW,
+    });
+    await updateProjectSocials(
+      db,
+      project.projectId,
+      {
+        twitterUsername: "stage_scoped",
+        projectUrl: null,
+        discordUrl: null,
+        safelistStatus: null,
+      },
+      NOW,
+    );
+    const stages = await db
+      .select()
+      .from(dropStages)
+      .where(eq(dropStages.projectId, project.projectId));
+    const oldStage = stages.find((stage) => stage.providerStageId === "ended-wl");
+    const nextStage = stages.find((stage) => stage.providerStageId === "next-wl");
+    const [wallet] = await db
+      .insert(wallets)
+      .values({ address: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`, enabled: true })
+      .returning();
+    if (wallet === undefined || oldStage === undefined || nextStage === undefined) {
+      throw new Error("stage filter fixture missing");
+    }
+    await upsertEligibilityCheck(db, {
+      walletId: wallet.id,
+      projectId: project.projectId,
+      stageId: oldStage.id,
+      status: "ELIGIBLE_RESTRICTED",
+      checkedAt: NOW,
+      nextDueAt: null,
+    });
+    await upsertEligibilityCheck(db, {
+      walletId: wallet.id,
+      projectId: project.projectId,
+      stageId: nextStage.id,
+      status: "INELIGIBLE_RESTRICTED",
+      checkedAt: NOW,
+      nextDueAt: null,
+    });
+
+    const wlHit = await queryFeed(db, { view: "next", wl: "hit", search: "Stage scoped WL" });
+    expect(wlHit.rows).toHaveLength(0);
+    const noWlHit = await queryFeed(db, { view: "next", wl: "none", search: "Stage scoped WL" });
+    expect(noWlHit.rows.map((row) => row.id)).toContain(project.projectId);
+    const bestCurrent = await bestEligibilityByProject(db, [project.projectId]);
+    expect(bestCurrent.get(project.projectId)).toBe("INELIGIBLE_RESTRICTED");
+
+    const withTwitter = await queryFeed(db, {
+      view: "next",
+      social: "twitter",
+      search: "Stage scoped WL",
+    });
+    expect(withTwitter.rows.map((row) => row.id)).toContain(project.projectId);
+    const withWebsite = await queryFeed(db, {
+      view: "next",
+      social: "website",
+      search: "Stage scoped WL",
+    });
+    expect(withWebsite.rows).toHaveLength(0);
+
+    const calendarWl = await listCalendarStages(db, {
+      now: NOW,
+      wl: "hit",
+      search: "Stage scoped WL",
+    });
+    expect(calendarWl).toHaveLength(0);
   });
 });
 
@@ -385,8 +488,10 @@ describe("eligibility scoping (perf finding, 2026-08-22)", () => {
     expect(chips.get(`${wallet.id}:${scoped.projectId}`)).toBe("ELIGIBLE_RESTRICTED");
     expect(chips.get(`${wallet.id}:${unscoped.projectId}`)).toBe("PUBLIC_ONLY");
 
-    const visibleWallets = await trackedWalletEligibilityForProjects(db, [scoped.projectId]);
-    expect(visibleWallets.get(scoped.projectId)).toEqual(
+    const visibleWallets = await trackedWalletEligibilityForStages(db, [
+      { projectId: scoped.projectId, stageId: scopedStage.id },
+    ]);
+    expect(visibleWallets.get(`${scoped.projectId}:${scopedStage.id}`)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           walletId: wallet.id,

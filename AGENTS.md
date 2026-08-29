@@ -29,3 +29,8 @@ Always read `DESIGN.md` before making any visual or UI decisions. Fonts, color r
 ## Local ports
 
 Host-published local services use the contiguous sequence starting at 3960 (web 3960, Postgres 3961, Valkey 3962, worker health 3963). Start with `scripts/start-dev.sh`; stop with `scripts/stop-dev.sh`. Production posture: `scripts/start-prod.sh` / `scripts/stop-prod.sh`. Unconfigured env is handled by `scripts/env-setup.sh` (see `docs/ops-setup.md`). Do not revert defaults to 3000/5432/6379.
+
+## Anti-patterns to avoid
+
+1. Never aggregate tracked-wallet eligibility across every phase and display it beside one current/next phase. Every decision-card eligibility lookup and WL filter must require the exact `{ projectId, stageId }`; a hit from an ended phase is not a hit for the displayed mint.
+2. Every dedicated database client must close on initialization/subscription failure before a reconnect is scheduled. Reconnect loops that abandon failed clients can silently exhaust PostgreSQL's connection ceiling.

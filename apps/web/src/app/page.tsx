@@ -1,11 +1,12 @@
 import { can } from "@hoodmint/auth";
 import {
   bestEligibilityByProject,
+  eligibilityStageScopeKey,
   listProviders,
   queryFeed,
   recentScanRuns,
   type TrackedWalletEligibility,
-  trackedWalletEligibilityForProjects,
+  trackedWalletEligibilityForStages,
 } from "@hoodmint/db";
 import { StatusChip } from "@hoodmint/ui";
 import type { Metadata } from "next";
@@ -57,9 +58,9 @@ export default async function PulsePage({
     liveCount = live.rows.length;
     nextCount = next.rows.length;
     latest = latestPage.rows;
-    latestWallets = await trackedWalletEligibilityForProjects(
+    latestWallets = await trackedWalletEligibilityForStages(
       db,
-      latest.map((row) => row.id),
+      latest.map((row) => ({ projectId: row.id, stageId: decisionStage(row).id })),
     );
   } catch {
     dbUp = false;
@@ -239,7 +240,9 @@ export default async function PulsePage({
                         </span>
                       </span>
                       <div className="mt-1">
-                        <WalletEligibilityList wallets={latestWallets.get(row.id)} />
+                        <WalletEligibilityList
+                          wallets={latestWallets.get(eligibilityStageScopeKey(row.id, stage.id))}
+                        />
                       </div>
                     </div>
                     <div className="self-center">

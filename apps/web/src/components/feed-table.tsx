@@ -1,5 +1,9 @@
 import { coerceDate, mintConcentrationSeverity } from "@hoodmint/core";
-import type { FeedRow, TrackedWalletEligibility } from "@hoodmint/db";
+import {
+  eligibilityStageScopeKey,
+  type FeedRow,
+  type TrackedWalletEligibility,
+} from "@hoodmint/db";
 import { ConfidenceTag, SourceBadge, StatusChip } from "@hoodmint/ui";
 import { ExternalLink } from "lucide-react";
 import Link from "next/link";
@@ -14,7 +18,7 @@ import {
 
 export interface FeedTableProps {
   readonly rows: readonly FeedRow[];
-  readonly eligibilityByProject: ReadonlyMap<string, readonly TrackedWalletEligibility[]>;
+  readonly eligibilityByStage: ReadonlyMap<string, readonly TrackedWalletEligibility[]>;
   readonly watchedIds: ReadonlySet<string>;
   readonly watchEnabled: boolean;
   readonly specialMintEnabled: boolean;
@@ -71,7 +75,7 @@ function ConcentrationBadge({
  */
 export function FeedTable({
   rows,
-  eligibilityByProject,
+  eligibilityByStage,
   watchedIds,
   watchEnabled,
   specialMintEnabled,
@@ -140,7 +144,9 @@ export function FeedTable({
                 <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
                   Tracked wallet WL
                 </div>
-                <WalletEligibilityList wallets={eligibilityByProject.get(row.id)} />
+                <WalletEligibilityList
+                  wallets={eligibilityByStage.get(eligibilityStageScopeKey(row.id, stage.id))}
+                />
               </div>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-ink-faint">
                 <span>{formatSupply(row.minted, row.maxSupply, row.supplyVerified)}</span>
@@ -346,7 +352,9 @@ export function FeedTable({
                     />
                   </td>
                   <td className="px-3 py-2">
-                    <WalletEligibilityList wallets={eligibilityByProject.get(row.id)} />
+                    <WalletEligibilityList
+                      wallets={eligibilityByStage.get(eligibilityStageScopeKey(row.id, stage.id))}
+                    />
                   </td>
                 </tr>
               );

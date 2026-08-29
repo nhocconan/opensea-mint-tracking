@@ -105,7 +105,7 @@ export function AppShell({
           <button
             type="button"
             onClick={() => setPaletteOpen(true)}
-            className="flex items-center justify-between rounded-sm px-2 py-1 text-left text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+            className="flex items-center justify-between rounded-sm px-2 py-1 text-left text-[11px] text-ink-muted hover:bg-base-overlay hover:text-ink"
           >
             <span>Jump to…</span>
             <kbd className="rounded-xs border border-line px-1 font-mono text-[10px]">⌘K</kbd>
@@ -132,13 +132,13 @@ export function AppShell({
           ) : (
             <Link
               href="/login"
-              className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+              className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-muted hover:bg-base-overlay hover:text-ink"
             >
               <LogIn className="size-3" aria-hidden />
               Sign in
             </Link>
           )}
-          <div className="px-2 text-[11px] text-ink-faint">
+          <div className="px-2 text-[11px] text-ink-muted">
             <Eye className="mr-1 inline size-3" aria-hidden />
             read-only radar
           </div>

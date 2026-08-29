@@ -386,6 +386,10 @@ export type FeedView = "all" | "live" | "next" | "latest" | "eligible" | "watchl
 
 export type FeedSort = "recent" | "starting" | "velocity" | "minted" | "name" | "discovered";
 
+export type FeedWlFilter = "hit" | "none";
+
+export type FeedSocialFilter = "twitter" | "website" | "either" | "both";
+
 export interface FeedFilters {
   readonly view: FeedView;
   readonly userId?: string | undefined;
@@ -394,6 +398,11 @@ export interface FeedFilters {
   readonly source?: string | undefined;
   readonly confidence?: Confidence | undefined;
   readonly price?: "free" | "paid" | undefined;
+  /** `hit` means at least one enabled tracked wallet has a restricted-stage
+   * eligibility hit for the exact phase rendered by the feed row. `none`
+   * means no such hit; it does not claim UNKNOWN/AUTH_REQUIRED is ineligible. */
+  readonly wl?: FeedWlFilter | undefined;
+  readonly social?: FeedSocialFilter | undefined;
   readonly eligibility?: string | undefined;
   readonly watchedBy?: string | undefined;
   readonly firstSeenFrom?: Date | undefined;
@@ -562,6 +571,35 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       where m.project_id = ${projects.id}
         and m.observed_at > now() - interval '1 hour'), 0)`;
 
+  // Scalar per-column subqueries shared by filtering and presentation. Both
+  // exclude paused phases. Keeping one selector for phase, price, and WL is
+  // essential: a project can be eligible in an old phase but not the phase
+  // whose price/countdown is currently shown.
+  const currentStageCol = (col: string): SQL =>
+    sql`(select ds.${sql.raw(col)} from drop_stages ds
+      where ds.project_id = ${projects.id}
+        and not ds.paused
+        and ds.starts_at <= now()
+        and (ds.ends_at is null or ds.ends_at > now())
+      order by ds.updated_at desc, ds.starts_at asc limit 1)`;
+  const nextStageCol = (col: string): SQL =>
+    sql`(select ds.${sql.raw(col)} from drop_stages ds
+      where ds.project_id = ${projects.id}
+        and not ds.paused
+        and ds.starts_at > now()
+      order by ds.starts_at asc, ds.updated_at desc limit 1)`;
+  const decisionStageCol = (col: string): SQL =>
+    sql`coalesce(${currentStageCol(col)}, ${nextStageCol(col)})`;
+  const decisionStageId = sql`${decisionStageCol("id")}`;
+  const decisionStagePrice = sql`${decisionStageCol("price_wei")}`;
+  const hasWlHit = sql`exists (
+    select 1
+      from eligibility_checks ec
+      join wallets w on w.id = ec.wallet_id and w.enabled
+     where ec.project_id = ${projects.id}
+       and ec.stage_id = ${decisionStageId}
+       and ec.status = 'ELIGIBLE_RESTRICTED')`;
+
   const conditions: SQL[] = [];
 
   switch (filters.view) {
@@ -582,11 +620,7 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
     case "latest":
       break;
     case "eligible": {
-      conditions.push(
-        sql`exists (select 1 from eligibility_checks ec
-               where ec.project_id = ${projects.id}
-                 and ec.status = 'ELIGIBLE_RESTRICTED')`,
-      );
+      conditions.push(hasWlHit);
       break;
     }
     case "watchlist": {
@@ -650,13 +684,29 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
     conditions.push(lte(projects.firstSeenAt, filters.firstSeenTo));
   }
   if (filters.price === "free") {
-    conditions.push(sql`not exists (
-      select 1 from drop_stages ds
-       where ds.project_id = ${projects.id} and ds.price_wei is not null and ds.price_wei <> '0')`);
+    conditions.push(sql`${decisionStagePrice} = '0'`);
   } else if (filters.price === "paid") {
-    conditions.push(sql`exists (
-      select 1 from drop_stages ds
-       where ds.project_id = ${projects.id} and ds.price_wei is not null and ds.price_wei <> '0')`);
+    conditions.push(sql`${decisionStagePrice} is not null and ${decisionStagePrice} <> '0'`);
+  }
+  if (filters.wl === "hit") {
+    conditions.push(hasWlHit);
+  } else if (filters.wl === "none") {
+    conditions.push(sql`not (${hasWlHit})`);
+  }
+  if (filters.social === "twitter") {
+    conditions.push(sql`nullif(btrim(${projects.twitterUsername}), '') is not null`);
+  } else if (filters.social === "website") {
+    conditions.push(sql`nullif(btrim(${projects.projectUrl}), '') is not null`);
+  } else if (filters.social === "either") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        or nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
+  } else if (filters.social === "both") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        and nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
   }
   if (filters.watchedBy !== undefined) {
     conditions.push(
@@ -724,28 +774,6 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
                 desc(projects.id),
               ]
             : [desc(projects.lastSeenAt), desc(projects.id)];
-
-  // Scalar per-column subqueries: Postgres has no tuple-projection syntax
-  // for correlated subqueries; each field repeats the (cheap, indexed) lookup.
-  // Both exclude paused stages: a stage OpenSea no longer publishes is
-  // paused (not deleted) by the detail refresh, and a paused/stale row must
-  // never be the one whose price/label the feed shows (found live
-  // 2026-08-28: swoki showed a stale "FREE" from a superseded stage row).
-  const currentStageCol = (col: string): SQL =>
-    sql`(select ds.${sql.raw(col)} from drop_stages ds
-      where ds.project_id = ${projects.id}
-        and not ds.paused
-        and ds.starts_at <= now()
-        and (ds.ends_at is null or ds.ends_at > now())
-      order by ds.updated_at desc, ds.starts_at asc limit 1)`;
-  // The NEXT (not-yet-open) stage — what an upcoming drop will cost / when
-  // it opens. Null once every stage has started.
-  const nextStageCol = (col: string): SQL =>
-    sql`(select ds.${sql.raw(col)} from drop_stages ds
-      where ds.project_id = ${projects.id}
-        and not ds.paused
-        and ds.starts_at > now()
-      order by ds.starts_at asc, ds.updated_at desc limit 1)`;
 
   const rows = await db
     .select({
@@ -1098,8 +1126,65 @@ export interface CalendarStage {
   readonly endsAt: Date | null;
 }
 
+export interface CalendarStageFilters {
+  readonly now: Date;
+  readonly limit?: number;
+  readonly search?: string;
+  readonly price?: "free" | "paid";
+  readonly wl?: FeedWlFilter;
+  readonly social?: FeedSocialFilter;
+}
+
 /** Bounded, phase-level agenda for the calendar (one row per mint stage). */
-export async function listCalendarStages(db: Db, now: Date, limit = 250): Promise<CalendarStage[]> {
+export async function listCalendarStages(
+  db: Db,
+  filters: CalendarStageFilters,
+): Promise<CalendarStage[]> {
+  const conditions: SQL[] = [gt(dropStages.startsAt, filters.now), eq(dropStages.paused, false)];
+  if (filters.search !== undefined && filters.search.trim() !== "") {
+    const term = filters.search.trim();
+    const match = or(
+      ilike(projects.name, `%${term}%`),
+      ilike(projects.slug, `%${term}%`),
+      eq(projects.contractAddress, term.toLowerCase()),
+    );
+    if (match !== undefined) {
+      conditions.push(match);
+    }
+  }
+  if (filters.price === "free") {
+    conditions.push(eq(dropStages.priceWei, "0"));
+  } else if (filters.price === "paid") {
+    conditions.push(sql`${dropStages.priceWei} is not null and ${dropStages.priceWei} <> '0'`);
+  }
+  const hasWlHit = sql`exists (
+    select 1
+      from eligibility_checks ec
+      join wallets w on w.id = ec.wallet_id and w.enabled
+     where ec.project_id = ${projects.id}
+       and ec.stage_id = ${dropStages.id}
+       and ec.status = 'ELIGIBLE_RESTRICTED')`;
+  if (filters.wl === "hit") {
+    conditions.push(hasWlHit);
+  } else if (filters.wl === "none") {
+    conditions.push(sql`not (${hasWlHit})`);
+  }
+  if (filters.social === "twitter") {
+    conditions.push(sql`nullif(btrim(${projects.twitterUsername}), '') is not null`);
+  } else if (filters.social === "website") {
+    conditions.push(sql`nullif(btrim(${projects.projectUrl}), '') is not null`);
+  } else if (filters.social === "either") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        or nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
+  } else if (filters.social === "both") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        and nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
+  }
+
   return db
     .select({
       stageId: dropStages.id,
@@ -1123,9 +1208,9 @@ export async function listCalendarStages(db: Db, now: Date, limit = 250): Promis
     })
     .from(dropStages)
     .innerJoin(projects, eq(projects.id, dropStages.projectId))
-    .where(and(gt(dropStages.startsAt, now), eq(dropStages.paused, false)))
+    .where(and(...conditions))
     .orderBy(asc(dropStages.startsAt), asc(dropStages.id))
-    .limit(Math.min(Math.max(limit, 1), 500));
+    .limit(Math.min(Math.max(filters.limit ?? 250, 1), 500));
 }
 
 /**

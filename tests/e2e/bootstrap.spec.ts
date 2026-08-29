@@ -68,6 +68,22 @@ test.describe("bootstrap and primary flows", () => {
     await expect(page.getByText(/Website: none/).first()).toBeVisible();
   });
 
+  test("WL and official-link filters persist in feed and calendar URLs", async ({ page }) => {
+    await page.goto("/next");
+    await page.getByLabel("Filter by tracked-wallet whitelist hit").selectOption("none");
+    await expect(page).toHaveURL(/\/next\?.*wl=none/);
+    await page.getByLabel("Filter by official social links").selectOption("either");
+    await expect(page).toHaveURL(/\/next\?.*social=either/);
+    await page.reload();
+    await expect(page.getByLabel("Filter by tracked-wallet whitelist hit")).toHaveValue("none");
+    await expect(page.getByLabel("Filter by official social links")).toHaveValue("either");
+
+    await page.goto("/calendar?wl=none&social=website");
+    await expect(page.getByLabel("Filter by tracked-wallet whitelist hit")).toHaveValue("none");
+    await expect(page.getByLabel("Filter by official social links")).toHaveValue("website");
+    await expect(page.getByLabel("Sort results")).toHaveCount(0);
+  });
+
   test("admin requires auth (server-side redirect to login)", async ({ page }) => {
     await page.goto("/admin");
     await page.waitForURL(/\/login/);
