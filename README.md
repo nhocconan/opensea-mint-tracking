@@ -113,7 +113,9 @@ Discovery makes 3 list calls per cycle before pagination. At the default 5-minut
 
 ## Backups & retention
 
-- `make backup` → `backups/hoodmint-<ts>.sql.gz` (PostgreSQL only; Valkey is disposable by design).
+- `make backup` → `backups/hoodmint-<ts>.tar.zst.gpg`: pg_dump -Fc + `.env` + compose + `secrets/`, sealed with AES-256 (passphrase in `backups/.passphrase` — keep a copy off-server), self-verified (decrypt, sha256, `pg_restore --list`), 14-day retention keeping ≥7. Valkey is disposable by design.
+- `make restore file=...` → integrity check, safety dump of the current DB, web/worker stopped, parallel `pg_restore --clean`, every manifest row count re-verified; `args='--dry-run'` to inspect, `args='--config'` to extract config to `restored-config/`.
+- `make backup-test` → full rehearsal against a throwaway postgres (never touches prod data) — run it after upgrades.
 - `make restore file=…` + restart app services; restore path is smoke-tested via the integration harness.
 - Default retention: evidence 30d, scan runs 90d, mint events 180d, aggregates/audit indefinite (maintenance worker enforces; policy documented in Admin → System).
 

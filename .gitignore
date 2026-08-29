@@ -31,3 +31,7 @@ test-results/
 
 # throwaway in-network probe scripts
 apps/worker/__*.mts
+
+# backups contain secrets (encrypted) — never in git
+backups/
+restored-config/
