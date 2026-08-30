@@ -11,6 +11,7 @@ import {
 import { StatusChip } from "@hoodmint/ui";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Suspense } from "react";
 import {
   decisionStage,
   MintActions,
@@ -24,6 +25,17 @@ import { getSessionUser } from "@/lib/session.ts";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = { title: "Pulse" };
+
+async function PulseWalletEligibility({
+  eligibility,
+  scopeKey,
+}: {
+  eligibility: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>>;
+  scopeKey: string;
+}) {
+  const resolved = await eligibility;
+  return <WalletEligibilityList wallets={resolved.get(scopeKey)} />;
+}
 
 /** Operational overview (PRD §5.1): velocity, new collections, provider health. */
 export default async function PulsePage({
@@ -42,7 +54,8 @@ export default async function PulsePage({
   let nextCount = 0;
   let latest: Awaited<ReturnType<typeof queryFeed>>["rows"] = [];
   let eligibility = new Map<string, string>();
-  let latestWallets = new Map<string, TrackedWalletEligibility[]>();
+  let latestWallets: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>> =
+    Promise.resolve(new Map());
   let dbUp = true;
   try {
     [providers, scans, eligibility] = await Promise.all([
@@ -58,10 +71,10 @@ export default async function PulsePage({
     liveCount = live.rows.length;
     nextCount = next.rows.length;
     latest = latestPage.rows;
-    latestWallets = await trackedWalletEligibilityForStages(
+    latestWallets = trackedWalletEligibilityForStages(
       db,
       latest.map((row) => ({ projectId: row.id, stageId: decisionStage(row).id })),
-    );
+    ).catch(() => new Map());
   } catch {
     dbUp = false;
   }
@@ -240,9 +253,18 @@ export default async function PulsePage({
                         </span>
                       </span>
                       <div className="mt-1">
-                        <WalletEligibilityList
-                          wallets={latestWallets.get(eligibilityStageScopeKey(row.id, stage.id))}
-                        />
+                        <Suspense
+                          fallback={
+                            <span role="status" className="font-mono text-[10px] text-ink-faint">
+                              WL pending…
+                            </span>
+                          }
+                        >
+                          <PulseWalletEligibility
+                            eligibility={latestWallets}
+                            scopeKey={eligibilityStageScopeKey(row.id, stage.id)}
+                          />
+                        </Suspense>
                       </div>
                     </div>
                     <div className="self-center">

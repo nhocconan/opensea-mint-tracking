@@ -69,7 +69,7 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
           setTimeout(() => setCopied(false), 1_500);
         });
       }}
-      className="inline-flex size-5 items-center justify-center rounded-xs text-ink-faint transition-colors hover:text-acid"
+      className="inline-flex size-6 flex-none items-center justify-center rounded-xs text-ink-faint transition-colors hover:text-acid"
     >
       {copied ? <Check className="size-3" aria-hidden /> : <Copy className="size-3" aria-hidden />}
     </button>

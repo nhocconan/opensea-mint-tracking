@@ -365,6 +365,22 @@ export const mintAggregates = pgTable(
 );
 
 /**
+ * Exact rolling-one-hour activity prepared by the worker for read paths.
+ * Feed requests only read this one-row snapshot; they never aggregate the
+ * append-only mint_events table. `computedAt` is retained as provenance so
+ * callers can label an absent/stale snapshot instead of inventing freshness.
+ */
+export const mintActivitySnapshots = pgTable("mint_activity_snapshots", {
+  projectId: uuid("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+  computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  quantity: integer("quantity").notNull().default(0),
+  uniqueRecipients: integer("unique_recipients").notNull().default(0),
+});
+
+/**
  * Whale / holder-concentration analysis (feature-backlog.md §2, shipped
  * 2026-08-22). One row per project — the latest snapshot, not a history
  * (mint_aggregates already owns time-bucketed history; this is a

@@ -472,6 +472,7 @@ export interface FeedRow {
   readonly supplyVerified: boolean;
   readonly velocity1h: number;
   readonly uniqueMinters1h: number;
+  readonly activityComputedAt: Date | null;
   readonly stageId: string | null;
   readonly stageLabel: string | null;
   readonly stageKind: StageKind | null;
@@ -558,18 +559,15 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       where s.project_id = ${projects.id}
       order by s.observed_at desc limit 1), false)`;
 
-  const velocity1h = sql<number>`
-    coalesce((select sum(a.quantity)::int
-       from mint_aggregates a
-      where a.project_id = ${projects.id}
-        and a.bucket_size = '1h'
-        and a.bucket_start > now() - interval '1 hour'), 0)`;
-
-  const uniqueMinters1h = sql<number>`
-    coalesce((select count(distinct m.recipient)::int
-       from mint_events m
-      where m.project_id = ${projects.id}
-        and m.observed_at > now() - interval '1 hour'), 0)`;
+  // Read the worker-produced one-row snapshot. Page renders must never scan
+  // the append-only mint_events table (6M+ rows in production); absence is
+  // carried separately through activityComputedAt so UI can say "pending".
+  const velocity1h = sql<number>`coalesce((select a.quantity
+    from mint_activity_snapshots a where a.project_id = ${projects.id}), 0)`;
+  const uniqueMinters1h = sql<number>`coalesce((select a.unique_recipients
+    from mint_activity_snapshots a where a.project_id = ${projects.id}), 0)`;
+  const activityComputedAt = sql<Date | null>`(select a.computed_at
+    from mint_activity_snapshots a where a.project_id = ${projects.id})`;
 
   // Scalar per-column subqueries shared by filtering and presentation. Both
   // exclude paused phases. Keeping one selector for phase, price, and WL is
@@ -797,6 +795,7 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       supplyVerified: latestVerified,
       velocity1h,
       uniqueMinters1h,
+      activityComputedAt,
       // Same double-wrap shape as the currentStageCol fields below and for
       // the same reason: a `${projects.id}` placed DIRECTLY in a select-list
       // sql template renders as an unqualified `"id"`, which inside the

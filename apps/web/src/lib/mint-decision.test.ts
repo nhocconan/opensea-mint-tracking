@@ -26,6 +26,7 @@ function row(overrides: Partial<FeedRow> = {}): FeedRow {
     supplyVerified: false,
     velocity1h: 0,
     uniqueMinters1h: 0,
+    activityComputedAt: NOW,
     stageId: null,
     stageLabel: null,
     stageKind: null,

@@ -47,6 +47,7 @@ import {
   projectsForSentimentScan,
   queryFeed,
   recordAudit,
+  refreshActivitySnapshot,
   refreshHolderSnapshot,
   releaseMintPlanToArmed,
   resealWalletSigningKey,
@@ -86,7 +87,7 @@ const H = 3600_000;
 
 async function cleanup(): Promise<void> {
   await db.execute(sql`truncate table
-    mint_events, mint_aggregates, holder_snapshots, rarity_snapshots, supply_snapshots, drop_stages,
+    mint_events, mint_aggregates, mint_activity_snapshots, holder_snapshots, rarity_snapshots, supply_snapshots, drop_stages,
     eligibility_checks, notification_outbox, notification_attempts,
     mint_plans, signers, "user", audit_logs,
     project_aliases, project_fields, evidence, projects, providers,
@@ -185,7 +186,8 @@ describe("identity merge and idempotency (PRD §7.2)", () => {
 describe("feed queries (PRD §5/§9)", () => {
   it("filters by view/status/search and paginates with cursors", async () => {
     const liveSlug = `it-live-${randomUUID().slice(0, 6)}`;
-    await upsertProjectFromSource(db, {
+    const liveContract = `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`;
+    const liveProject = await upsertProjectFromSource(db, {
       ...baseProject,
       // Every fixture in this describe block must get its own contract
       // address — baseProject's is a single fixed value, and reusing it
@@ -194,7 +196,7 @@ describe("feed queries (PRD §5/§9)", () => {
       // with only the last write's name surviving (found via live
       // integration testing, 2026-08-22 — this silently broke this exact
       // assertion, while the product's own lifecycle logic was correct).
-      contractAddress: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+      contractAddress: liveContract,
       externalId: liveSlug,
       slug: liveSlug,
       name: "Live One",
@@ -213,6 +215,33 @@ describe("feed queries (PRD §5/§9)", () => {
       ],
       now: NOW,
     });
+    await insertMintEvents(db, [
+      {
+        chainId: 4663,
+        txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`,
+        logIndex: 0,
+        blockNumber: 1n,
+        blockHash: `0x${"1".repeat(64)}`,
+        contractAddress: liveContract,
+        recipient: `0x${"2".repeat(40)}`,
+        quantity: 2,
+        finalized: true,
+        observedAt: NOW,
+      },
+      {
+        chainId: 4663,
+        txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`,
+        logIndex: 0,
+        blockNumber: 2n,
+        blockHash: `0x${"3".repeat(64)}`,
+        contractAddress: liveContract,
+        recipient: `0x${"4".repeat(40)}`,
+        quantity: 1,
+        finalized: true,
+        observedAt: NOW,
+      },
+    ]);
+    await refreshActivitySnapshot(db, liveProject.projectId);
     for (let i = 0; i < 3; i += 1) {
       await upsertProjectFromSource(db, {
         ...baseProject,
@@ -239,6 +268,11 @@ describe("feed queries (PRD §5/§9)", () => {
 
     const live = await queryFeed(db, { view: "live", limit: 10 });
     expect(live.rows.some((row) => row.name === "Live One")).toBe(true);
+    expect(live.rows.find((row) => row.name === "Live One")).toMatchObject({
+      velocity1h: 3,
+      uniqueMinters1h: 2,
+    });
+    expect(live.rows.find((row) => row.name === "Live One")?.activityComputedAt).not.toBeNull();
 
     const next = await queryFeed(db, { view: "next", sort: "starting", limit: 2 });
     expect(next.rows).toHaveLength(2);

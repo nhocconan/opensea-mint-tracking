@@ -5,6 +5,7 @@ import {
   type FeedSocialFilter,
   type FeedWlFilter,
   listCalendarStages,
+  type TrackedWalletEligibility,
   trackedWalletEligibilityForStages,
 } from "@hoodmint/db";
 import { ConfidenceTag, SourceBadge, StatusChip } from "@hoodmint/ui";
@@ -26,6 +27,17 @@ import { getSessionUser } from "@/lib/session.ts";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = { title: "Minting calendar" };
+
+async function CalendarWalletEligibility({
+  eligibility,
+  scopeKey,
+}: {
+  eligibility: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>>;
+  scopeKey: string;
+}) {
+  const resolved = await eligibility;
+  return <WalletEligibilityList wallets={resolved.get(scopeKey)} />;
+}
 
 /** Phase-level agenda: one row per upcoming stage, never one row per project. */
 export default async function CalendarPage({
@@ -57,7 +69,7 @@ export default async function CalendarPage({
     ...(wl !== undefined ? { wl } : {}),
     ...(social !== undefined ? { social } : {}),
   }).catch(() => []);
-  const eligibility = await trackedWalletEligibilityForStages(
+  const eligibility = trackedWalletEligibilityForStages(
     db,
     stages.map((stage) => ({ projectId: stage.projectId, stageId: stage.stageId })),
   ).catch(() => new Map());
@@ -192,11 +204,18 @@ export default async function CalendarPage({
                         <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
                           Tracked wallet WL
                         </div>
-                        <WalletEligibilityList
-                          wallets={eligibility.get(
-                            eligibilityStageScopeKey(stage.projectId, stage.stageId),
-                          )}
-                        />
+                        <Suspense
+                          fallback={
+                            <span role="status" className="font-mono text-[10px] text-ink-faint">
+                              WL pending…
+                            </span>
+                          }
+                        >
+                          <CalendarWalletEligibility
+                            eligibility={eligibility}
+                            scopeKey={eligibilityStageScopeKey(stage.projectId, stage.stageId)}
+                          />
+                        </Suspense>
                       </div>
 
                       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">

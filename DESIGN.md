@@ -82,7 +82,7 @@ Status is **never color-only**: every chip has a text label (`LIVE`,
 | `--color-line-strong` | `#2c352e` | |
 | `--color-ink` | `#e8ede9` | High-contrast neutral |
 | `--color-ink-muted` | `#9aa69e` | |
-| `--color-ink-faint` | `#6b756e` | |
+| `--color-ink-faint` | `#747f77` | AA-safe meta text on raised dark surfaces |
 | `--color-acid` | `#b8ff2e` | Acid-lime primary |
 | `--color-acid-dim` | `#86c214` | |
 | `--color-cyan` | `#4fd8e8` | Info |
@@ -107,13 +107,13 @@ against `--color-base`. Same roles, remapped contrast.
 | `--color-line-strong` | `#b7c2b4` | |
 | `--color-ink` | `#121613` | |
 | `--color-ink-muted` | `#4d5751` | |
-| `--color-ink-faint` | `#6b756e` | |
+| `--color-ink-faint` | `#647068` | AA-safe meta text on paper and white surfaces |
 | `--color-acid` | `#3f6d00` | Text-safe lime |
 | `--color-acid-dim` | `#5a9208` | |
 | `--color-cyan` | `#0a6d78` | Text-safe info |
 | `--color-cyan-dim` | `#1591a0` | |
 | `--color-magenta` | `#c0166a` | Text-safe exception |
-| `--color-amber` | `#9a6200` | |
+| `--color-amber` | `#985f00` | Text-safe warning on tinted paper |
 
 `color-scheme: light` on the root.
 

@@ -281,6 +281,10 @@ reference-python-mvp/  reference logic from this handoff; not production runtime
 
 Enforce package boundaries. `apps/*` orchestrate; domain logic lives in `packages/core`; providers cannot import UI; web cannot call provider SDKs directly; workers operate through repositories and queue contracts.
 
+Dashboard requests are snapshot readers. Provider calls, wallet eligibility checks, and raw
+`mint_events` aggregation run in workers and persist their results before the web process reads
+them. A slow or throttled check must not delay the feed shell or consume a web DB connection.
+
 ### 8.3 Runtime topology
 
 Docker Compose services:
@@ -306,9 +310,13 @@ Queues and deterministic job IDs:
 
 Workers must be idempotent and safe under at-least-once delivery. Use DB unique constraints and transactions, not in-memory locks, as the final defense. BullMQ retries use exponential backoff with jitter; non-retryable auth/schema failures move directly to failed state with operator guidance.
 
+Periodic worker loops are completion-based and never overlap another invocation of the same task.
+Provider throttling honors `Retry-After` (with jitter across replicas); previously persisted
+verdicts remain readable while a later check is parked.
+
 ### 8.5 Realtime updates
 
-Use Server-Sent Events for dashboard invalidation/status updates. The client receives small typed events and refetches affected queries; do not stream entire project payloads. Fall back to 30-second polling when SSE disconnects. Do not add WebSockets unless a documented bidirectional requirement appears.
+Use Server-Sent Events for dashboard invalidation/status updates. The client receives small typed events and refetches affected queries; do not stream entire project payloads. Coalesce event bursts into bounded refreshes, defer refreshes in hidden tabs, and refresh once when a dirty tab becomes visible. Fall back to 30-second polling when SSE disconnects. Do not add WebSockets unless a documented bidirectional requirement appears. Eligibility is streamed independently from the feed shell so missing or slow wallet results never block project rows.
 
 ## 9. Data model
 
@@ -327,6 +335,7 @@ Required tables:
 - `supply_snapshots(projectId, blockNumber, minted, maxSupply, observedAt, source, verified)`.
 - `mint_events(chainId, txHash, logIndex, blockNumber, blockHash, projectId, recipient, quantity, finalized, observedAt)` with unique `(chainId, txHash, logIndex)`.
 - `mint_aggregates(projectId, bucketStart, bucketSize, quantity, uniqueRecipients)`.
+- `mint_activity_snapshots(projectId, windowStartedAt, computedAt, quantity, uniqueRecipients)` for worker-computed rolling feed activity.
 - `eligibility_checks(walletId, projectId, stageId, status, maxMintable, priceWei, checkedAt, expiresAt, evidenceId, errorCode)`.
 - `watchlist_entries(userId, projectId, createdAt)`.
 - `evidence(id, providerId, kind, fetchedAt, contentHash, sanitizedPayload)`.

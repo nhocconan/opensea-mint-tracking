@@ -90,7 +90,12 @@ export async function FeedPage({
     projectId: row.id,
     stageId: decisionStage(row).id,
   }));
-  const eligibility = await trackedWalletEligibilityForStages(db, eligibilityScopes);
+  // Start the snapshot read but do not hold the feed shell for it. Each WL
+  // cell below is a Suspense boundary, so rows appear as soon as the feed
+  // query completes and resolved wallet chips stream in independently.
+  const eligibility = trackedWalletEligibilityForStages(db, eligibilityScopes).catch(
+    () => new Map(),
+  );
 
   const exportQuery = new URLSearchParams();
   for (const [key, value] of Object.entries({

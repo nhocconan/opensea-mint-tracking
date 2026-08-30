@@ -41,6 +41,7 @@ const CSV_COLUMNS = [
   "maxSupply",
   "velocity1h",
   "uniqueMinters1h",
+  "activityComputedAt",
   "firstSeenAt",
 ] as const;
 

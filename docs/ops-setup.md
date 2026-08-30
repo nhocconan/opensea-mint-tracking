@@ -72,3 +72,10 @@ PostgreSQL connections carry `application_name` values `hoodmint-web`, `hoodmint
 `hoodmint-events`. The default single-process production budget is 6 web pool connections, 8
 worker pool connections, and 1 dedicated LISTEN connection. Diagnose unexpected growth with
 `pg_stat_activity`; do not raise `max_connections` before identifying the client name and state.
+
+If the UI reports `max connections reached`, capture `application_name`, `state`, query age, and
+the active query text from `pg_stat_activity`. A full web pool usually means requests are holding
+connections on an expensive read, not that the pool itself is too small. Feed requests must read
+`mint_activity_snapshots`; raw `mint_events` aggregation belongs to the worker. Periodic jobs must
+use the non-overlapping scheduler, and provider `429` responses must park work for `Retry-After`
+instead of creating more concurrent retries.

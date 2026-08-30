@@ -7,6 +7,7 @@ import {
 import { ConfidenceTag, SourceBadge, StatusChip } from "@hoodmint/ui";
 import { ExternalLink } from "lucide-react";
 import Link from "next/link";
+import { Suspense } from "react";
 import { formatPrice, formatSupply, formatVelocity, shortAddress } from "@/lib/format.ts";
 import { CopyButton, Countdown, WatchButton } from "./feed-parts.tsx";
 import {
@@ -18,7 +19,7 @@ import {
 
 export interface FeedTableProps {
   readonly rows: readonly FeedRow[];
-  readonly eligibilityByStage: ReadonlyMap<string, readonly TrackedWalletEligibility[]>;
+  readonly eligibilityByStage: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>>;
   readonly watchedIds: ReadonlySet<string>;
   readonly watchEnabled: boolean;
   readonly specialMintEnabled: boolean;
@@ -54,6 +55,52 @@ function ConcentrationBadge({
     >
       {label}
     </span>
+  );
+}
+
+function formatActivity(row: FeedRow): string {
+  if (row.activityComputedAt === null) {
+    return "activity pending";
+  }
+  const value = formatVelocity(row.velocity1h, row.uniqueMinters1h);
+  return Date.now() - coerceDate(row.activityComputedAt).getTime() > 3 * 60_000
+    ? `${value} · stale`
+    : value;
+}
+
+async function StageWalletEligibility({
+  eligibility,
+  scopeKey,
+}: {
+  eligibility: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>>;
+  scopeKey: string;
+}) {
+  const resolved = await eligibility;
+  return <WalletEligibilityList wallets={resolved.get(scopeKey)} />;
+}
+
+function StreamingWalletEligibility({
+  eligibility,
+  projectId,
+  stageId,
+}: {
+  eligibility: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>>;
+  projectId: string;
+  stageId: string | null;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <span role="status" className="font-mono text-[10px] text-ink-faint">
+          WL pending…
+        </span>
+      }
+    >
+      <StageWalletEligibility
+        eligibility={eligibility}
+        scopeKey={eligibilityStageScopeKey(projectId, stageId)}
+      />
+    </Suspense>
   );
 }
 
@@ -144,13 +191,15 @@ export function FeedTable({
                 <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
                   Tracked wallet WL
                 </div>
-                <WalletEligibilityList
-                  wallets={eligibilityByStage.get(eligibilityStageScopeKey(row.id, stage.id))}
+                <StreamingWalletEligibility
+                  eligibility={eligibilityByStage}
+                  projectId={row.id}
+                  stageId={stage.id}
                 />
               </div>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-ink-faint">
                 <span>{formatSupply(row.minted, row.maxSupply, row.supplyVerified)}</span>
-                <span>{formatVelocity(row.velocity1h, row.uniqueMinters1h)}</span>
+                <span>{formatActivity(row)}</span>
                 <span className="inline-flex items-center gap-1">
                   <SourceBadge kind="opensea" />
                   <ConfidenceTag confidence={row.confidence} />
@@ -271,7 +320,7 @@ export function FeedTable({
                               target="_blank"
                               rel="noreferrer noopener"
                               aria-label="View contract on explorer"
-                              className="text-ink-faint hover:text-cyan"
+                              className="inline-flex size-6 flex-none items-center justify-center rounded-xs text-ink-faint hover:text-cyan"
                             >
                               <ExternalLink className="size-3" aria-hidden />
                             </a>
@@ -345,15 +394,17 @@ export function FeedTable({
                     {formatSupply(row.minted, row.maxSupply, row.supplyVerified)}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">
-                    {formatVelocity(row.velocity1h, row.uniqueMinters1h)}
+                    {formatActivity(row)}
                     <ConcentrationBadge
                       quantity={row.velocity1h}
                       uniqueRecipients={row.uniqueMinters1h}
                     />
                   </td>
                   <td className="px-3 py-2">
-                    <WalletEligibilityList
-                      wallets={eligibilityByStage.get(eligibilityStageScopeKey(row.id, stage.id))}
+                    <StreamingWalletEligibility
+                      eligibility={eligibilityByStage}
+                      projectId={row.id}
+                      stageId={stage.id}
                     />
                   </td>
                 </tr>
