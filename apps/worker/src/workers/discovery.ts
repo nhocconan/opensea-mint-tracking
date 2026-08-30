@@ -60,6 +60,17 @@ export interface DiscoveryOutcome {
   readonly errorCode?: string;
 }
 
+async function invalidateRejectedInstantKey(ctx: WorkerContext): Promise<boolean> {
+  const { db, config } = ctx;
+  // Credential resolution can itself fail while instant-key issuance is
+  // parked. Keep cleanup best-effort so an AuthRequired outcome does not
+  // escape the provider catch and trigger BullMQ's short generic retries.
+  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY).catch(
+    () => null,
+  );
+  return key === null ? false : invalidateInstantKeyOnAuthFailure(db, key).catch(() => false);
+}
+
 export async function runDiscoveryCycle(
   ctx: WorkerContext,
   feedType: "featured" | "upcoming" | "recently_minted",
@@ -188,10 +199,7 @@ export async function runDiscoveryCycle(
     if (errorCode === "AuthRequired") {
       // A dead free instant key never rotates on its own (its expires_at is
       // still in the future) — drop it so the next cycle bootstraps a fresh one.
-      const rotated = await invalidateInstantKeyOnAuthFailure(
-        db,
-        await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY),
-      ).catch(() => false);
+      const rotated = await invalidateRejectedInstantKey(ctx);
       if (rotated) {
         log.warn(
           { feedType },
@@ -327,10 +335,7 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
     metrics().inc("hoodmint_provider_errors_total", { provider: "opensea", category: errorCode });
     log.error({ err: error, feedType, errCode: errorCode }, "collection discovery failed");
     if (errorCode === "AuthRequired") {
-      await invalidateInstantKeyOnAuthFailure(
-        db,
-        await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY),
-      ).catch(() => false);
+      await invalidateRejectedInstantKey(ctx);
     }
     return { feedType, found: 0, created: 0, malformed: 0, ok: false, errorCode };
   }
