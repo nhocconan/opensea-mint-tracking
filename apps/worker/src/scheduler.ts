@@ -9,6 +9,34 @@ export interface ScheduledTaskOptions {
   readonly initialDelayMs?: number;
 }
 
+export interface ProviderJobOptions<T> {
+  readonly task: () => Promise<T>;
+  readonly onPark: (error: unknown, retryDelayMs: number) => void;
+  readonly random?: () => number;
+}
+
+/**
+ * Complete a queue job without BullMQ's short retry loop when the provider has
+ * explicitly told us to wait (or no usable credential exists). The normal
+ * freshness scheduler will enqueue a new idempotent job later; other failures
+ * still reach BullMQ's bounded retry policy.
+ */
+export async function runProviderJob<T>(options: ProviderJobOptions<T>): Promise<T | undefined> {
+  try {
+    return await options.task();
+  } catch (error) {
+    if (
+      !isAppError(error) ||
+      (error.category !== "RateLimited" && error.category !== "AuthRequired")
+    ) {
+      throw error;
+    }
+    const retryDelayMs = delayAfterFailure(0, error, options.random);
+    options.onPark(error, retryDelayMs);
+    return undefined;
+  }
+}
+
 /** Provider backoff wins over normal cadence and gets jitter across replicas. */
 export function delayAfterFailure(
   intervalMs: number,

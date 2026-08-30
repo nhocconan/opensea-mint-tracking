@@ -1,6 +1,11 @@
 import { AppError } from "@hoodmint/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { delayAfterFailure, scheduleNonOverlappingTask, startupDelay } from "./scheduler.ts";
+import {
+  delayAfterFailure,
+  runProviderJob,
+  scheduleNonOverlappingTask,
+  startupDelay,
+} from "./scheduler.ts";
 
 afterEach(() => vi.useRealTimers());
 
@@ -42,5 +47,26 @@ describe("non-overlapping worker scheduler", () => {
   it("spreads startup within the smaller of five seconds and one interval", () => {
     expect(startupDelay("eligibility", 60_000)).toBeLessThan(5_000);
     expect(startupDelay("mint-hot-loop", 250)).toBeLessThan(250);
+  });
+
+  it("parks provider backpressure instead of entering a short queue retry loop", async () => {
+    const onPark = vi.fn();
+    const error = new AppError("RateLimited", "throttled", { retryAfterSeconds: 600 });
+
+    await expect(
+      runProviderJob({
+        task: () => Promise.reject(error),
+        onPark,
+        random: () => 0,
+      }),
+    ).resolves.toBeUndefined();
+    expect(onPark).toHaveBeenCalledWith(error, 600_000);
+  });
+
+  it("leaves unexpected queue failures to BullMQ's bounded retry policy", async () => {
+    const error = new Error("connection reset");
+    await expect(
+      runProviderJob({ task: () => Promise.reject(error), onPark: vi.fn() }),
+    ).rejects.toBe(error);
   });
 });

@@ -17,7 +17,7 @@ import { metrics } from "@hoodmint/observability";
 import { QUEUE_NAMES } from "@hoodmint/queues";
 import { Worker } from "bullmq";
 import { context } from "./context.ts";
-import { scheduleNonOverlappingTask } from "./scheduler.ts";
+import { runProviderJob, scheduleNonOverlappingTask } from "./scheduler.ts";
 import { runAutoMintPlanner } from "./workers/auto-mint.ts";
 import { runChainSync } from "./workers/chain.ts";
 import { runClockCalibration } from "./workers/clock-calibration.ts";
@@ -86,7 +86,20 @@ async function main(): Promise<void> {
     QUEUE_NAMES.details,
     async (job) => {
       const data = job.data as { slug: string };
-      return runDetailRefresh(ctx, data.slug);
+      return runProviderJob({
+        task: () => runDetailRefresh(ctx, data.slug),
+        onPark: (error, retryDelayMs) => {
+          log.warn(
+            {
+              jobId: job.id,
+              slug: data.slug,
+              err: error instanceof Error ? error.message : String(error),
+              retryInSeconds: Math.ceil(retryDelayMs / 1_000),
+            },
+            "detail refresh parked after provider backpressure",
+          );
+        },
+      });
     },
     { connection, concurrency: 2 },
   );
