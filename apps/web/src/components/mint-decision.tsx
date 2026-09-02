@@ -13,16 +13,18 @@ export function MintActions({
   specialMintEnabled,
   stageId,
   compact = false,
+  mobile = false,
 }: {
   projectId: string;
   slug: string | null;
   specialMintEnabled: boolean;
   stageId?: string | null;
   compact?: boolean;
+  mobile?: boolean;
 }) {
   const classes = compact
-    ? "inline-flex items-center gap-1 rounded-xs border px-1.5 py-0.5 font-mono text-[10px]"
-    : "inline-flex items-center justify-center gap-1.5 rounded-sm border px-3 py-1.5 font-mono text-xs";
+    ? `inline-flex min-h-6 items-center gap-1 rounded-xs border px-1.5 py-0.5 font-mono text-[10px] ${mobile ? "min-h-11 md:min-h-6" : ""}`
+    : `inline-flex min-h-6 items-center justify-center gap-1.5 rounded-sm border px-3 py-1.5 font-mono text-xs ${mobile ? "min-h-11" : ""}`;
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {slug !== null ? (
@@ -64,11 +66,13 @@ export function ProjectSocialLinks({
   projectUrl,
   discordUrl,
   safelistStatus,
+  showMissing = true,
 }: {
   twitterUsername: string | null;
   projectUrl: string | null;
   discordUrl?: string | null;
   safelistStatus?: string | null;
+  showMissing?: boolean;
 }) {
   let websiteLabel = "Website";
   if (projectUrl !== null) {
@@ -91,31 +95,31 @@ export function ProjectSocialLinks({
           href={`https://x.com/${twitterUsername}`}
           target="_blank"
           rel="noreferrer noopener"
-          className="text-cyan underline-offset-2 hover:underline"
+          className="inline-flex min-h-6 items-center text-cyan underline-offset-2 hover:underline"
         >
           X @{twitterUsername}
         </a>
-      ) : (
+      ) : showMissing ? (
         <span className="text-ink-faint">X: none</span>
-      )}
+      ) : null}
       {projectUrl !== null ? (
         <a
           href={projectUrl}
           target="_blank"
           rel="noreferrer noopener"
-          className="text-cyan underline-offset-2 hover:underline"
+          className="inline-flex min-h-6 items-center text-cyan underline-offset-2 hover:underline"
         >
           {websiteLabel}
         </a>
-      ) : (
+      ) : showMissing ? (
         <span className="text-ink-faint">Website: none</span>
-      )}
+      ) : null}
       {discordUrl !== undefined && discordUrl !== null ? (
         <a
           href={discordUrl}
           target="_blank"
           rel="noreferrer noopener"
-          className="text-ink-faint underline-offset-2 hover:text-cyan hover:underline"
+          className="inline-flex min-h-6 items-center text-ink-faint underline-offset-2 hover:text-cyan hover:underline"
         >
           Discord
         </a>

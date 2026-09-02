@@ -27,14 +27,14 @@ import { useRadarEvents } from "./sse.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
 
 const NAV = [
-  { href: "/", label: "Pulse", icon: Activity },
-  { href: "/all", label: "All", icon: Layers },
-  { href: "/live", label: "Live", icon: Flame },
-  { href: "/next", label: "Next", icon: Clock3 },
-  { href: "/calendar", label: "Calendar", icon: CalendarDays },
-  { href: "/latest", label: "Latest", icon: Sparkles },
-  { href: "/eligible", label: "Eligible", icon: ShieldCheck },
-  { href: "/watchlist", label: "Watchlist", icon: Star },
+  { href: "/", label: "Pulse", mobileLabel: "Pulse", icon: Activity },
+  { href: "/all", label: "All", mobileLabel: "All", icon: Layers },
+  { href: "/live", label: "Live", mobileLabel: "Live", icon: Flame },
+  { href: "/next", label: "Next", mobileLabel: "Next", icon: Clock3 },
+  { href: "/calendar", label: "Calendar", mobileLabel: "Cal", icon: CalendarDays },
+  { href: "/latest", label: "Latest", mobileLabel: "New", icon: Sparkles },
+  { href: "/eligible", label: "Eligible", mobileLabel: "WL", icon: ShieldCheck },
+  { href: "/watchlist", label: "Watchlist", mobileLabel: "Watch", icon: Star },
 ] as const;
 
 const COMMAND_ITEMS: readonly CommandItem[] = [
@@ -93,7 +93,7 @@ export function AppShell({
             key={href}
             href={href}
             aria-current={isActive(href) ? "page" : undefined}
-            className={`flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors duration-[var(--motion-fast)] hover:bg-base-overlay ${
+            className={`flex min-h-9 items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors duration-[var(--motion-fast)] hover:bg-base-overlay ${
               isActive(href) ? "bg-base-overlay text-acid" : "text-ink-muted"
             }`}
           >
@@ -105,7 +105,7 @@ export function AppShell({
           <button
             type="button"
             onClick={() => setPaletteOpen(true)}
-            className="flex items-center justify-between rounded-sm px-2 py-1 text-left text-[11px] text-ink-muted hover:bg-base-overlay hover:text-ink"
+            className="flex min-h-9 items-center justify-between rounded-sm px-2 py-1 text-left text-[11px] text-ink-muted hover:bg-base-overlay hover:text-ink"
           >
             <span>Jump to…</span>
             <kbd className="rounded-xs border border-line px-1 font-mono text-[10px]">⌘K</kbd>
@@ -115,30 +115,30 @@ export function AppShell({
             <>
               <Link
                 href="/admin"
-                className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-acid"
+                className="flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-acid"
               >
                 <Shield className="size-3" aria-hidden />
                 Admin
               </Link>
               <Link
                 href="/admin/account"
-                className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+                className="flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
               >
                 <UserCog className="size-3" aria-hidden />
                 Account
               </Link>
-              <SignOutButton className="flex items-center gap-1 rounded-sm px-2 py-1 text-left text-[11px] text-ink-faint hover:bg-base-overlay hover:text-magenta" />
+              <SignOutButton className="flex min-h-9 items-center gap-1 rounded-sm px-2 py-1 text-left text-[11px] text-ink-faint hover:bg-base-overlay hover:text-magenta" />
             </>
           ) : (
             <Link
               href="/login"
-              className="flex items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-muted hover:bg-base-overlay hover:text-ink"
+              className="flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-muted hover:bg-base-overlay hover:text-ink"
             >
               <LogIn className="size-3" aria-hidden />
               Sign in
             </Link>
           )}
-          <div className="px-2 text-[11px] text-ink-muted">
+          <div className="px-2 py-1 text-[11px] text-ink-muted">
             <Eye className="mr-1 inline size-3" aria-hidden />
             read-only radar
           </div>
@@ -159,7 +159,7 @@ export function AppShell({
             type="button"
             onClick={() => setPaletteOpen(true)}
             aria-label="Jump to…"
-            className="rounded-sm p-1.5 text-ink-muted hover:bg-base-overlay hover:text-ink"
+            className="inline-flex size-11 items-center justify-center rounded-sm text-ink-muted hover:bg-base-overlay hover:text-ink focus:outline-none focus:ring-2 focus:ring-acid/50"
           >
             <Search className="size-4" aria-hidden />
           </button>
@@ -168,7 +168,7 @@ export function AppShell({
             <Link
               href="/admin"
               aria-label="Admin console"
-              className="rounded-sm p-1.5 text-ink-muted hover:bg-base-overlay hover:text-acid"
+              className="inline-flex size-11 items-center justify-center rounded-sm text-ink-muted hover:bg-base-overlay hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
             >
               <UserCog className="size-4" aria-hidden />
             </Link>
@@ -176,7 +176,7 @@ export function AppShell({
             <Link
               href="/login"
               aria-label="Sign in"
-              className="rounded-sm p-1.5 text-ink-muted hover:bg-base-overlay hover:text-acid"
+              className="inline-flex size-11 items-center justify-center rounded-sm text-ink-muted hover:bg-base-overlay hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
             >
               <LogIn className="size-4" aria-hidden />
             </Link>
@@ -189,20 +189,20 @@ export function AppShell({
       {/* Mobile bottom navigation */}
       <nav
         aria-label="Primary mobile"
-        className="fixed inset-x-0 bottom-0 z-40 flex justify-around border-t border-line bg-base-raised/95 py-1 backdrop-blur md:hidden"
+        className="fixed inset-x-0 bottom-0 z-40 flex border-t border-line bg-base-raised py-1 pb-[calc(0.25rem+env(safe-area-inset-bottom))] md:hidden"
       >
-        {NAV.map(({ href, label, icon: Icon }) => (
+        {NAV.map(({ href, label, mobileLabel, icon: Icon }) => (
           <Link
             key={href}
             href={href}
             aria-current={isActive(href) ? "page" : undefined}
             aria-label={label}
-            className={`flex min-w-14 flex-col items-center gap-0.5 rounded-sm px-2 py-1 text-[10px] ${
+            className={`flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-sm px-0.5 py-1 text-[10px] ${
               isActive(href) ? "text-acid" : "text-ink-muted"
             }`}
           >
             <Icon className="size-4" aria-hidden />
-            {label}
+            <span aria-hidden>{mobileLabel}</span>
           </Link>
         ))}
       </nav>

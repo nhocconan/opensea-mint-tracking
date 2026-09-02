@@ -124,32 +124,41 @@ export default async function PulsePage({
         </p>
       ) : (
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-md border border-line bg-base-raised p-4">
+          <div className="feed-card feed-track-live rounded-md border border-line bg-base-raised p-4">
             <div className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               Minting now
             </div>
             <div className="mt-1 font-display text-3xl font-semibold text-acid">{liveCount}</div>
-            <Link href="/live" className="mt-1 inline-block text-xs text-cyan hover:underline">
+            <Link
+              href="/live"
+              className="mt-1 inline-flex min-h-6 items-center text-xs text-cyan hover:underline focus:outline-none focus:ring-2 focus:ring-cyan/50"
+            >
               Open Live view →
             </Link>
           </div>
-          <div className="rounded-md border border-line bg-base-raised p-4">
+          <div className="feed-card feed-track-next rounded-md border border-line bg-base-raised p-4">
             <div className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               Upcoming
             </div>
             <div className="mt-1 font-display text-3xl font-semibold text-cyan">{nextCount}</div>
-            <Link href="/next" className="mt-1 inline-block text-xs text-cyan hover:underline">
+            <Link
+              href="/next"
+              className="mt-1 inline-flex min-h-6 items-center text-xs text-cyan hover:underline focus:outline-none focus:ring-2 focus:ring-cyan/50"
+            >
               Open Next view →
             </Link>
           </div>
-          <div className="rounded-md border border-line bg-base-raised p-4">
+          <div className="feed-card feed-track-new rounded-md border border-line bg-base-raised p-4">
             <div className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               WL hits
             </div>
             <div className="mt-1 font-display text-3xl font-semibold text-magenta">
               {[...eligibility.values()].filter((s) => s === "ELIGIBLE_RESTRICTED").length}
             </div>
-            <Link href="/eligible" className="mt-1 inline-block text-xs text-cyan hover:underline">
+            <Link
+              href="/eligible"
+              className="mt-1 inline-flex min-h-6 items-center text-xs text-cyan hover:underline focus:outline-none focus:ring-2 focus:ring-cyan/50"
+            >
               Open Eligible view →
             </Link>
           </div>
@@ -220,14 +229,31 @@ export default async function PulsePage({
             <h2 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               Latest discoveries
             </h2>
-            <ul className="divide-y divide-line">
+            <ul className="space-y-2">
               {latest.map((row) => {
                 const stage = decisionStage(row);
                 return (
-                  <li key={row.id} className="grid gap-2 py-2 text-sm lg:grid-cols-[1fr_auto]">
+                  <li
+                    key={row.id}
+                    className={`feed-card feed-track-${row.lifecycleStatus.toLowerCase().replace(/_/g, "-")} grid gap-3 rounded-sm border border-line bg-base p-3 text-sm lg:grid-cols-[1fr_auto]`}
+                  >
                     <div className="min-w-0">
                       <span className="flex flex-wrap items-center gap-2">
-                        <Link href={`/projects/${row.id}`} className="font-medium hover:text-acid">
+                        {row.imageUrl !== null ? (
+                          // biome-ignore lint/performance/noImgElement: allowlisted provider CDN thumbnail
+                          <img
+                            src={row.imageUrl}
+                            alt=""
+                            width={32}
+                            height={32}
+                            loading="lazy"
+                            className="size-8 shrink-0 rounded-xs border border-line object-cover"
+                          />
+                        ) : null}
+                        <Link
+                          href={`/projects/${row.id}`}
+                          className="inline-flex min-h-6 items-center font-medium hover:text-acid"
+                        >
                           {row.name}
                         </Link>
                         <StatusChip status={row.lifecycleStatus} />
@@ -237,15 +263,16 @@ export default async function PulsePage({
                         projectUrl={row.projectUrl}
                         discordUrl={row.discordUrl}
                         safelistStatus={row.safelistStatus}
+                        showMissing={false}
                       />
-                      <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]">
+                      <span className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-ink-muted">
                         <span>
-                          <span className="text-ink-faint">Phase </span>
+                          <span className="feed-section-label">Phase </span>
                           {stage.label ?? "unknown"}
                           {stage.kind !== null ? ` · ${stage.kind}` : ""}
                         </span>
                         <span>
-                          <span className="text-ink-faint">Price </span>
+                          <span className="feed-section-label">Price </span>
                           <span className="text-acid">{formatPrice(stage.priceWei)}</span>
                         </span>
                         <span className="text-ink-faint">
@@ -274,6 +301,7 @@ export default async function PulsePage({
                         specialMintEnabled={can(user?.role, "execution:configure")}
                         stageId={stage.id}
                         compact
+                        mobile
                       />
                     </div>
                   </li>

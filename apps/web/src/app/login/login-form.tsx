@@ -120,7 +120,7 @@ export function LoginForm() {
             name="rememberMe"
             type="checkbox"
             defaultChecked
-            className="size-4 rounded-xs border border-line accent-acid"
+            className="size-6 rounded-xs border border-line accent-acid"
           />
           <span>Remember me on this device</span>
         </label>

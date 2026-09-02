@@ -68,6 +68,10 @@ function formatActivity(row: FeedRow): string {
     : value;
 }
 
+function trackClass(status: string): string {
+  return status.toLowerCase().replace(/_/g, "-");
+}
+
 async function StageWalletEligibility({
   eligibility,
   scopeKey,
@@ -108,17 +112,9 @@ function StreamingWalletEligibility({
  * Dense table view (PRD §5.2). Every claim row carries status, source,
  * confidence, provenance age, and eligibility chips.
  *
- * Corrected 2026-08-22: this comment previously claimed "cards render on
- * mobile via the same data" — checked directly (grepped for a FeedCard/
- * feed-card component) and confirmed no such component exists anywhere in
- * this codebase; it never shipped. What actually happens on narrow
- * viewports is the `overflow-x-auto` wrapper below on a `min-w-[900px]`
- * table — a real, always-functional horizontal-scroll pattern, not
- * content loss, but not the purpose-built mobile card layout this comment
- * described either. A genuine backlog item, not fixed in this pass:
- * building an actual mobile card view is real, moderate-sized UI work
- * touching every view this component renders (Live/Next/Latest/Eligible/
- * Watchlist/All), not a quick fix alongside finding the gap.
+ * The desktop table and mobile cards intentionally share this exact row data
+ * and stage-scoped WL promise. Their layouts diverge at the breakpoint so a
+ * phone gets a readable decision stack instead of a squeezed spreadsheet.
  */
 export function FeedTable({
   rows,
@@ -126,6 +122,7 @@ export function FeedTable({
   watchedIds,
   watchEnabled,
   specialMintEnabled,
+  view,
 }: FeedTableProps) {
   if (rows.length === 0) {
     return (
@@ -148,37 +145,59 @@ export function FeedTable({
             Date.now() - coerceDate(row.lastSeenAt).getTime() > 3 * 60 * 60 * 1000 &&
             row.lifecycleStatus !== "ENDED";
           return (
-            <article key={row.id} className="rounded-md border border-line bg-base-raised p-3">
-              <div className="flex items-start gap-2">
+            <article
+              key={row.id}
+              className={`feed-card feed-track-${trackClass(row.lifecycleStatus)} rounded-md border border-line bg-base-raised p-3.5`}
+            >
+              <div className="flex items-start gap-2.5">
                 <WatchButton
                   projectId={row.id}
                   watched={watchedIds.has(row.id)}
                   enabled={watchEnabled}
                 />
                 <div className="min-w-0 flex-1">
-                  <Link href={`/projects/${row.id}`} className="font-medium hover:text-acid">
-                    {row.name}
-                  </Link>
+                  <div className="flex min-w-0 items-center gap-2">
+                    {row.imageUrl !== null ? (
+                      // biome-ignore lint/performance/noImgElement: allowlisted provider CDN thumbnail
+                      <img
+                        src={row.imageUrl}
+                        alt=""
+                        width={36}
+                        height={36}
+                        loading="lazy"
+                        className="size-9 shrink-0 rounded-xs border border-line object-cover"
+                      />
+                    ) : null}
+                    <Link
+                      href={`/projects/${row.id}`}
+                      className="inline-flex min-h-6 max-w-full items-center truncate text-sm font-semibold leading-tight hover:text-acid"
+                    >
+                      {row.name}
+                    </Link>
+                  </div>
                   <ProjectSocialLinks
                     twitterUsername={row.twitterUsername}
                     projectUrl={row.projectUrl}
                     discordUrl={row.discordUrl}
                     safelistStatus={row.safelistStatus}
+                    showMissing={false}
                   />
                 </div>
                 <StatusChip status={row.lifecycleStatus} stale={stale} />
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 rounded-sm border border-line bg-base px-2.5 py-2">
+              <div className="feed-decision-strip mt-3 grid grid-cols-2 gap-2 rounded-sm border border-line bg-base px-3 py-2.5">
                 <div>
-                  <div className="font-mono text-[10px] text-ink-faint uppercase">Phase</div>
-                  <div className="text-xs text-ink">{stage.label ?? "Unknown phase"}</div>
+                  <div className="feed-section-label">Phase</div>
+                  <div className="text-sm font-medium text-ink">
+                    {stage.label ?? "Unknown phase"}
+                  </div>
                   <div className="font-mono text-[10px] text-ink-faint uppercase">
                     {stage.kind ?? "unknown"}
                     {stage.maxPerWallet !== null ? ` · max ${stage.maxPerWallet}` : ""}
                   </div>
                 </div>
                 <div>
-                  <div className="font-mono text-[10px] text-ink-faint uppercase">Price</div>
+                  <div className="feed-section-label">Price / start</div>
                   <div className="font-mono text-sm text-acid">{formatPrice(stage.priceWei)}</div>
                   <Countdown
                     iso={stage.startsAt !== null ? coerceDate(stage.startsAt).toISOString() : null}
@@ -187,17 +206,15 @@ export function FeedTable({
                   />
                 </div>
               </div>
-              <div className="mt-2">
-                <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
-                  Tracked wallet WL
-                </div>
+              <div className="mt-3 border-t border-line pt-2.5">
+                <div className="feed-section-label mb-1">Tracked wallet WL</div>
                 <StreamingWalletEligibility
                   eligibility={eligibilityByStage}
                   projectId={row.id}
                   stageId={stage.id}
                 />
               </div>
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-ink-faint">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 font-mono text-[11px] text-ink-muted">
                 <span>{formatSupply(row.minted, row.maxSupply, row.supplyVerified)}</span>
                 <span>{formatActivity(row)}</span>
                 <span className="inline-flex items-center gap-1">
@@ -205,13 +222,13 @@ export function FeedTable({
                   <ConfidenceTag confidence={row.confidence} />
                 </span>
               </div>
-              <div className="mt-3">
+              <div className="mt-3 border-t border-line pt-3">
                 <MintActions
                   projectId={row.id}
                   slug={row.slug}
                   specialMintEnabled={specialMintEnabled}
                   stageId={stage.id}
-                  compact
+                  mobile
                 />
               </div>
             </article>
@@ -219,7 +236,10 @@ export function FeedTable({
         })}
       </div>
       <div className="hidden overflow-x-auto md:block">
-        <table className="hood-table w-full min-w-[900px] text-left text-sm">
+        <table className="hood-table w-full min-w-[1040px] text-left text-sm">
+          <caption className="sr-only">
+            {view} mint opportunities and tracked wallet evidence
+          </caption>
           <thead>
             <tr className="text-[11px] tracking-wide text-ink-faint uppercase">
               <th scope="col" className="px-3 py-2 font-normal">
@@ -264,15 +284,18 @@ export function FeedTable({
                 Date.now() - coerceDate(row.lastSeenAt).getTime() > 3 * 60 * 60 * 1000 &&
                 row.lifecycleStatus !== "ENDED";
               return (
-                <tr key={row.id} className="align-middle">
-                  <td className="px-3 py-2">
+                <tr
+                  key={row.id}
+                  className={`feed-row feed-track-${trackClass(row.lifecycleStatus)} align-middle`}
+                >
+                  <td className="px-3 py-3">
                     <WatchButton
                       projectId={row.id}
                       watched={watchedIds.has(row.id)}
                       enabled={watchEnabled}
                     />
                   </td>
-                  <td className="max-w-[260px] px-3 py-2">
+                  <td className="max-w-[300px] px-3 py-3">
                     <div className="flex items-center gap-2">
                       {row.imageUrl !== null ? (
                         // Remote images restricted to the CSP allowlist with
@@ -287,18 +310,18 @@ export function FeedTable({
                           width={28}
                           height={28}
                           loading="lazy"
-                          className="size-7 rounded-xs border border-line object-cover"
+                          className="size-9 rounded-xs border border-line object-cover"
                         />
                       ) : (
                         <div
-                          className="size-7 rounded-xs border border-line bg-base-overlay"
+                          className="size-9 rounded-xs border border-line bg-base-overlay"
                           aria-hidden
                         />
                       )}
                       <div className="min-w-0">
                         <Link
                           href={`/projects/${row.id}`}
-                          className="block truncate font-medium hover:text-acid"
+                          className="inline-flex min-h-6 max-w-full items-center truncate text-sm font-semibold hover:text-acid"
                         >
                           {row.name}
                         </Link>
@@ -339,7 +362,7 @@ export function FeedTable({
                       </div>
                     </div>
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-3">
                     <div className="flex items-center gap-1">
                       <StatusChip status={row.lifecycleStatus} stale={stale} />
                       {stale ? (
@@ -350,13 +373,13 @@ export function FeedTable({
                       ) : null}
                     </div>
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-3">
                     <div className="flex items-center gap-1">
                       <SourceBadge kind="opensea" />
                       <ConfidenceTag confidence={row.confidence} />
                     </div>
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-3">
                     {stage.label !== null ? (
                       <div>
                         <div className="text-xs">{stage.label}</div>
@@ -369,8 +392,8 @@ export function FeedTable({
                       <span className="text-ink-faint">—</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs">{formatPrice(stage.priceWei)}</td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-3 font-mono text-xs">{formatPrice(stage.priceWei)}</td>
+                  <td className="px-3 py-3">
                     <Countdown
                       iso={(() => {
                         // NEXT/upcoming drops have their start in nextStageStart;
@@ -390,17 +413,17 @@ export function FeedTable({
                       </div>
                     ) : null}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs">
+                  <td className="px-3 py-3 font-mono text-xs">
                     {formatSupply(row.minted, row.maxSupply, row.supplyVerified)}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs">
+                  <td className="px-3 py-3 font-mono text-xs">
                     {formatActivity(row)}
                     <ConcentrationBadge
                       quantity={row.velocity1h}
                       uniqueRecipients={row.uniqueMinters1h}
                     />
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-3">
                     <StreamingWalletEligibility
                       eligibility={eligibilityByStage}
                       projectId={row.id}

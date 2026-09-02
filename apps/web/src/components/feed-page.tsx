@@ -117,9 +117,18 @@ export async function FeedPage({
 
   return (
     <section>
-      <header className="flex items-start justify-between px-4 pt-5 pb-1">
+      <header className="feed-page-header flex items-start justify-between gap-4 px-4 pt-6 pb-1 md:pt-7">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight">{title}</h1>
+          <div className="mb-1.5 flex items-center gap-2">
+            <span className="font-mono text-[10px] tracking-[0.18em] text-cyan uppercase">
+              Radar / {view}
+            </span>
+            <span className="feed-live-mark" aria-hidden />
+            <span className="font-mono text-[10px] tracking-wide text-ink-faint uppercase">
+              live read
+            </span>
+          </div>
+          <h1 className="font-display text-xl font-semibold tracking-tight">{title}</h1>
           <p className="mt-0.5 text-xs text-ink-muted">{description}</p>
         </div>
         <div className="mt-1 flex gap-1.5">
@@ -128,7 +137,7 @@ export async function FeedPage({
               href={`/rss/${view}`}
               title="RSS feed — read this view in any feed reader"
               aria-label="RSS feed"
-              className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
+              className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-ink-faint transition-colors duration-[var(--motion-fast)] hover:border-acid hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
             >
               RSS
             </a>
@@ -138,14 +147,14 @@ export async function FeedPage({
               <a
                 href={exportHref("csv")}
                 title="Export this view as CSV (PRD §7.7)"
-                className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
+                className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-ink-faint transition-colors duration-[var(--motion-fast)] hover:border-acid hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
               >
                 CSV
               </a>
               <a
                 href={exportHref("json")}
                 title="Export this view as JSON (PRD §7.7)"
-                className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
+                className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-ink-faint transition-colors duration-[var(--motion-fast)] hover:border-acid hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
               >
                 JSON
               </a>

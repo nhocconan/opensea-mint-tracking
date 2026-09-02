@@ -33,7 +33,10 @@ export default async function SetupPage() {
           className="mt-6 rounded-sm border border-amber/40 bg-amber/10 px-3 py-2 text-sm text-amber"
         >
           Setup already completed. Sign in at{" "}
-          <a href="/login" className="underline">
+          <a
+            href="/login"
+            className="inline-flex min-h-6 items-center underline focus:outline-none focus:ring-2 focus:ring-acid/50"
+          >
             /login
           </a>
           .

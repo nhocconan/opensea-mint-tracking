@@ -86,9 +86,15 @@ export default async function CalendarPage({
 
   return (
     <div className="px-4 py-5">
-      <header className="mb-4 flex flex-wrap items-end justify-between gap-3">
+      <header className="mb-4 flex flex-wrap items-end justify-between gap-3 pt-1">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight">Minting calendar</h1>
+          <div className="mb-1 flex items-center gap-2">
+            <span className="font-mono text-[10px] tracking-[0.18em] text-cyan uppercase">
+              Radar / calendar
+            </span>
+            <span className="feed-live-mark" aria-hidden />
+          </div>
+          <h1 className="font-display text-xl font-semibold tracking-tight">Minting calendar</h1>
           <p className="mt-1 max-w-3xl text-xs text-ink-muted">
             Every known upcoming phase, grouped by UTC day. Each event shows the phase, verified
             price, tracked-wallet WL verdict, official links and direct mint actions.
@@ -96,7 +102,7 @@ export default async function CalendarPage({
         </div>
         <Link
           href="/next"
-          className="rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-cyan hover:border-cyan"
+          className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-cyan transition-colors duration-[var(--motion-fast)] hover:border-cyan focus:outline-none focus:ring-2 focus:ring-cyan/50"
         >
           Open Next feed →
         </Link>
@@ -149,13 +155,13 @@ export default async function CalendarPage({
                   return (
                     <article
                       key={stage.stageId}
-                      className="rounded-md border border-line bg-base-raised p-3"
+                      className={`feed-card feed-track-${stage.lifecycleStatus.toLowerCase().replace(/_/g, "-")} rounded-md border border-line bg-base-raised p-3.5`}
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="min-w-0">
                           <Link
                             href={`/projects/${stage.projectId}`}
-                            className="font-medium hover:text-acid"
+                            className="inline-flex min-h-6 items-center text-sm font-semibold hover:text-acid"
                           >
                             {stage.projectName}
                           </Link>
@@ -172,10 +178,10 @@ export default async function CalendarPage({
                         </span>
                       </div>
 
-                      <dl className="mt-3 grid gap-2 rounded-sm border border-line bg-base p-2.5 sm:grid-cols-3">
+                      <dl className="feed-decision-strip mt-3 grid gap-2 rounded-sm border border-line bg-base p-3 sm:grid-cols-3">
                         <div>
-                          <dt className="font-mono text-[10px] text-ink-faint uppercase">Phase</dt>
-                          <dd className="text-sm">{stage.stageLabel}</dd>
+                          <dt className="feed-section-label">Phase</dt>
+                          <dd className="text-sm font-medium">{stage.stageLabel}</dd>
                           <dd className="font-mono text-[10px] text-ink-faint uppercase">
                             {stage.stageKind}
                             {stage.stageMaxPerWallet !== null
@@ -184,13 +190,13 @@ export default async function CalendarPage({
                           </dd>
                         </div>
                         <div>
-                          <dt className="font-mono text-[10px] text-ink-faint uppercase">Price</dt>
+                          <dt className="feed-section-label">Price</dt>
                           <dd className="font-mono text-sm text-acid">
                             {formatPrice(stage.stagePriceWei)}
                           </dd>
                         </div>
                         <div>
-                          <dt className="font-mono text-[10px] text-ink-faint uppercase">Starts</dt>
+                          <dt className="feed-section-label">Starts</dt>
                           <dd className="font-mono text-xs" title={formatDateTimeUtc(start)}>
                             {formatDateTimeLocal(start)}
                           </dd>
@@ -200,10 +206,8 @@ export default async function CalendarPage({
                         </div>
                       </dl>
 
-                      <div className="mt-2">
-                        <div className="mb-1 font-mono text-[10px] text-ink-faint uppercase">
-                          Tracked wallet WL
-                        </div>
+                      <div className="mt-3 border-t border-line pt-2.5">
+                        <div className="feed-section-label mb-1">Tracked wallet WL</div>
                         <Suspense
                           fallback={
                             <span role="status" className="font-mono text-[10px] text-ink-faint">
@@ -225,6 +229,7 @@ export default async function CalendarPage({
                           specialMintEnabled={specialMintEnabled}
                           stageId={stage.stageId}
                           compact
+                          mobile
                         />
                         <span className="inline-flex items-center gap-1">
                           <SourceBadge kind="opensea" />

@@ -69,7 +69,7 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
           setTimeout(() => setCopied(false), 1_500);
         });
       }}
-      className="inline-flex size-6 flex-none items-center justify-center rounded-xs text-ink-faint transition-colors hover:text-acid"
+      className="inline-flex size-6 flex-none items-center justify-center rounded-xs text-ink-faint transition-colors hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
     >
       {copied ? <Check className="size-3" aria-hidden /> : <Copy className="size-3" aria-hidden />}
     </button>
@@ -111,7 +111,7 @@ export function WatchButton({
           setIsWatched(next);
         });
       }}
-      className="inline-flex size-6 items-center justify-center rounded-xs disabled:opacity-50"
+      className="inline-flex size-11 items-center justify-center rounded-xs disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-acid/50 md:size-6"
     >
       {pending ? (
         <Loader2 className="size-4 animate-spin text-ink-faint" aria-hidden />
