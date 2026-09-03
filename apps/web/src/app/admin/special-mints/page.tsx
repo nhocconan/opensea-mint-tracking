@@ -2,6 +2,7 @@ import {
   type ExecutionAttempt,
   getProjectDetail,
   latestAttemptPerPlan,
+  listMintPlanHistory,
   listMintPlansForProject,
   listWallets,
 } from "@hoodmint/db";
@@ -9,7 +10,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Countdown } from "@/components/feed-parts.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeGmt7, formatDateTimeUtc, shortAddress, toDate } from "@/lib/format.ts";
+import { formatDateTimeGmt7, shortAddress, toDate } from "@/lib/format.ts";
 import { requirePage } from "@/lib/session.ts";
 import { DeleteDraftPlanControl, DisarmControl } from "../execution/mint-plan-controls.tsx";
 import { ArmAllControl } from "./arm-all-control.tsx";
@@ -51,6 +52,7 @@ export default async function AdminSpecialMintsPage({
   await requirePage("execution:configure");
   const params = await searchParams;
   const projectId = isUuidParam(params.projectId) ? params.projectId : null;
+  const requestedStageId = isUuidParam(params.stageId) ? params.stageId : null;
   const { db, config } = container();
 
   const [detail, walletRows] = await Promise.all([
@@ -61,16 +63,25 @@ export default async function AdminSpecialMintsPage({
   ]);
   const managedWallets: ManagedWalletOption[] = walletRows
     .filter((w) => w.hasSigningKey)
-    .map((w) => ({ id: w.id, address: w.address, label: w.label }));
+    .map((w) => ({
+      id: w.id,
+      address: w.address,
+      label: w.label,
+      nativeBalanceWei: w.nativeBalanceWei,
+      balanceCheckedAt:
+        w.balanceCheckedAt === null ? null : toDate(w.balanceCheckedAt).toISOString(),
+    }));
 
   const plans =
     detail === undefined
       ? []
       : await listMintPlansForProject(db, detail.project.id).catch(() => []);
-  const attempts = await latestAttemptPerPlan(
-    db,
-    plans.map((p) => p.id),
-  ).catch(() => new Map<string, ExecutionAttempt>());
+  // Durable history across every collection: what fired, what minted, what
+  // failed and why — plans are never deleted once armed.
+  const history = await listMintPlanHistory(db, 200).catch(() => []);
+  const attempts = await latestAttemptPerPlan(db, [
+    ...new Set([...plans.map((p) => p.id), ...history.map((p) => p.id)]),
+  ]).catch(() => new Map<string, ExecutionAttempt>());
 
   const stages: StageOption[] =
     detail === undefined
@@ -84,6 +95,19 @@ export default async function AdminSpecialMintsPage({
           endsAt: s.endsAt === null ? null : toDate(s.endsAt).toISOString(),
           maxPerWallet: s.maxPerWallet,
         }));
+
+  // Latest supply snapshot (the worker's on-chain sweep writes one every
+  // 2 min for LIVE/NEXT drops). Sold out = verified minted >= max.
+  const latestSupply =
+    detail === undefined
+      ? undefined
+      : [...detail.supply].sort(
+          (a, b) => toDate(b.observedAt).getTime() - toDate(a.observedAt).getTime(),
+        )[0];
+  const soldOut =
+    latestSupply?.verified === true &&
+    latestSupply.maxSupply !== null &&
+    latestSupply.minted >= latestSupply.maxSupply;
 
   const draftPlans = plans
     .filter((p) => p.status === "draft")
@@ -143,10 +167,30 @@ export default async function AdminSpecialMintsPage({
                 <dt className="text-[10px] text-ink-faint uppercase">Chain</dt>
                 <dd className="font-mono text-ink-muted">{detail.project.chainId}</dd>
               </div>
+              <div>
+                <dt className="text-[10px] text-ink-faint uppercase">Supply (on-chain)</dt>
+                <dd className={`font-mono ${soldOut ? "text-magenta" : "text-ink-muted"}`}>
+                  {latestSupply === undefined
+                    ? "not read yet"
+                    : `${latestSupply.minted.toString()} / ${latestSupply.maxSupply?.toString() ?? "?"}`}
+                  {soldOut ? " · SOLD OUT" : ""}
+                </dd>
+              </div>
             </dl>
+            {soldOut ? (
+              <p className="mt-2 rounded-sm border border-magenta/40 bg-magenta/10 px-2 py-1 text-xs text-magenta">
+                Every token is already minted on-chain — later phases have nothing left to sell.
+                Arming a plan here will fail with “minted out”.
+              </p>
+            ) : null}
           </section>
 
-          <SpecialMintForm projectId={detail.project.id} stages={stages} wallets={managedWallets} />
+          <SpecialMintForm
+            projectId={detail.project.id}
+            stages={stages}
+            wallets={managedWallets}
+            initialStageId={requestedStageId}
+          />
 
           {draftPlans.length > 0 ? <ArmAllControl plans={draftPlans} /> : null}
 
@@ -168,7 +212,7 @@ export default async function AdminSpecialMintsPage({
                       Status
                     </th>
                     <th scope="col" className="py-1 font-normal">
-                      Fires at (GMT+7 / UTC)
+                      Fires at (GMT+7)
                     </th>
                     <th scope="col" className="py-1 font-normal">
                       In
@@ -219,7 +263,6 @@ export default async function AdminSpecialMintsPage({
                         <td className="py-1 text-ink-muted">
                           {formatDateTimeGmt7(fireIso)}
                           <span className="block text-[10px] text-ink-faint">
-                            {formatDateTimeUtc(fireIso)}
                             {p.fireAt !== null
                               ? " · manual"
                               : p.stageLabel !== null
@@ -231,7 +274,7 @@ export default async function AdminSpecialMintsPage({
                           <Countdown iso={fireIso} label="Fire" />
                         </td>
                         <td className="py-1 text-ink-faint">
-                          {p.armedUntil === null ? "—" : formatDateTimeUtc(toDate(p.armedUntil))}
+                          {p.armedUntil === null ? "—" : formatDateTimeGmt7(toDate(p.armedUntil))}
                         </td>
                         <td className={p.presigned ? "py-1 text-acid" : "py-1 text-ink-faint"}>
                           {p.presigned ? "yes" : "no"}
@@ -267,6 +310,101 @@ export default async function AdminSpecialMintsPage({
           </section>
         </>
       )}
+
+      <section className="rounded-md border border-line bg-base-raised p-4">
+        <h2 className="mb-1 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
+          History — every special mint, newest first
+        </h2>
+        <p className="mb-2 text-[11px] text-ink-faint">
+          Outcome = the plan's final status plus its last execution attempt (tx hash on success,
+          error on failure). Plans stay here forever once armed; drafts disappear if deleted.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="text-[10px] text-ink-faint uppercase">
+                <th scope="col" className="py-1 font-normal">
+                  Collection
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Phase
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Wallet
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Qty
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Fired at (GMT+7)
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Outcome
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Detail
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((p) => {
+                const attempt = attempts.get(p.id);
+                const fireIso =
+                  p.fireAt !== null
+                    ? toDate(p.fireAt).toISOString()
+                    : p.stageStartsAt !== null
+                      ? toDate(p.stageStartsAt).toISOString()
+                      : null;
+                const success = p.status === "executed" && attempt?.txHash != null;
+                const failure = p.status === "failed" || p.status === "expired";
+                return (
+                  <tr key={p.id} className="border-t border-line/60">
+                    <td className="py-1">
+                      <Link
+                        href={`/admin/special-mints?projectId=${p.projectId}`}
+                        className="text-ink hover:text-cyan"
+                      >
+                        {p.projectName}
+                      </Link>
+                    </td>
+                    <td className="py-1 text-ink-muted">
+                      {p.stageLabel ?? (p.fireAt !== null ? "manual time" : "—")}
+                    </td>
+                    <td className="py-1 font-mono text-ink-muted">
+                      {p.walletLabel ?? shortAddress(p.walletAddress)}
+                    </td>
+                    <td className="py-1">{p.quantity}</td>
+                    <td className="py-1 text-ink-muted">
+                      {fireIso === null ? "—" : formatDateTimeGmt7(fireIso)}
+                    </td>
+                    <td
+                      className={`py-1 font-mono ${
+                        success ? "text-acid" : failure ? "text-magenta" : "text-ink-muted"
+                      }`}
+                    >
+                      {success ? "MINTED" : failure ? p.status.toUpperCase() : p.status}
+                    </td>
+                    <td className="py-1 font-mono text-[11px] text-ink-faint">
+                      {attempt === undefined
+                        ? "—"
+                        : attempt.txHash !== null
+                          ? shortAddress(attempt.txHash)
+                          : (attempt.errorCode ?? attempt.status)}
+                    </td>
+                  </tr>
+                );
+              })}
+              {history.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-2 text-ink-faint">
+                    No special mints yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }

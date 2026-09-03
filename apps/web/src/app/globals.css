@@ -57,6 +57,88 @@ body {
   background: color-mix(in oklab, var(--color-base-overlay) 65%, transparent);
 }
 
+/* The feed is a flight strip: one quiet surface, one data-led track marker.
+   The marker is redundant with the text status, but lets an operator scan the
+   row rhythm without turning the page into a wall of neon chips. */
+.feed-row {
+  box-shadow: inset 2px 0 var(--feed-track-color, var(--color-line-strong));
+}
+.feed-card {
+  position: relative;
+  overflow: hidden;
+}
+.feed-card::before {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 2px;
+  background: var(--feed-track-color, var(--color-line-strong));
+  content: "";
+}
+.feed-track-live {
+  --feed-track-color: var(--color-acid);
+}
+.feed-track-next,
+.feed-track-new {
+  --feed-track-color: var(--color-cyan);
+}
+.feed-track-ended,
+.feed-track-unknown {
+  --feed-track-color: var(--color-line-strong);
+}
+.feed-track-sold-out,
+.feed-track-paused,
+.feed-track-stale {
+  --feed-track-color: var(--color-amber);
+}
+.feed-section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+}
+.feed-live-mark {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-acid);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-acid) 12%, transparent);
+}
+.feed-filter-panel {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-base-raised);
+  transition: opacity var(--motion-fast) ease;
+}
+.feed-filter-panel.is-pending {
+  opacity: 0.68;
+}
+.feed-filter-panel select {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-ink-faint) 50%),
+    linear-gradient(135deg, var(--color-ink-faint) 50%, transparent 50%);
+  background-position:
+    calc(100% - 13px) 50%,
+    calc(100% - 8px) 50%;
+  background-repeat: no-repeat;
+  background-size:
+    5px 5px,
+    5px 5px;
+  padding-inline-end: 1.75rem;
+}
+
+@media (max-width: 767px) {
+  .feed-filter-panel {
+    margin-block: 0.75rem;
+  }
+  .feed-card {
+    box-shadow: 0 1px 0 color-mix(in oklab, var(--color-line) 70%, transparent);
+  }
+}
+
 /* Skeletons preserve layout (PRD §5.5) — shimmer disabled under reduced
    motion via the tokens.css global block. */
 .hood-skeleton {

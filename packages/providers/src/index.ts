@@ -1,3 +1,4 @@
+export * from "./chain/balance.ts";
 export * from "./chain/broadcast.ts";
 export * from "./chain/gas.ts";
 export * from "./chain/mint-executor-artifact.ts";

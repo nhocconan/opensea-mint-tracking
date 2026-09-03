@@ -32,7 +32,9 @@ export type ChipTone = "ok" | "info" | "warn" | "crit" | "neutral";
 const TONE_CLASSES: Record<ChipTone, string> = {
   ok: "border-acid/40 text-acid bg-acid/10",
   info: "border-cyan/40 text-cyan bg-cyan/10",
-  warn: "border-amber/40 text-amber bg-amber/10",
+  // A solid surface keeps the darker light-theme amber text AA-safe while
+  // retaining the amber border/text signal in both themes.
+  warn: "border-amber/40 text-amber bg-base-raised",
   crit: "border-magenta/40 text-magenta bg-magenta/10",
   neutral: "border-line-strong text-ink-muted bg-base-raised",
 };

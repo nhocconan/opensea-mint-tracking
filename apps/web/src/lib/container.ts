@@ -22,7 +22,10 @@ const globalForContainer = globalThis as unknown as {
 export function container(): Container {
   if (globalForContainer.__hoodmintContainer === undefined) {
     const config = loadEnv();
-    const db = getDb(config.DATABASE_URL);
+    // Keep a deliberate per-process budget. With one web + one worker + the
+    // dedicated LISTEN client, steady-state capacity stays far below
+    // PostgreSQL's connection ceiling even during bursts and deploy overlap.
+    const db = getDb(config.DATABASE_URL, { max: 6, applicationName: "hoodmint-web" });
     const auth = createAuth({
       db,
       secret: config.BETTER_AUTH_SECRET,

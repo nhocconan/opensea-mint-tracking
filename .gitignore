@@ -9,6 +9,7 @@
 compose.prod.yaml
 docker-compose.prod.yml
 traefik/acme.json
+secrets/
 traefik/*.local.*
 letsencrypt/
 .state/
@@ -25,3 +26,20 @@ test-results/
 .DS_Store
 *.log
 .gstack/
+.env.bak*
+.env.*.bak
+
+# throwaway in-network probe scripts
+apps/worker/__*.mts
+
+# backups contain secrets (encrypted) — never in git
+backups/
+restored-config/
+
+# Server-local ingress stack (Traefik) — real ACME account data + operator
+# email live here; created on the host, never tracked.
+infra/ingress/.env
+
+# Host-specific hardening script — contains admin source IPs.
+infra/host/
+infra/ingress/

@@ -1,4 +1,4 @@
-.PHONY: help up down logs ps test lint typecheck verify format migrate migration seed reset-dev backup restore smoke bootstrap token vapid-keys start-dev stop-dev start-prod stop-prod env-setup
+.PHONY: help up down logs ps test lint typecheck verify format migrate migration seed reset-dev backup restore backup-test smoke bootstrap token vapid-keys wallet-keys start-dev stop-dev start-prod stop-prod env-setup
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -62,12 +62,15 @@ reset-dev: ## Drop volumes and restart clean (destructive: dev data only)
 	docker compose down -v || true
 	docker compose up --build -d
 
-backup: ## Dump PostgreSQL to backups/ (timestamped)
+backup: ## Encrypted full backup (PostgreSQL + .env + compose + secrets) to backups/, verified
 	@bash scripts/backup.sh
 
-restore: ## Restore PostgreSQL from backups/<file>: make restore file=...
-	@if [ -z "$(file)" ]; then echo "usage: make restore file=backups/xxx.sql.gz"; exit 2; fi
-	@bash scripts/restore.sh "$(file)"
+restore: ## Restore a backup (safety dump, stop web/worker, pg_restore, row-count verify): make restore file=backups/xxx.tar.zst.gpg
+	@if [ -z "$(file)" ]; then echo "usage: make restore file=backups/hoodmint-<ts>.tar.zst.gpg [args='--dry-run|--config|--yes']"; exit 2; fi
+	@bash scripts/restore.sh "$(file)" $(args)
+
+backup-test: ## Rehearse backup+restore end-to-end against a throwaway postgres (prod is only read)
+	@bash scripts/backup-restore-test.sh
 
 smoke: ## Clean-start Docker smoke test: boot, wait healthy, probe endpoints
 	@bash scripts/smoke.sh
@@ -80,3 +83,6 @@ token-prod: ## Print a one-time /setup bootstrap token for the DOCKERIZED prod s
 
 vapid-keys: ## Generate a VAPID keypair for the Web Push alert channel (run once)
 	pnpm vapid-keys
+
+wallet-keys: ## Generate the X25519 keypair that seals managed minting keys (worker-only decrypt)
+	pnpm wallet-keys

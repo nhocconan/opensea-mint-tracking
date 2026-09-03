@@ -26,7 +26,7 @@ export function ThemeToggle({ initialTheme }: { initialTheme: Theme }) {
       aria-pressed={theme === "light"}
       aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
       title={theme === "dark" ? "Light theme" : "Dark theme"}
-      className="inline-flex items-center gap-1.5 rounded-sm px-2 py-1.5 text-xs text-ink-muted transition-colors duration-[var(--motion-fast)] hover:bg-base-overlay hover:text-ink"
+      className="inline-flex min-h-11 items-center gap-1.5 rounded-sm px-2 py-1.5 text-xs text-ink-muted transition-colors duration-[var(--motion-fast)] hover:bg-base-overlay hover:text-ink focus:outline-none focus:ring-2 focus:ring-acid/50"
     >
       {theme === "dark" ? (
         <Sun className="size-3.5" aria-hidden />

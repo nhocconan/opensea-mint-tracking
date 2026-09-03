@@ -1,13 +1,16 @@
 import { can } from "@hoodmint/auth";
 import {
-  bestEligibilityByProject,
+  type FeedSocialFilter,
   type FeedSort,
   type FeedView,
+  type FeedWlFilter,
   queryFeed,
+  trackedWalletEligibilityForStages,
   watchedProjectIds,
 } from "@hoodmint/db";
 import { Suspense } from "react";
 import { container } from "@/lib/container.ts";
+import { decisionStage } from "@/lib/mint-presentation.ts";
 import { getSessionUser } from "@/lib/session.ts";
 import { FeedTable } from "./feed-table.tsx";
 import { CursorPager, FilterBar } from "./filters.tsx";
@@ -16,6 +19,8 @@ export interface FeedSearchParams {
   readonly q?: string;
   readonly sort?: string;
   readonly price?: string;
+  readonly wl?: string;
+  readonly social?: string;
   readonly confidence?: string;
   readonly cursor?: string;
 }
@@ -53,9 +58,16 @@ export async function FeedPage({
     : undefined;
   const price =
     searchParams.price === "free" || searchParams.price === "paid" ? searchParams.price : undefined;
+  const wl: FeedWlFilter | undefined =
+    searchParams.wl === "hit" || searchParams.wl === "none" ? searchParams.wl : undefined;
+  const social: FeedSocialFilter | undefined = ["twitter", "website", "either", "both"].includes(
+    searchParams.social ?? "",
+  )
+    ? (searchParams.social as FeedSocialFilter)
+    : undefined;
 
   // queryFeed and watchedProjectIds are independent — run them together.
-  // bestEligibilityByProject waits on queryFeed's result on purpose: it
+  // Wallet eligibility waits on queryFeed's result on purpose: it
   // scopes the eligibility scan to just this page's project ids instead of
   // every eligibility row in the system (see the doc comment on
   // bestEligibilityByProject — this was a real load-test-confirmed
@@ -67,21 +79,56 @@ export async function FeedPage({
       search: searchParams.q,
       sort,
       price,
+      wl,
+      social,
       cursor: searchParams.cursor,
       limit: 50,
     }),
     user !== null ? watchedProjectIds(db, user.id) : Promise.resolve(new Set<string>()),
   ]);
-  const eligibility = await bestEligibilityByProject(
-    db,
-    page.rows.map((row) => row.id),
+  const eligibilityScopes = page.rows.map((row) => ({
+    projectId: row.id,
+    stageId: decisionStage(row).id,
+  }));
+  // Start the snapshot read but do not hold the feed shell for it. Each WL
+  // cell below is a Suspense boundary, so rows appear as soon as the feed
+  // query completes and resolved wallet chips stream in independently.
+  const eligibility = trackedWalletEligibilityForStages(db, eligibilityScopes).catch(
+    () => new Map(),
   );
+
+  const exportQuery = new URLSearchParams();
+  for (const [key, value] of Object.entries({
+    q: searchParams.q,
+    sort,
+    price,
+    wl,
+    social,
+  })) {
+    if (value !== undefined && value !== "") {
+      exportQuery.set(key, value);
+    }
+  }
+  const exportHref = (format: "csv" | "json"): string => {
+    const params = new URLSearchParams(exportQuery);
+    params.set("format", format);
+    return `/api/v1/exports/${view}?${params.toString()}`;
+  };
 
   return (
     <section>
-      <header className="flex items-start justify-between px-4 pt-5 pb-1">
+      <header className="feed-page-header flex items-start justify-between gap-4 px-4 pt-6 pb-1 md:pt-7">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight">{title}</h1>
+          <div className="mb-1.5 flex items-center gap-2">
+            <span className="font-mono text-[10px] tracking-[0.18em] text-cyan uppercase">
+              Radar / {view}
+            </span>
+            <span className="feed-live-mark" aria-hidden />
+            <span className="font-mono text-[10px] tracking-wide text-ink-faint uppercase">
+              live read
+            </span>
+          </div>
+          <h1 className="font-display text-xl font-semibold tracking-tight">{title}</h1>
           <p className="mt-0.5 text-xs text-ink-muted">{description}</p>
         </div>
         <div className="mt-1 flex gap-1.5">
@@ -90,7 +137,7 @@ export async function FeedPage({
               href={`/rss/${view}`}
               title="RSS feed — read this view in any feed reader"
               aria-label="RSS feed"
-              className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
+              className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-ink-faint transition-colors duration-[var(--motion-fast)] hover:border-acid hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
             >
               RSS
             </a>
@@ -98,16 +145,16 @@ export async function FeedPage({
           {can(user?.role, "exports:read") ? (
             <>
               <a
-                href={`/api/v1/exports/${view}?format=csv`}
+                href={exportHref("csv")}
                 title="Export this view as CSV (PRD §7.7)"
-                className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
+                className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-ink-faint transition-colors duration-[var(--motion-fast)] hover:border-acid hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
               >
                 CSV
               </a>
               <a
-                href={`/api/v1/exports/${view}?format=json`}
+                href={exportHref("json")}
                 title="Export this view as JSON (PRD §7.7)"
-                className="rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-faint hover:border-acid hover:text-acid"
+                className="inline-flex min-h-8 items-center rounded-xs border border-line px-2 py-1 font-mono text-[10px] text-ink-faint transition-colors duration-[var(--motion-fast)] hover:border-acid hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
               >
                 JSON
               </a>
@@ -134,9 +181,10 @@ export async function FeedPage({
       >
         <FeedTable
           rows={page.rows}
-          eligibilityByProject={eligibility}
+          eligibilityByStage={eligibility}
           watchedIds={watched}
           watchEnabled={user !== null}
+          specialMintEnabled={can(user?.role, "execution:configure")}
           view={view}
         />
       </Suspense>

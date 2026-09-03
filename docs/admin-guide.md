@@ -3,7 +3,7 @@
 Everything you do day-to-day lives under **`/admin`** (the Admin CP). This is
 the runbook for first login, configuration, tracking, and minting.
 
-Live site: `https://opensea-tools.dic.app` · Admin CP: `https://opensea-tools.dic.app/admin`
+Live site: `https://osmint.dic.app` · Admin CP: `https://osmint.dic.app/admin`
 
 ---
 
@@ -64,11 +64,27 @@ Preferred path is encrypted-at-rest in the app, not an env file:
 > gas. Minted NFTs land in the wallet that mints (or a pinned recipient), never
 > exposing your main funds.
 
-You can create one mint plan across **many** managed wallets at once (see §5).
+You can create one mint plan across **many** managed wallets at once (see §6).
 
 ---
 
-## 4. X / Grok hype & risk signals
+## 4. Finding mints you can enter
+
+All multi-mint feeds and the Calendar keep their filters in the URL, so a filtered view survives
+refresh and can be bookmarked.
+
+- **WL → WL hit:** shows phases where at least one enabled tracked wallet has a confirmed
+  restricted-stage hit for that exact phase.
+- **WL → No WL hit:** shows phases without a confirmed hit. Check the visible wallet chips before
+  deciding: `UNKNOWN` and `AUTH NEEDED` are unresolved, not confirmed rejections.
+- **Links:** require X, a website, either one, or both. Missing links are excluded server-side.
+- **Clear filters:** removes search, price, WL, and link filters while preserving the selected sort.
+
+Public-only phases never count as WL.
+
+---
+
+## 5. X / Grok hype & risk signals
 
 **Admin → Signals.** Uses your **X Premium+ / SuperGrok** subscription via xAI
 Grok OAuth — no separate X API billing.
@@ -81,7 +97,7 @@ Grok OAuth — no separate X API billing.
 
 ---
 
-## 5. Minting — plans, arming, and going live
+## 6. Minting — plans, arming, and going live
 
 **Admin → Execution.**
 
@@ -103,7 +119,7 @@ and the delegated `custom_executor` contract path.
 
 ---
 
-## 6. Alerts, audit, system
+## 7. Alerts, audit, system
 
 - **Admin → Alerts:** Telegram / webhook / Discord / Web Push, with a test
   button. `stage_starting` alerts fire at configurable lead windows.

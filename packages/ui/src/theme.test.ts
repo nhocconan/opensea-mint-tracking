@@ -51,10 +51,6 @@ describe("theme maps (DESIGN.md roles)", () => {
 
   it("light and dark disagree on every documented color token", () => {
     for (const key of COLOR_TOKEN_KEYS) {
-      if (key === "--color-ink-faint") {
-        // Shared meta gray is allowed; every surface/brand token must flip.
-        continue;
-      }
       expect(LIGHT_TOKENS[key], key).not.toBe(DARK_TOKENS[key]);
     }
   });
@@ -131,6 +127,15 @@ describe("tokens.css stays locked to the JS maps", () => {
     expect(css).toContain(LIGHT_TOKENS["--color-acid"]);
     for (const key of COLOR_TOKEN_KEYS) {
       expect(css).toContain(key);
+    }
+
+    const darkBlock = css.match(/:root,\s*:root\[data-theme="dark"\]\s*\{([^}]+)\}/)?.[1];
+    const lightBlock = css.match(/:root\[data-theme="light"\]\s*\{([^}]+)\}/)?.[1];
+    expect(darkBlock).toBeDefined();
+    expect(lightBlock).toBeDefined();
+    for (const key of COLOR_TOKEN_KEYS) {
+      expect(darkBlock, `dark CSS ${key}`).toContain(`${key}: ${DARK_TOKENS[key]}`);
+      expect(lightBlock, `light CSS ${key}`).toContain(`${key}: ${LIGHT_TOKENS[key]}`);
     }
   });
 });

@@ -5,7 +5,7 @@
  * refreshes for new/stale projects. Idempotent under at-least-once delivery:
  * all writes are upserts keyed by identity/alias.
  */
-import { freshnessBucket, isAppError } from "@hoodmint/core";
+import { freshnessBucket, isAppError, notADropSettingKey } from "@hoodmint/core";
 import {
   ensureProvider,
   finishScanRun,
@@ -58,6 +58,17 @@ export interface DiscoveryOutcome {
   readonly malformed: number;
   readonly ok: boolean;
   readonly errorCode?: string;
+}
+
+async function invalidateRejectedInstantKey(ctx: WorkerContext): Promise<boolean> {
+  const { db, config } = ctx;
+  // Credential resolution can itself fail while instant-key issuance is
+  // parked. Keep cleanup best-effort so an AuthRequired outcome does not
+  // escape the provider catch and trigger BullMQ's short generic retries.
+  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY).catch(
+    () => null,
+  );
+  return key === null ? false : invalidateInstantKeyOnAuthFailure(db, key).catch(() => false);
 }
 
 export async function runDiscoveryCycle(
@@ -188,10 +199,7 @@ export async function runDiscoveryCycle(
     if (errorCode === "AuthRequired") {
       // A dead free instant key never rotates on its own (its expires_at is
       // still in the future) — drop it so the next cycle bootstraps a fresh one.
-      const rotated = await invalidateInstantKeyOnAuthFailure(
-        db,
-        await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY),
-      ).catch(() => false);
+      const rotated = await invalidateRejectedInstantKey(ctx);
       if (rotated) {
         log.warn(
           { feedType },
@@ -327,10 +335,7 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
     metrics().inc("hoodmint_provider_errors_total", { provider: "opensea", category: errorCode });
     log.error({ err: error, feedType, errCode: errorCode }, "collection discovery failed");
     if (errorCode === "AuthRequired") {
-      await invalidateInstantKeyOnAuthFailure(
-        db,
-        await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY),
-      ).catch(() => false);
+      await invalidateRejectedInstantKey(ctx);
     }
     return { feedType, found: 0, created: 0, malformed: 0, ok: false, errorCode };
   }
@@ -412,7 +417,16 @@ export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promis
         log.info({ slug }, "detail refresh: drop no longer on OpenSea (404) — marked delisted");
         return;
       }
-      log.debug({ slug }, "detail refresh: slug is not a drop (404), leaving as collection");
+      // Remember the answer so Admin → Special mints can say "this is an
+      // OpenSea collection, not an OpenSea Drop" instead of "fetching, retry
+      // in 30s" forever (yolkies-nft, 2026-09-02). 24h TTL is read-side.
+      await setSetting(db, notADropSettingKey(slug), { at: new Date().toISOString() }).catch(
+        () => undefined,
+      );
+      log.info(
+        { slug },
+        "detail refresh: slug is not an OpenSea drop (404), leaving as collection",
+      );
       return;
     }
     throw error;

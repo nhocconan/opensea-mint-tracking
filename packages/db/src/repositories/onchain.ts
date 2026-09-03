@@ -10,7 +10,7 @@ import {
 } from "@hoodmint/core";
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
-import { holderSnapshots, mintEvents, projects } from "../schema.ts";
+import { holderSnapshots, mintActivitySnapshots, mintEvents, projects } from "../schema.ts";
 
 export interface MintEventInsert {
   readonly chainId: number;
@@ -143,6 +143,49 @@ export async function refreshAggregates(db: Db, projectId: string): Promise<void
     on conflict (project_id, bucket_start, bucket_size)
       do update set quantity = excluded.quantity, unique_recipients = excluded.unique_recipients, updated_at = now()
   `);
+  await refreshActivitySnapshot(db, projectId);
+}
+
+/** Exact rolling-one-hour snapshot consumed by feed and automation reads. */
+export async function refreshActivitySnapshot(db: Db, projectId: string): Promise<void> {
+  await db.execute(sql`
+    insert into mint_activity_snapshots
+      (project_id, window_started_at, computed_at, quantity, unique_recipients)
+    select ${projectId}::uuid,
+           now() - interval '1 hour',
+           now(),
+           coalesce(sum(quantity), 0)::int,
+           count(distinct recipient)::int
+      from mint_events
+     where project_id = ${projectId}
+       and observed_at > now() - interval '1 hour'
+    on conflict (project_id) do update set
+      window_started_at = excluded.window_started_at,
+      computed_at = excluded.computed_at,
+      quantity = excluded.quantity,
+      unique_recipients = excluded.unique_recipients
+  `);
+}
+
+/**
+ * Refresh active projects even when no new event arrives, so a rolling
+ * window naturally decays to zero. Recently-computed snapshots get one more
+ * hour of refreshes after a project leaves LIVE, preserving truthful recent
+ * activity on Latest/All without scanning every historical project.
+ */
+export async function refreshLiveActivitySnapshots(db: Db): Promise<number> {
+  const rows = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .leftJoin(mintActivitySnapshots, eq(mintActivitySnapshots.projectId, projects.id))
+    .where(
+      sql`${projects.lifecycleStatus} = 'LIVE'
+        or ${mintActivitySnapshots.computedAt} > now() - interval '1 hour'`,
+    );
+  for (const row of rows) {
+    await refreshActivitySnapshot(db, row.id);
+  }
+  return rows.length;
 }
 
 /**

@@ -6,6 +6,7 @@
  * `process.env` directly, so an invalid deployment fails loudly at boot with
  * a complete list of problems instead of misbehaving at runtime.
  */
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 
 const bool = z
@@ -28,6 +29,23 @@ const base64Key32 = z
       return false;
     }
   }, "must be base64 encoding exactly 32 bytes (run: make bootstrap)");
+
+/** Same as base64Key32 but a blank template value means "unset". */
+const optionalBase64Key32 = z
+  .string()
+  .trim()
+  .transform((v) => (v === "" ? undefined : v))
+  .refine((v) => {
+    if (v === undefined) {
+      return true;
+    }
+    try {
+      return Buffer.from(v, "base64").length === 32;
+    } catch {
+      return false;
+    }
+  }, "must be base64 encoding exactly 32 bytes (run: make wallet-keys)")
+  .optional();
 
 /**
  * Optional EVM address. A blank value (`FOO=` in a .env template) means
@@ -61,6 +79,13 @@ export const envSchema = z.object({
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
 
   APP_ENCRYPTION_KEY: base64Key32,
+  /** Managed minting keys (2026-08-28 hardening): X25519 recipient keypair
+   *  (`make wallet-keys`). The web app gets ONLY the public half and seals
+   *  imported minting keys to it; the worker gets the private half and is
+   *  the only process that can decrypt. Unset → imports fall back to the
+   *  symmetric APP_ENCRYPTION_KEY (legacy) and the wallets page says so. */
+  WALLET_KEY_PUBLIC_KEY: optionalBase64Key32,
+  WALLET_KEY_PRIVATE_KEY: optionalBase64Key32,
   BETTER_AUTH_SECRET: z.string().trim().min(32),
 
   DATABASE_URL: z.string().trim().startsWith("postgres://", "must be a postgres:// URL"),
@@ -144,6 +169,17 @@ export const envSchema = z.object({
   /** Keep re-firing this many ms past stage open before giving up — the
    *  "chạy liên tục để compete" burst on a FIFO chain. */
   MINT_FIRE_CONTINUE_MS: positiveInt.default(4_000),
+  /** Signature burst (signed/allowlist stages): OpenSea only issues the
+   *  mintSigned signature once ITS clock flips the stage active, and the
+   *  whole FCFS supply goes in the first ~2-3s (Goat Street 2026-08-28:
+   *  1,331 mints in 26 blocks). From T-1s the fire path polls `/mint` in
+   *  parallel across every Developer key at this cadence, unpaced, and
+   *  broadcasts the first signature it gets — for up to this many ms. */
+  MINT_SIGNATURE_BURST_MS: positiveInt.default(12_000),
+  MINT_SIGNATURE_BURST_CADENCE_MS: positiveInt.default(80),
+  /** At T-0 skip eth_call simulation for managed fires (one RPC round-trip
+   *  saved; the sequencer is the judge; a revert costs only gas). */
+  MINT_FIRE_SKIP_SIMULATION: bool.default(true),
   /** ADR 0009 fast path (managed_wallet_key): pre-sign the raw tx this far
    *  before the clock-corrected stage open so the fire instant is a single
    *  sendRawTransaction. 45s covers nonce/fee fetch + sign with margin. */
@@ -211,11 +247,39 @@ export interface LoadEnvOptions {
 }
 
 /**
+ * Root secrets that may be supplied as `<NAME>_FILE=/path` instead of inline
+ * (Docker/Compose `secrets:`, a tmpfs mount, or a secret-manager sidecar), so
+ * the value never sits in `.env` or in `docker inspect` output. The file's
+ * trimmed contents win only when the inline variable is unset/blank.
+ */
+export const FILE_BACKED_SECRETS = [
+  "APP_ENCRYPTION_KEY",
+  "WALLET_KEY_PRIVATE_KEY",
+  "WALLET_KEY_PUBLIC_KEY",
+  "BETTER_AUTH_SECRET",
+] as const;
+
+export function resolveFileSecrets(
+  source: Record<string, string | undefined>,
+  readFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = { ...source };
+  for (const name of FILE_BACKED_SECRETS) {
+    const path = source[`${name}_FILE`]?.trim();
+    const inline = source[name]?.trim();
+    if (path !== undefined && path !== "" && (inline === undefined || inline === "")) {
+      out[name] = readFile(path).trim();
+    }
+  }
+  return out;
+}
+
+/**
  * Parse and validate environment configuration.
  * Throws {@link ConfigError} listing every problem at once.
  */
 export function loadEnv(options: LoadEnvOptions = {}): AppConfig {
-  const source = options.source ?? process.env;
+  const source = resolveFileSecrets(options.source ?? process.env);
   const result = envSchema.safeParse(source);
   if (!result.success) {
     const issues = result.error.issues.map((issue) => {
@@ -231,7 +295,7 @@ export function loadEnv(options: LoadEnvOptions = {}): AppConfig {
 export function safeLoadEnv(
   options: LoadEnvOptions = {},
 ): { ok: true; config: AppConfig } | { ok: false; issues: string[] } {
-  const source = options.source ?? process.env;
+  const source = resolveFileSecrets(options.source ?? process.env);
   const result = envSchema.safeParse(source);
   if (result.success) {
     return { ok: true, config: result.data };
@@ -253,6 +317,8 @@ export function describeConfig(config: AppConfig): Record<string, unknown> {
     rpcConfigured: Boolean(config.RPC_URL),
     wsConfigured: Boolean(config.RPC_WS_URL),
     openseaKeyFromEnv: Boolean(config.OPENSEA_API_KEY),
+    walletKeyEnvelopePublic: Boolean(config.WALLET_KEY_PUBLIC_KEY),
+    walletKeyEnvelopePrivate: Boolean(config.WALLET_KEY_PRIVATE_KEY),
     patFromEnv: Boolean(config.OPENSEA_WALLET_PAT),
     discoveryIntervalSeconds: config.DISCOVERY_INTERVAL_SECONDS,
     collectionDiscoveryIntervalSeconds: config.COLLECTION_DISCOVERY_INTERVAL_SECONDS,

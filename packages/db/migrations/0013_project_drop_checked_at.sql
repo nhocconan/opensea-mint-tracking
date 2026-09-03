@@ -1,0 +1,1 @@
+ALTER TABLE "projects" ADD COLUMN "drop_checked_at" timestamp with time zone;

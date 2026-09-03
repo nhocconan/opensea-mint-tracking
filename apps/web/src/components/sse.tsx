@@ -14,12 +14,41 @@ export function useRadarEvents(): void {
   useEffect(() => {
     let source: EventSource | null = null;
     let fallback: ReturnType<typeof setInterval> | null = null;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
     let lastEventAt = Date.now();
+    let lastRefreshAt = 0;
+    let refreshPendingWhileHidden = false;
+
+    const requestRefresh = (): void => {
+      if (document.visibilityState !== "visible") {
+        refreshPendingWhileHidden = true;
+        return;
+      }
+      if (refreshTimer !== null) {
+        return;
+      }
+      // Eligibility emits per project and discovery emits adjacent scan +
+      // invalidation events. Collapse the burst into one RSC refresh and cap
+      // every tab at one refresh per five seconds.
+      const delay = Math.max(1_500, 5_000 - (Date.now() - lastRefreshAt));
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        lastRefreshAt = Date.now();
+        refreshPendingWhileHidden = false;
+        router.refresh();
+      }, delay);
+    };
+
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === "visible" && refreshPendingWhileHidden) {
+        requestRefresh();
+      }
+    };
 
     const startFallback = (): void => {
       if (fallback === null) {
-        fallback = setInterval(() => router.refresh(), 30_000);
+        fallback = setInterval(requestRefresh, 30_000);
       }
     };
     const stopFallback = (): void => {
@@ -51,7 +80,7 @@ export function useRadarEvents(): void {
             // 30s polling fallback below.
             parsed.type === "execution.awaiting_signature"
           ) {
-            router.refresh();
+            requestRefresh();
           }
         } catch {
           // Ignore malformed events; polling fallback covers gaps.
@@ -72,11 +101,16 @@ export function useRadarEvents(): void {
 
     connect();
     startFallback();
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       stopped = true;
       source?.close();
       stopFallback();
+      if (refreshTimer !== null) {
+        clearTimeout(refreshTimer);
+      }
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [router]);
 }

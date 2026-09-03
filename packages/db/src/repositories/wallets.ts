@@ -42,8 +42,17 @@ export async function listWallets(db: Db, options: ListWalletsOptions = {}) {
       enabled: wallets.enabled,
       credentialId: wallets.credentialId,
       hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
+      /** Which scheme sealed the key (algorithm tag from the stored JSON) —
+       *  lets the admin page flag a legacy symmetric blob vs the worker-only
+       *  envelope. Never the ciphertext itself. */
+      signingKeySealedWith: sql<
+        string | null
+      >`(${wallets.encryptedSigningKey}::jsonb ->> 'algorithm')`,
       signingKeyFingerprint: wallets.signingKeyFingerprint,
       signingKeyAddedAt: wallets.signingKeyAddedAt,
+      /** Worker-owned funding snapshot (wei string / when it was read). */
+      nativeBalanceWei: wallets.nativeBalanceWei,
+      balanceCheckedAt: wallets.balanceCheckedAt,
       createdAt: wallets.createdAt,
       updatedAt: wallets.updatedAt,
     })
@@ -96,6 +105,68 @@ export async function clearWalletSigningKey(db: Db, walletId: string): Promise<b
     .where(eq(wallets.id, walletId))
     .returning({ id: wallets.id });
   return rows.length > 0;
+}
+
+/** Wallets whose key is still sealed with the legacy symmetric scheme —
+ *  the maintenance worker re-seals these to the envelope once
+ *  WALLET_KEY_PRIVATE_KEY/PUBLIC_KEY exist. Returns id + blob only. */
+export async function walletsWithLegacySealedKey(
+  db: Db,
+): Promise<Array<{ id: string; sealed: string }>> {
+  const rows = await db
+    .select({ id: wallets.id, sealed: wallets.encryptedSigningKey })
+    .from(wallets)
+    .where(
+      and(
+        sql`${wallets.encryptedSigningKey} is not null`,
+        sql`(${wallets.encryptedSigningKey}::jsonb ->> 'algorithm') = 'aes-256-gcm'`,
+      ),
+    );
+  return rows.flatMap((r) => (r.sealed === null ? [] : [{ id: r.id, sealed: r.sealed }]));
+}
+
+/** Replace a wallet's sealed blob in place (re-seal to the envelope). Only
+ *  succeeds if the blob is unchanged since it was read — a concurrent revoke
+ *  must win. */
+export async function resealWalletSigningKey(
+  db: Db,
+  walletId: string,
+  expectedSealedJson: string,
+  newSealedJson: string,
+): Promise<boolean> {
+  const rows = await db
+    .update(wallets)
+    .set({ encryptedSigningKey: newSealedJson, updatedAt: new Date() })
+    .where(and(eq(wallets.id, walletId), eq(wallets.encryptedSigningKey, expectedSealedJson)))
+    .returning({ id: wallets.id });
+  return rows.length > 0;
+}
+
+/** Enabled managed wallets (id + address only) — the balance refresh
+ *  task's candidate list. Never the key blob. */
+export async function managedWalletAddresses(
+  db: Db,
+  limit = 500,
+): Promise<Array<{ id: string; address: string }>> {
+  return db
+    .select({ id: wallets.id, address: wallets.address })
+    .from(wallets)
+    .where(and(eq(wallets.enabled, true), sql`${wallets.encryptedSigningKey} is not null`))
+    .orderBy(wallets.createdAt)
+    .limit(limit);
+}
+
+/** Persist one wallet's native balance snapshot (worker + arm-time read). */
+export async function recordWalletBalance(
+  db: Db,
+  walletId: string,
+  nativeBalanceWei: bigint,
+  checkedAt: Date = new Date(),
+): Promise<void> {
+  await db
+    .update(wallets)
+    .set({ nativeBalanceWei: nativeBalanceWei.toString(10), balanceCheckedAt: checkedAt })
+    .where(eq(wallets.id, walletId));
 }
 
 /** The sealed blob only, for the worker to decrypt at fire time. */

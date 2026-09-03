@@ -4,7 +4,7 @@ import { mintSpendCeilingWei } from "@hoodmint/core";
 import { useActionState, useMemo, useState } from "react";
 import { type ActionState, createSpecialMintAction } from "@/app/actions.ts";
 import { Countdown } from "@/components/feed-parts.tsx";
-import { formatDateTimeGmt7, formatDateTimeUtc, formatPrice } from "@/lib/format.ts";
+import { formatBalance, formatDateTimeGmt7, formatPrice } from "@/lib/format.ts";
 import { gmt7LocalToUtc, utcToGmt7LocalInput } from "@/lib/mint-target.ts";
 
 export interface StageOption {
@@ -21,6 +21,9 @@ export interface ManagedWalletOption {
   readonly id: string;
   readonly address: string;
   readonly label: string | null;
+  /** Worker-owned native balance snapshot (wei string) + when it was read. */
+  readonly nativeBalanceWei: string | null;
+  readonly balanceCheckedAt: string | null;
 }
 
 const initial: ActionState = { ok: false, message: "" };
@@ -33,6 +36,15 @@ function defaultCeilingWei(priceWei: string | null, quantity: number): string {
   return mintSpendCeilingWei(priceWei, quantity);
 }
 
+/** Snapshot balance below price × qty + fee allowance — a visual hint only;
+ *  the server-side arm gate (live read, plus gas) is the real refusal. */
+function underfunded(w: ManagedWalletOption, priceWei: string | null, quantity: number): boolean {
+  if (w.nativeBalanceWei === null || !/^[0-9]+$/.test(w.nativeBalanceWei)) {
+    return false;
+  }
+  return BigInt(w.nativeBalanceWei) < BigInt(mintSpendCeilingWei(priceWei, quantity));
+}
+
 /**
  * Steps 2–4 of the sniper console: pick the phase, confirm or override the
  * fire instant (typed in GMT+7, converted to UTC server-side), then pick the
@@ -43,12 +55,17 @@ export function SpecialMintForm({
   projectId,
   stages,
   wallets,
+  initialStageId,
 }: {
   projectId: string;
   stages: StageOption[];
   wallets: ManagedWalletOption[];
+  initialStageId: string | null;
 }) {
-  const [stageId, setStageId] = useState<string>(stages[0]?.id ?? "");
+  const selectedInitialStage = stages.some((stage) => stage.id === initialStageId)
+    ? (initialStageId ?? "")
+    : (stages[0]?.id ?? "");
+  const [stageId, setStageId] = useState<string>(selectedInitialStage);
   const [manualFire, setManualFire] = useState(false);
   const [fireAtGmt7, setFireAtGmt7] = useState<string>("");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
@@ -128,7 +145,6 @@ export function SpecialMintForm({
               </span>
               <span className="font-mono text-cyan">{formatPrice(s.priceWei)}</span>
               <span className="font-mono text-ink-muted">{formatDateTimeGmt7(s.startsAt)}</span>
-              <span className="font-mono text-ink-faint">{formatDateTimeUtc(s.startsAt)}</span>
               {s.endsAt !== null ? (
                 <span className="font-mono text-ink-faint">
                   ends {formatDateTimeGmt7(s.endsAt)}
@@ -192,10 +208,6 @@ export function SpecialMintForm({
             <dd className="font-mono text-ink">{formatDateTimeGmt7(fireAtUtcIso)}</dd>
           </div>
           <div>
-            <dt className="text-[10px] text-ink-faint uppercase">UTC (stored)</dt>
-            <dd className="font-mono text-ink-muted">{formatDateTimeUtc(fireAtUtcIso)}</dd>
-          </div>
-          <div>
             <dt className="text-[10px] text-ink-faint uppercase">Countdown</dt>
             <dd>
               <Countdown iso={fireAtUtcIso} label="Fire" />
@@ -239,6 +251,16 @@ export function SpecialMintForm({
                 {w.label !== null ? (
                   <span className="font-mono text-[10px] text-ink-faint">{w.address}</span>
                 ) : null}
+                <span
+                  className={`ml-auto font-mono text-[10px] ${
+                    underfunded(w, stage?.priceWei ?? null, quantities[w.id] ?? 1)
+                      ? "text-magenta"
+                      : "text-ink-faint"
+                  }`}
+                  title="Native balance (worker snapshot). Arming refuses a wallet that cannot cover price × qty + OpenSea fee + gas."
+                >
+                  {formatBalance(w.nativeBalanceWei, w.balanceCheckedAt)}
+                </span>
               </label>
               <label className="flex items-center gap-1">
                 <span className="text-[10px] text-ink-faint uppercase">Qty</span>

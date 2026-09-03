@@ -9,15 +9,20 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   armedPlansWithStageStart,
   armMintPlan,
+  auditLogs,
   bestEligibilityByProject,
   cacheMintPlanTx,
+  cancelOpenPlansForWallet,
   claimArmedMintPlan,
   claimDueAlerts,
+  clearPresignedForWallet,
+  clearWalletSigningKey,
   createDb,
   createMintPlan,
   createRpcEndpoint,
   createSigner,
   dbClient,
+  disarmMintPlan,
   distinctEnabledRpcChainIds,
   dropStages,
   enqueueAlert,
@@ -27,10 +32,12 @@ import {
   getCheckpoint,
   getHolderConcentration,
   getRaritySnapshot,
+  getWalletSigningKeySealed,
   insertMintEvents,
   insertSignal,
   latestSignal,
   latestSignalsForProject,
+  listCalendarStages,
   markAlertSent,
   markMintPlanExecuted,
   mintEvents,
@@ -39,17 +46,31 @@ import {
   projectIdsForContracts,
   projectsForSentimentScan,
   queryFeed,
+  recordAudit,
+  refreshActivitySnapshot,
   refreshHolderSnapshot,
   releaseMintPlanToArmed,
+  resealWalletSigningKey,
   saveCheckpoint,
+  savePresignedTx,
   saveRaritySnapshot,
+  scrubKeyTracesForAddress,
+  setWalletSigningKey,
+  trackedWalletEligibilityForStages,
   unfinalizeFromBlock,
+  updateProjectSocials,
   upsertEligibilityCheck,
   upsertProjectFromSource,
   user,
+  vacuumKeyTables,
   walletChipsForProjects,
   wallets,
+  walletsWithLegacySealedKey,
 } from "../src/index.ts";
+
+function unwrap<T>(result: unknown): T[] {
+  return ((result as { rows?: T[] }).rows ?? (result as T[])) as T[];
+}
 
 function rowsOf<T>(result: unknown): T[] {
   return ((result as { rows?: T[] }).rows ?? (result as T[])) as T[];
@@ -66,9 +87,9 @@ const H = 3600_000;
 
 async function cleanup(): Promise<void> {
   await db.execute(sql`truncate table
-    mint_events, mint_aggregates, holder_snapshots, rarity_snapshots, supply_snapshots, drop_stages,
+    mint_events, mint_aggregates, mint_activity_snapshots, holder_snapshots, rarity_snapshots, supply_snapshots, drop_stages,
     eligibility_checks, notification_outbox, notification_attempts,
-    mint_plans, signers, "user",
+    mint_plans, signers, "user", audit_logs,
     project_aliases, project_fields, evidence, projects, providers,
     chain_checkpoints, wallets, alert_channels, settings restart identity cascade`);
 }
@@ -165,7 +186,8 @@ describe("identity merge and idempotency (PRD §7.2)", () => {
 describe("feed queries (PRD §5/§9)", () => {
   it("filters by view/status/search and paginates with cursors", async () => {
     const liveSlug = `it-live-${randomUUID().slice(0, 6)}`;
-    await upsertProjectFromSource(db, {
+    const liveContract = `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`;
+    const liveProject = await upsertProjectFromSource(db, {
       ...baseProject,
       // Every fixture in this describe block must get its own contract
       // address — baseProject's is a single fixed value, and reusing it
@@ -174,7 +196,7 @@ describe("feed queries (PRD §5/§9)", () => {
       // with only the last write's name surviving (found via live
       // integration testing, 2026-08-22 — this silently broke this exact
       // assertion, while the product's own lifecycle logic was correct).
-      contractAddress: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+      contractAddress: liveContract,
       externalId: liveSlug,
       slug: liveSlug,
       name: "Live One",
@@ -193,6 +215,33 @@ describe("feed queries (PRD §5/§9)", () => {
       ],
       now: NOW,
     });
+    await insertMintEvents(db, [
+      {
+        chainId: 4663,
+        txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`,
+        logIndex: 0,
+        blockNumber: 1n,
+        blockHash: `0x${"1".repeat(64)}`,
+        contractAddress: liveContract,
+        recipient: `0x${"2".repeat(40)}`,
+        quantity: 2,
+        finalized: true,
+        observedAt: NOW,
+      },
+      {
+        chainId: 4663,
+        txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`,
+        logIndex: 0,
+        blockNumber: 2n,
+        blockHash: `0x${"3".repeat(64)}`,
+        contractAddress: liveContract,
+        recipient: `0x${"4".repeat(40)}`,
+        quantity: 1,
+        finalized: true,
+        observedAt: NOW,
+      },
+    ]);
+    await refreshActivitySnapshot(db, liveProject.projectId);
     for (let i = 0; i < 3; i += 1) {
       await upsertProjectFromSource(db, {
         ...baseProject,
@@ -219,9 +268,20 @@ describe("feed queries (PRD §5/§9)", () => {
 
     const live = await queryFeed(db, { view: "live", limit: 10 });
     expect(live.rows.some((row) => row.name === "Live One")).toBe(true);
+    expect(live.rows.find((row) => row.name === "Live One")).toMatchObject({
+      velocity1h: 3,
+      uniqueMinters1h: 2,
+    });
+    expect(live.rows.find((row) => row.name === "Live One")?.activityComputedAt).not.toBeNull();
 
     const next = await queryFeed(db, { view: "next", sort: "starting", limit: 2 });
     expect(next.rows).toHaveLength(2);
+    expect(next.rows[0]).toMatchObject({
+      nextStageLabel: "WL",
+      nextStageKind: "allowlist",
+      nextStagePriceWei: "1",
+      nextStageMaxPerWallet: 1,
+    });
     expect(next.nextCursor).not.toBeNull();
     const page2 = await queryFeed(db, {
       view: "next",
@@ -232,6 +292,14 @@ describe("feed queries (PRD §5/§9)", () => {
     const allNames = [...next.rows, ...page2.rows].map((r) => r.name);
     expect(new Set(allNames).size).toBe(allNames.length);
 
+    const calendar = await listCalendarStages(db, { now: NOW, limit: 20 });
+    expect(calendar.filter((stage) => stage.projectName.startsWith("Next "))).toHaveLength(3);
+    expect(calendar.find((stage) => stage.projectName === "Next 0")).toMatchObject({
+      stageLabel: "WL",
+      stageKind: "allowlist",
+      stagePriceWei: "1",
+    });
+
     const search = await queryFeed(db, { view: "all", search: "Live One" });
     expect(search.rows.every((row) => row.name.includes("Live") || row.name === "Live One")).toBe(
       true,
@@ -239,6 +307,108 @@ describe("feed queries (PRD §5/§9)", () => {
 
     const free = await queryFeed(db, { view: "all", price: "free" });
     expect(free.rows.some((row) => row.name === "Live One")).toBe(true);
+  });
+
+  it("filters WL and social presence against the exact displayed phase", async () => {
+    const project = await upsertProjectFromSource(db, {
+      ...baseProject,
+      contractAddress: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+      externalId: `it-stage-filter-${randomUUID().slice(0, 6)}`,
+      name: "Stage scoped WL",
+      stages: [
+        {
+          providerStageId: "ended-wl",
+          label: "Old WL",
+          kind: "allowlist",
+          priceWei: "1",
+          currency: null,
+          maxPerWallet: 1,
+          startsAt: new Date(NOW.getTime() - 2 * H),
+          endsAt: new Date(NOW.getTime() - H),
+          paused: false,
+        },
+        {
+          providerStageId: "next-wl",
+          label: "Current decision phase",
+          kind: "allowlist",
+          priceWei: "2",
+          currency: null,
+          maxPerWallet: 1,
+          startsAt: new Date(NOW.getTime() + H),
+          endsAt: new Date(NOW.getTime() + 2 * H),
+          paused: false,
+        },
+      ],
+      supply: null,
+      now: NOW,
+    });
+    await updateProjectSocials(
+      db,
+      project.projectId,
+      {
+        twitterUsername: "stage_scoped",
+        projectUrl: null,
+        discordUrl: null,
+        safelistStatus: null,
+      },
+      NOW,
+    );
+    const stages = await db
+      .select()
+      .from(dropStages)
+      .where(eq(dropStages.projectId, project.projectId));
+    const oldStage = stages.find((stage) => stage.providerStageId === "ended-wl");
+    const nextStage = stages.find((stage) => stage.providerStageId === "next-wl");
+    const [wallet] = await db
+      .insert(wallets)
+      .values({ address: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`, enabled: true })
+      .returning();
+    if (wallet === undefined || oldStage === undefined || nextStage === undefined) {
+      throw new Error("stage filter fixture missing");
+    }
+    await upsertEligibilityCheck(db, {
+      walletId: wallet.id,
+      projectId: project.projectId,
+      stageId: oldStage.id,
+      status: "ELIGIBLE_RESTRICTED",
+      checkedAt: NOW,
+      nextDueAt: null,
+    });
+    await upsertEligibilityCheck(db, {
+      walletId: wallet.id,
+      projectId: project.projectId,
+      stageId: nextStage.id,
+      status: "INELIGIBLE_RESTRICTED",
+      checkedAt: NOW,
+      nextDueAt: null,
+    });
+
+    const wlHit = await queryFeed(db, { view: "next", wl: "hit", search: "Stage scoped WL" });
+    expect(wlHit.rows).toHaveLength(0);
+    const noWlHit = await queryFeed(db, { view: "next", wl: "none", search: "Stage scoped WL" });
+    expect(noWlHit.rows.map((row) => row.id)).toContain(project.projectId);
+    const bestCurrent = await bestEligibilityByProject(db, [project.projectId]);
+    expect(bestCurrent.get(project.projectId)).toBe("INELIGIBLE_RESTRICTED");
+
+    const withTwitter = await queryFeed(db, {
+      view: "next",
+      social: "twitter",
+      search: "Stage scoped WL",
+    });
+    expect(withTwitter.rows.map((row) => row.id)).toContain(project.projectId);
+    const withWebsite = await queryFeed(db, {
+      view: "next",
+      social: "website",
+      search: "Stage scoped WL",
+    });
+    expect(withWebsite.rows).toHaveLength(0);
+
+    const calendarWl = await listCalendarStages(db, {
+      now: NOW,
+      wl: "hit",
+      search: "Stage scoped WL",
+    });
+    expect(calendarWl).toHaveLength(0);
   });
 });
 
@@ -249,6 +419,15 @@ describe("eligibility scoping (perf finding, 2026-08-22)", () => {
       .values({ address: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`, enabled: true })
       .returning();
     if (wallet === undefined) throw new Error("wallet insert returned no row");
+    const [uncheckedWallet] = await db
+      .insert(wallets)
+      .values({
+        address: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+        label: "Unchecked",
+        enabled: true,
+      })
+      .returning();
+    if (uncheckedWallet === undefined) throw new Error("unchecked wallet insert returned no row");
 
     const scoped = await upsertProjectFromSource(db, {
       ...baseProject,
@@ -342,6 +521,23 @@ describe("eligibility scoping (perf finding, 2026-08-22)", () => {
     const chips = await walletChipsForProjects(db, [wallet.id]);
     expect(chips.get(`${wallet.id}:${scoped.projectId}`)).toBe("ELIGIBLE_RESTRICTED");
     expect(chips.get(`${wallet.id}:${unscoped.projectId}`)).toBe("PUBLIC_ONLY");
+
+    const visibleWallets = await trackedWalletEligibilityForStages(db, [
+      { projectId: scoped.projectId, stageId: scopedStage.id },
+    ]);
+    expect(visibleWallets.get(`${scoped.projectId}:${scopedStage.id}`)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          walletId: wallet.id,
+          status: "ELIGIBLE_RESTRICTED",
+        }),
+        expect.objectContaining({
+          walletId: uncheckedWallet.id,
+          walletLabel: "Unchecked",
+          status: "UNKNOWN",
+        }),
+      ]),
+    );
   });
 });
 
@@ -1131,5 +1327,166 @@ describe("multi-network RPC chain discovery (2026-08-23)", () => {
     expect(chainIds).toContain(8453);
     expect(chainIds).toContain(42161);
     expect(chainIds).not.toContain(10); // disabled → excluded from the sync set
+  });
+});
+
+describe("managed minting-key hygiene (custody review, 2026-08-28)", () => {
+  const RAW_TX = "0x02f8deadbeef";
+  const LEGACY = JSON.stringify({ ciphertext: "AAAA", keyVersion: 1, algorithm: "aes-256-gcm" });
+  const ENVELOPE = JSON.stringify({
+    ciphertext: "BBBB",
+    keyVersion: 1,
+    algorithm: "x25519-hkdf-sha256-aes-256-gcm",
+  });
+
+  async function managedWalletWithArmedPlan() {
+    const operatorId = `it-user-${randomUUID().slice(0, 8)}`;
+    await db.insert(user).values({
+      id: operatorId,
+      name: "IT Operator",
+      email: `${operatorId}@example.test`,
+      role: "admin",
+    });
+    const address = `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`;
+    const [wallet] = await db.insert(wallets).values({ address, enabled: true }).returning();
+    if (wallet === undefined) throw new Error("wallet insert returned no row");
+    expect(await setWalletSigningKey(db, wallet.id, LEGACY, "fp0123456789")).toBe(true);
+    const signer = await createSigner(db, {
+      chainId: 4663,
+      ownerAddress: address,
+      scheme: "browser_wallet",
+      onchainSpendCeilingWei: "1000000000000000000",
+    });
+    const project = await upsertProjectFromSource(db, {
+      ...baseProject,
+      contractAddress: `0x${randomUUID().replace(/-/g, "").slice(0, 40)}`,
+      externalId: `it-hyg-${randomUUID().slice(0, 6)}`,
+      name: "Hygiene Drop",
+      stages: [],
+      now: NOW,
+    });
+    const plan = await createMintPlan(db, {
+      projectId: project.projectId,
+      walletId: wallet.id,
+      signerId: signer.id,
+      perPlanCeilingWei: "100000000000000000",
+    });
+    const armed = await armMintPlan(db, plan.id, operatorId, 10);
+    if (armed === undefined) throw new Error("armMintPlan returned undefined");
+    await savePresignedTx(db, plan.id, { rawTx: RAW_TX, nonce: 7, txHash: `0x${"11".repeat(32)}` });
+    return { wallet, plan, operatorId, address };
+  }
+
+  async function presignOf(planId: string) {
+    const [row] = await db
+      .select({
+        raw: mintPlans.presignedRawTx,
+        nonce: mintPlans.presignedNonce,
+        status: mintPlans.status,
+      })
+      .from(mintPlans)
+      .where(eq(mintPlans.id, planId));
+    return row;
+  }
+
+  it("disarm purges the pre-signed (spend-capable) blob — finding #1", async () => {
+    const { plan } = await managedWalletWithArmedPlan();
+    expect((await presignOf(plan.id))?.raw).toBe(RAW_TX);
+    await disarmMintPlan(db, plan.id);
+    const after = await presignOf(plan.id);
+    expect(after?.status).toBe("cancelled");
+    expect(after?.raw).toBeNull();
+    expect(after?.nonce).toBeNull();
+  });
+
+  it("expiry purges the pre-signed blob — finding #1", async () => {
+    const { plan } = await managedWalletWithArmedPlan();
+    await db
+      .update(mintPlans)
+      .set({ armedUntil: new Date(Date.now() - 60_000) })
+      .where(eq(mintPlans.id, plan.id));
+    expect(await expireStaleMintPlans(db, new Date())).toBeGreaterThanOrEqual(1);
+    const after = await presignOf(plan.id);
+    expect(after?.status).toBe("expired");
+    expect(after?.raw).toBeNull();
+  });
+
+  it("executed / failed terminal transitions purge the blob too", async () => {
+    // Put each plan straight into `executing` (the state both terminal
+    // transitions require) rather than racing claimArmedMintPlan against
+    // armed plans left over from earlier cases.
+    const a = await managedWalletWithArmedPlan();
+    await db.update(mintPlans).set({ status: "executing" }).where(eq(mintPlans.id, a.plan.id));
+    await markMintPlanExecuted(db, a.plan.id);
+    expect((await presignOf(a.plan.id))?.status).toBe("executed");
+    expect((await presignOf(a.plan.id))?.raw).toBeNull();
+
+    const b = await managedWalletWithArmedPlan();
+    await db.update(mintPlans).set({ status: "executing" }).where(eq(mintPlans.id, b.plan.id));
+    await failMintPlanExecution(db, b.plan.id);
+    expect((await presignOf(b.plan.id))?.status).toBe("failed");
+    expect((await presignOf(b.plan.id))?.raw).toBeNull();
+  });
+
+  it("revoke leaves no key-derived trace: blob, fingerprint, presign, audit metadata", async () => {
+    const { wallet, plan, operatorId, address } = await managedWalletWithArmedPlan();
+    await recordAudit(db, {
+      actorUserId: operatorId,
+      action: "wallet.key_import",
+      targetType: "wallet",
+      targetId: address,
+      result: "success",
+      metadata: { address, fingerprint: "fp0123456789" },
+    });
+    expect(await getWalletSigningKeySealed(db, wallet.id)).toBe(LEGACY);
+
+    expect(await clearWalletSigningKey(db, wallet.id)).toBe(true);
+    expect(await clearPresignedForWallet(db, wallet.id)).toBe(1);
+    expect(await scrubKeyTracesForAddress(db, address)).toBe(1);
+
+    const [w] = await db.select().from(wallets).where(eq(wallets.id, wallet.id));
+    expect(w?.encryptedSigningKey).toBeNull();
+    expect(w?.signingKeyFingerprint).toBeNull();
+    expect(w?.signingKeyAddedAt).toBeNull();
+    expect((await presignOf(plan.id))?.raw).toBeNull();
+    const [audit] = await db.select().from(auditLogs).where(eq(auditLogs.targetId, address));
+    expect(audit?.metadata).toEqual({ address, key_scrubbed: true });
+    expect(JSON.stringify(audit?.metadata)).not.toContain("fp0123456789");
+    // Dead-tuple reclaim runs on the pool outside any transaction.
+    expect(await vacuumKeyTables(db)).toEqual({ ok: true });
+  });
+
+  it("delete cancels open plans, purges presign, and the row (with ciphertext) is gone", async () => {
+    const { wallet, plan } = await managedWalletWithArmedPlan();
+    expect(await clearPresignedForWallet(db, wallet.id)).toBe(1);
+    expect(await cancelOpenPlansForWallet(db, wallet.id)).toBe(1);
+    const before = await presignOf(plan.id);
+    expect(before?.status).toBe("cancelled");
+    expect(before?.raw).toBeNull();
+    await db.delete(wallets).where(eq(wallets.id, wallet.id));
+    // Whatever the FK does with the plan row (cascade or set-null), it must
+    // not still carry a blob.
+    const after = await presignOf(plan.id);
+    expect(after?.raw ?? null).toBeNull();
+    const [gone] = await db.select().from(wallets).where(eq(wallets.id, wallet.id));
+    expect(gone).toBeUndefined();
+    // Nothing anywhere still carries the ciphertext text.
+    const leak = await db.execute(
+      sql`select count(*)::int as n from mint_plans where presigned_raw_tx is not null`,
+    );
+    expect(unwrap<{ n: number }>(leak)[0]?.n).toBe(0);
+  });
+
+  it("legacy → envelope re-seal is compare-and-swap so a concurrent revoke wins", async () => {
+    const { wallet } = await managedWalletWithArmedPlan();
+    const legacyRows = await walletsWithLegacySealedKey(db);
+    expect(legacyRows.map((r) => r.id)).toContain(wallet.id);
+    expect(await resealWalletSigningKey(db, wallet.id, LEGACY, ENVELOPE)).toBe(true);
+    expect(await getWalletSigningKeySealed(db, wallet.id)).toBe(ENVELOPE);
+    expect((await walletsWithLegacySealedKey(db)).map((r) => r.id)).not.toContain(wallet.id);
+    // Stale expected value (already revoked / already re-sealed) → no write.
+    await clearWalletSigningKey(db, wallet.id);
+    expect(await resealWalletSigningKey(db, wallet.id, LEGACY, ENVELOPE)).toBe(false);
+    expect(await getWalletSigningKeySealed(db, wallet.id)).toBeUndefined();
   });
 });

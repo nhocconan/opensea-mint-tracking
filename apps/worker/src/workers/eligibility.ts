@@ -282,6 +282,10 @@ export async function runEligibilityPass(
         // demote unresolved ones to AUTH_REQUIRED (retryable "AUTH NEEDED"),
         // schedule a short retry, and STOP the pass so we don't hammer the
         // 429 for every remaining pair this cycle.
+        const retryAfterMs =
+          isAppError(error) && error.retryAfterSeconds !== undefined
+            ? Math.max(5 * 60 * 1000, error.retryAfterSeconds * 1000)
+            : 5 * 60 * 1000;
         for (const check of checks) {
           const resolved =
             check.currentStatus === "ELIGIBLE_RESTRICTED" ||
@@ -293,10 +297,13 @@ export async function runEligibilityPass(
             stageId: check.stageId,
             status: resolved ? check.currentStatus : "AUTH_REQUIRED",
             checkedAt: new Date(),
-            nextDueAt: addMs(new Date(), 5 * 60 * 1000),
+            nextDueAt: addMs(new Date(), retryAfterMs),
           });
         }
-        break;
+        // Bubble the typed provider error to the completion-based scheduler.
+        // It honors Retry-After (+ jitter) and does not start another pass in
+        // parallel, while the already-saved chips remain visible unchanged.
+        throw error;
       }
       for (const check of checks) {
         await upsertEligibilityCheck(db, {

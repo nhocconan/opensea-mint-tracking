@@ -78,6 +78,27 @@
       "when": 1788000000000,
       "tag": "0010_project_socials",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788063174842,
+      "tag": "0011_feed_activity_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788364765320,
+      "tag": "0012_wallet_balance_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788376330590,
+      "tag": "0013_project_drop_checked_at",
+      "breakpoints": true
     }
   ]
 }

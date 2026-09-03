@@ -22,6 +22,9 @@ const querySchema = z.object({
   format: z.enum(["csv", "json"]).default("json"),
   q: z.string().trim().max(120).optional(),
   sort: z.enum(["recent", "starting", "velocity", "minted", "name", "discovered"]).optional(),
+  price: z.enum(["free", "paid"]).optional(),
+  wl: z.enum(["hit", "none"]).optional(),
+  social: z.enum(["twitter", "website", "either", "both"]).optional(),
 });
 
 const CSV_COLUMNS = [
@@ -38,6 +41,7 @@ const CSV_COLUMNS = [
   "maxSupply",
   "velocity1h",
   "uniqueMinters1h",
+  "activityComputedAt",
   "firstSeenAt",
 ] as const;
 
@@ -101,6 +105,9 @@ export async function GET(
     userId: user?.id,
     search: q.q,
     sort: q.sort as FeedSort | undefined,
+    price: q.price,
+    wl: q.wl,
+    social: q.social,
     limit: MAX_EXPORT_ROWS,
   });
   // Exports are a bounded snapshot (MAX_EXPORT_ROWS), not a paginated feed —

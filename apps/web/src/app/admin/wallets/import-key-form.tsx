@@ -1,5 +1,6 @@
 "use client";
 
+import type React from "react";
 import { useState, useTransition } from "react";
 import { importWalletKeyAction } from "@/app/actions.ts";
 import { authClient } from "@/lib/auth-client.ts";
@@ -13,9 +14,10 @@ import { authClient } from "@/lib/auth-client.ts";
  * re-checks it. Register a passkey at Admin → Account first, or the ceremony
  * has nothing to assert.
  */
-export function ImportKeyForm() {
+export function ImportKeyForm({ envelopeSealing }: { envelopeSealing: boolean }) {
   const [status, setStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [pending, startTransition] = useTransition();
+  const [reveal, setReveal] = useState(false);
 
   return (
     <section className="rounded-md border border-magenta/30 bg-base-raised p-4">
@@ -34,11 +36,23 @@ export function ImportKeyForm() {
         </a>
         ) plus the live-execution switch.
       </p>
+      {envelopeSealing ? null : (
+        <p role="note" className="mt-1 text-[11px] text-magenta">
+          Worker-only sealing is OFF: no <code>WALLET_KEY_PUBLIC_KEY</code> configured, so imports
+          fall back to the shared <code>APP_ENCRYPTION_KEY</code>. Run <code>make wallet-keys</code>{" "}
+          and set the public key on web + the private key on the worker.
+        </p>
+      )}
       <form
         className="mt-3 space-y-2"
         onSubmit={(event) => {
           event.preventDefault();
-          const form = new FormData(event.currentTarget);
+          const formEl = event.currentTarget;
+          const form = new FormData(formEl);
+          // Drop the key from the DOM immediately — the server has it from
+          // here on and the field must not linger on screen or in a resubmit.
+          formEl.reset();
+          setReveal(false);
           startTransition(async () => {
             setStatus(null);
             // Fresh passkey step-up (same ceremony as arming) before the
@@ -62,14 +76,36 @@ export function ImportKeyForm() {
         }}
       >
         <label className="block">
-          <span className="mb-1 block text-[11px] text-ink-muted">Private key (0x + 64 hex)</span>
+          <span className="mb-1 flex items-center justify-between text-[11px] text-ink-muted">
+            <span>Private key (0x + 64 hex)</span>
+            <button
+              type="button"
+              onClick={() => setReveal((v) => !v)}
+              aria-pressed={reveal}
+              className="text-[11px] text-ink-faint underline"
+            >
+              {reveal ? "hide" : "show"}
+            </button>
+          </span>
+          {/* Deliberately NOT type="password": browsers offer to save
+              password fields into the OS/password-manager vault regardless of
+              autocomplete="off", which would copy the minting key somewhere
+              we do not control. Masking via text-security keeps it off-screen
+              without ever declaring it a credential. */}
           <input
             name="privateKey"
-            type="password"
+            type="text"
+            inputMode="text"
             required
             autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
             spellCheck={false}
+            data-1p-ignore
+            data-lpignore="true"
+            data-bwignore
             placeholder="0x…"
+            style={reveal ? undefined : ({ WebkitTextSecurity: "disc" } as React.CSSProperties)}
             className="w-full rounded-sm border border-line bg-base px-3 py-2 font-mono text-sm"
           />
         </label>

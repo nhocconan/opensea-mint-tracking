@@ -12,7 +12,8 @@
     "dev": "pnpm -r --parallel run dev",
     "format": "biome check --write .",
     "format:check": "biome check .",
-    "lint": "biome check --linter-enabled=true --formatter-enabled=false .",
+    "lint": "biome check --linter-enabled=true --formatter-enabled=false . && bash scripts/audit/read-path-boundaries.sh",
+    "audit:architecture": "bash scripts/audit/read-path-boundaries.sh",
     "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck",
     "test": "pnpm -r --workspace-concurrency=1 run test",
     "test:integration": "bash scripts/integration-tests.sh",
@@ -21,7 +22,8 @@
     "migration": "pnpm --filter @hoodmint/db run migration:generate --",
     "seed": "pnpm --filter @hoodmint/worker exec tsx ../../scripts/seed.ts",
     "bootstrap-token": "pnpm --filter @hoodmint/worker exec tsx ../../scripts/bootstrap-token.ts",
-    "vapid-keys": "pnpm --filter @hoodmint/notifications exec tsx ../../scripts/vapid-keys.ts"
+    "vapid-keys": "pnpm --filter @hoodmint/notifications exec tsx ../../scripts/vapid-keys.ts",
+    "wallet-keys": "pnpm --filter @hoodmint/worker exec tsx ../../scripts/wallet-keys.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.8",

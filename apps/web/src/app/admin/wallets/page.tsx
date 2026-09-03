@@ -2,7 +2,7 @@ import { countWallets, listWallets } from "@hoodmint/db";
 import { PAGE_SIZE, Pagination, SearchBox } from "@/components/list-controls.tsx";
 import { parsePage } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
+import { formatBalance, formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
 import { BulkWalletForm } from "./bulk-wallet-form.tsx";
 import { ImportKeyForm } from "./import-key-form.tsx";
 import { RemoveKeyButton } from "./remove-key-button.tsx";
@@ -34,7 +34,7 @@ export default async function AdminWalletsPage({
     <div className="grid gap-3 md:grid-cols-2">
       <WalletForm prefill={prefill} />
       <BulkWalletForm />
-      <ImportKeyForm />
+      <ImportKeyForm envelopeSealing={config.WALLET_KEY_PUBLIC_KEY !== undefined} />
 
       <section className="rounded-md border border-line bg-base-raised p-4 md:col-span-2">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -62,6 +62,9 @@ export default async function AdminWalletsPage({
                 </th>
                 <th scope="col" className="py-1 font-normal">
                   Minting
+                </th>
+                <th scope="col" className="py-1 font-normal">
+                  Balance
                 </th>
                 <th scope="col" className="py-1 font-normal">
                   Added
@@ -92,11 +95,33 @@ export default async function AdminWalletsPage({
                         >
                           managed
                         </span>
+                        {w.signingKeySealedWith === "aes-256-gcm" ? (
+                          <span
+                            className="rounded-xs border border-amber/40 px-1 text-[10px] text-amber"
+                            title="Sealed with the shared APP_ENCRYPTION_KEY (web can decrypt). The worker re-seals it to the worker-only key automatically once WALLET_KEY_* are configured."
+                          >
+                            legacy seal
+                          </span>
+                        ) : null}
                         <RemoveKeyButton walletId={w.id} />
                       </span>
                     ) : (
                       <span className="text-ink-faint">tracking only</span>
                     )}
+                  </td>
+                  <td
+                    className={`py-1 ${
+                      w.hasSigningKey && w.nativeBalanceWei === "0"
+                        ? "text-magenta"
+                        : "text-ink-muted"
+                    }`}
+                    title={
+                      w.hasSigningKey
+                        ? "Native balance read by the worker every minute — must cover price × qty + OpenSea fee + gas before a plan can arm."
+                        : "Balance is tracked for managed wallets only."
+                    }
+                  >
+                    {w.hasSigningKey ? formatBalance(w.nativeBalanceWei, w.balanceCheckedAt) : "—"}
                   </td>
                   <td className="py-1 text-ink-faint">{formatDateTimeUtc(w.createdAt)}</td>
                   <td className="py-1">
@@ -111,7 +136,7 @@ export default async function AdminWalletsPage({
               ))}
               {wallets.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-2 text-ink-faint">
+                  <td colSpan={7} className="py-2 text-ink-faint">
                     {search !== ""
                       ? "No wallets match that search."
                       : "No wallets yet — eligibility needs at least one."}

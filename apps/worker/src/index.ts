@@ -1,22 +1,23 @@
 /**
  * HoodMint Radar worker entrypoint (PRD §8.3/§8.4).
  *
- * - Discovery is scheduled by an `every(...)` interval loop that enqueues
+ * - Discovery is scheduled by a completion-based `every(...)` loop that enqueues
  *   deterministic-id BullMQ jobs (one per feed type) for a separate BullMQ
  *   `Worker` to process; detail refreshes ride the details queue with
  *   freshness buckets.
  * - Eligibility, chain sync, stage-starting alerts, notifications, and
- *   maintenance run as bounded interval loops that are idempotent (DB
+ *   maintenance run as bounded non-overlapping loops that are idempotent (DB
  *   constraints are the final defense under at-least-once semantics).
  * - A tiny HTTP server exposes /health/live for compose health checks.
  */
 import http from "node:http";
-import { dbClient, recomputeLifecycles } from "@hoodmint/db";
+import { dbClient, recomputeLifecycles, refreshLiveActivitySnapshots } from "@hoodmint/db";
 import { dispatchDueAlerts } from "@hoodmint/notifications";
 import { metrics } from "@hoodmint/observability";
 import { QUEUE_NAMES } from "@hoodmint/queues";
 import { Worker } from "bullmq";
 import { context } from "./context.ts";
+import { runProviderJob, scheduleNonOverlappingTask } from "./scheduler.ts";
 import { runAutoMintPlanner } from "./workers/auto-mint.ts";
 import { runChainSync } from "./workers/chain.ts";
 import { runClockCalibration } from "./workers/clock-calibration.ts";
@@ -30,27 +31,36 @@ import {
 } from "./workers/discovery.ts";
 import { ensureEligibilityRows, runEligibilityPass } from "./workers/eligibility.ts";
 import { runMintExecutionPass, runMintHotLoop } from "./workers/execution.ts";
-import { refreshProviderFreshness, runMaintenance } from "./workers/maintenance.ts";
+import {
+  refreshProviderFreshness,
+  resealLegacyWalletKeys,
+  runMaintenance,
+} from "./workers/maintenance.ts";
 import { runSpeculativePreBuild } from "./workers/pre-build.ts";
 import { runRarityRefresh } from "./workers/rarity.ts";
 import { runRpcHealthCheck } from "./workers/rpc-health.ts";
 import { runSentimentScan } from "./workers/sentiment.ts";
 import { runStageStartingPass } from "./workers/stage-alerts.ts";
+import { runSupplySweep } from "./workers/supply.ts";
+import { refreshWalletBalances } from "./workers/wallet-balances.ts";
 
 const ctx = context();
 const { config, log, db } = ctx;
 
-const timers: ReturnType<typeof setInterval>[] = [];
+const stopScheduledTasks: (() => void)[] = [];
 const workers: Worker[] = [];
 
 function every(ms: number, name: string, fn: () => Promise<unknown>): void {
-  const run = (): void => {
-    fn().catch((error: unknown) => {
-      log.error({ err: error, job: name }, "interval task failed");
-    });
-  };
-  run();
-  timers.push(setInterval(run, ms));
+  stopScheduledTasks.push(
+    scheduleNonOverlappingTask({
+      intervalMs: ms,
+      name,
+      task: fn,
+      onError: (error: unknown) => {
+        log.error({ err: error, job: name }, "interval task failed");
+      },
+    }),
+  );
 }
 
 async function main(): Promise<void> {
@@ -77,7 +87,20 @@ async function main(): Promise<void> {
     QUEUE_NAMES.details,
     async (job) => {
       const data = job.data as { slug: string };
-      return runDetailRefresh(ctx, data.slug);
+      return runProviderJob({
+        task: () => runDetailRefresh(ctx, data.slug),
+        onPark: (error, retryDelayMs) => {
+          log.warn(
+            {
+              jobId: job.id,
+              slug: data.slug,
+              err: error instanceof Error ? error.message : String(error),
+              retryInSeconds: Math.ceil(retryDelayMs / 1_000),
+            },
+            "detail refresh parked after provider backpressure",
+          );
+        },
+      });
     },
     { connection, concurrency: 2 },
   );
@@ -129,7 +152,8 @@ async function main(): Promise<void> {
   // appear there. This sweeps GET /api/v2/collections (newest first) to find
   // ALL of them, upserts each as a project, and enqueues a detail refresh so
   // the ones that are drops get their stages filled in. Runs once at startup
-  // (every() fires immediately) then on a slower, quota-conscious cadence than
+  // after a short deterministic startup spread, then on a slower,
+  // quota-conscious cadence than
   // /drops discovery — it is a broad sweep, bounded per pass by
   // COLLECTION_DISCOVERY_MAX_PAGES/MAX_TOTAL.
   every(config.COLLECTION_DISCOVERY_INTERVAL_SECONDS * 1000, "collection-discovery", () =>
@@ -144,6 +168,12 @@ async function main(): Promise<void> {
   // DB-only lifecycle recompute so LIVE/NEXT/ENDED follow the clock between
   // OpenSea re-fetches (a drop whose last stage ended must leave /live).
   every(60_000, "lifecycle-recompute", () => recomputeLifecycles(db));
+  // Exact rolling activity is a worker-owned snapshot. Feed requests only
+  // read its one row per project and can stream before WL chips are ready.
+  every(60_000, "activity-snapshots", () => refreshLiveActivitySnapshots(db));
+  // On-chain totalSupply/maxSupply for every LIVE/NEXT drop → SOLD_OUT the
+  // moment the chain says so, whatever OpenSea's schedule still claims.
+  every(120_000, "supply-sweep", () => runSupplySweep(ctx));
   // Delisting/freshness re-check: re-fetch every LIVE/NEXT drop's detail every
   // 15 min so a drop OpenSea hid (drops endpoint → 404) leaves the feeds and
   // renamed/rescheduled drops update. Bounded + paced by the OpenSea limiter.
@@ -157,6 +187,10 @@ async function main(): Promise<void> {
   // RPC registry existed but nothing ever recorded health against it —
   // this is what makes rankRpcEndpoints() have real data to rank on.
   every(45_000, "rpc-health", () => runRpcHealthCheck(ctx));
+  // Managed-wallet native balance snapshot for the admin funding column
+  // (the arm action / presign pass do their own fresh read — this is the
+  // always-visible "can it pay?" signal, never a page-render RPC call).
+  every(60_000, "wallet-balances", () => refreshWalletBalances(ctx));
   // ADR 0009, item P5: same cadence as rpc-health since it reuses the
   // same best-endpoint resolution.
   every(45_000, "clock-calibration", () => runClockCalibration(ctx));
@@ -190,6 +224,11 @@ async function main(): Promise<void> {
     }),
   );
   every(3_600_000, "maintenance", () => runMaintenance(ctx));
+  // Managed-key hardening: migrate any legacy-sealed minting key to the
+  // worker-only envelope at boot, not on the first hourly tick.
+  void resealLegacyWalletKeys(ctx).catch((error: unknown) =>
+    ctx.log.warn({ err: error }, "boot-time wallet key re-seal failed (non-fatal)"),
+  );
   every(60_000, "freshness", () => refreshProviderFreshness(ctx));
   // ADR 0007: sentiment/risk scan of LIVE/NEXT drops' X mentions. Self-gates
   // to a no-op unless X_SIGNALS_ENABLED + a real bearer token are set; 5-min
@@ -197,8 +236,8 @@ async function main(): Promise<void> {
   every(300_000, "sentiment", () => runSentimentScan(ctx));
   // ADR 0009, item P4: registered right before mint-execution and shares
   // its interval, so a just-armed plan usually gets its calldata cached
-  // before it's claimed a cycle or more later — every() fires both as
-  // independent, unawaited intervals, not a strict "pre-build always
+  // before it's claimed a cycle or more later — both loops are independent,
+  // not a strict "pre-build always
   // completes first" guarantee, but that's fine: this only ever writes a
   // cache field, never changes plan status, so there's no race with the
   // atomic claim in mint-execution to worry about either way. See
@@ -251,8 +290,8 @@ async function main(): Promise<void> {
 
   const shutdown = (): void => {
     log.info("worker shutting down");
-    for (const timer of timers) {
-      clearInterval(timer);
+    for (const stop of stopScheduledTasks) {
+      stop();
     }
     for (const worker of workers) {
       void worker.close();

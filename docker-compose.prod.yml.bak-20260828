@@ -1,0 +1,156 @@
+# ─────────────────────────────────────────────────────────────────────────
+# HoodMint Radar — production stack for THIS host, behind the server's
+# EXISTING shared Traefik (container balancer-traefik-1, external docker
+# network "traefik-network", ACME resolver "mytlschallenge").
+#
+# Derived from compose.prod.yaml.sample, with the bundled traefik service
+# removed. This file and .env are gitignored — a `git pull` can never
+# overwrite the live prod config.
+#
+# Run:  docker compose -f docker-compose.prod.yml up -d --build
+# ─────────────────────────────────────────────────────────────────────────
+name: hoodmint-radar-prod
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: infra/docker/app.Dockerfile
+  image: hoodmint-radar-app:prod
+  init: true
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
+    VALKEY_URL: redis://valkey:6379/0
+  networks:
+    - internal
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: hoodmint
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hoodmint
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - internal
+    # No published ports — reachable only on the internal network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hoodmint -d hoodmint"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    <<: *app-base
+    restart: "no"
+    entrypoint: ["node", "migrate.mjs"]
+
+  web:
+    <<: *app-base
+    working_dir: /app/web
+    command: ["node", "apps/web/server.js"]
+    # No host port — the shared Traefik is the only ingress.
+    networks:
+      - internal
+      - traefik-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
+      VALKEY_URL: redis://valkey:6379/0
+      PORT: "3960"
+      HOSTNAME: "0.0.0.0"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-network"
+      - "traefik.http.routers.hoodmint.rule=Host(`${APP_DOMAIN}`)"
+      - "traefik.http.routers.hoodmint.entrypoints=websecure"
+      - "traefik.http.routers.hoodmint.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.hoodmint.loadbalancer.server.port=3960"
+      # NOTE: Cloudflare currently reaches this origin over plain HTTP for
+      # this hostname (Flexible-SSL behavior), which loops on the shared
+      # Traefik's global HTTPS redirect. Traefik caps user router priority
+      # below its internal redirect router, so this cannot be bypassed
+      # origin-side. Fix in Cloudflare: SSL/TLS → Full (strict) for the
+      # dic.app zone / remove any Flexible rule for opensea-tools.dic.app.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3960/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+
+  worker:
+    <<: *app-base
+    command: ["node", "worker.mjs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
+      VALKEY_URL: redis://valkey:6379/0
+      WORKER_HEALTH_PORT: "3963"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3963/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          # 768M: dense chain-radar catch-up decodes tens of thousands of
+          # mint events per pass; 512M OOM-killed the worker on 2026-08-27.
+          memory: 768M
+
+networks:
+  internal:
+  traefik-network:
+    external: true
+
+volumes:
+  postgres-data:

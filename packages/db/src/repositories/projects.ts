@@ -321,11 +321,17 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
     }
 
     // 6. Recompute lifecycle (domain purity: status lives in core, PRD §6).
-    const stageRows = await tx
+    const allStageRows = await tx
       .select()
       .from(dropStages)
       .where(eq(dropStages.projectId, projectId))
       .orderBy(asc(dropStages.startsAt));
+    // Paused rows are either provider-paused stages or superseded duplicates
+    // (step 4b). Neither may drive the lifecycle: only the active schedule
+    // does, and the project is PAUSED only when NOTHING active remains
+    // (seen live 2026-08-28: swoki flipped to PAUSED because its stale
+    // duplicate row was paused while the real stage stayed open).
+    const stageRows = allStageRows.filter((s) => !s.paused);
     const latestSupply = await latestSupplyFor(tx, projectId);
     const isoNow = input.now.toISOString();
     const lifecycle = computeLifecycle({
@@ -337,7 +343,7 @@ export async function upsertProjectFromSource(db: Db, input: ProjectUpsert): Pro
         paused: s.paused,
       })),
       isoNow,
-      paused: stageRows.some((s) => s.paused) ? true : null,
+      paused: allStageRows.length > 0 && stageRows.length === 0 ? true : null,
       supply: {
         minted: latestSupply?.minted ?? null,
         maxSupply: latestSupply?.maxSupply ?? null,
@@ -380,6 +386,10 @@ export type FeedView = "all" | "live" | "next" | "latest" | "eligible" | "watchl
 
 export type FeedSort = "recent" | "starting" | "velocity" | "minted" | "name" | "discovered";
 
+export type FeedWlFilter = "hit" | "none";
+
+export type FeedSocialFilter = "twitter" | "website" | "either" | "both";
+
 export interface FeedFilters {
   readonly view: FeedView;
   readonly userId?: string | undefined;
@@ -388,6 +398,11 @@ export interface FeedFilters {
   readonly source?: string | undefined;
   readonly confidence?: Confidence | undefined;
   readonly price?: "free" | "paid" | undefined;
+  /** `hit` means at least one enabled tracked wallet has a restricted-stage
+   * eligibility hit for the exact phase rendered by the feed row. `none`
+   * means no such hit; it does not claim UNKNOWN/AUTH_REQUIRED is ineligible. */
+  readonly wl?: FeedWlFilter | undefined;
+  readonly social?: FeedSocialFilter | undefined;
   readonly eligibility?: string | undefined;
   readonly watchedBy?: string | undefined;
   readonly firstSeenFrom?: Date | undefined;
@@ -457,12 +472,21 @@ export interface FeedRow {
   readonly supplyVerified: boolean;
   readonly velocity1h: number;
   readonly uniqueMinters1h: number;
+  readonly activityComputedAt: Date | null;
+  readonly stageId: string | null;
   readonly stageLabel: string | null;
   readonly stageKind: StageKind | null;
   readonly stagePriceWei: string | null;
-  /** Price of the NEXT (not-yet-open) stage — what an upcoming drop will
-   *  cost; `stagePriceWei` is the active stage's and is null before open. */
+  readonly stageMaxPerWallet: number | null;
+  /** Fields for the NEXT (not-yet-open) stage. The active-stage fields above
+   * are null before open, so presentation code must deliberately fall back to
+   * this complete set rather than showing an invented/blank phase. */
+  readonly nextStageId: string | null;
+  readonly nextStageLabel: string | null;
+  readonly nextStageKind: StageKind | null;
   readonly nextStagePriceWei: string | null;
+  readonly nextStageMaxPerWallet: number | null;
+  readonly nextStageEndsAt: Date | null;
   readonly stageStartsAt: Date | null;
   readonly stageEndsAt: Date | null;
 }
@@ -535,18 +559,44 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       where s.project_id = ${projects.id}
       order by s.observed_at desc limit 1), false)`;
 
-  const velocity1h = sql<number>`
-    coalesce((select sum(a.quantity)::int
-       from mint_aggregates a
-      where a.project_id = ${projects.id}
-        and a.bucket_size = '1h'
-        and a.bucket_start > now() - interval '1 hour'), 0)`;
+  // Read the worker-produced one-row snapshot. Page renders must never scan
+  // the append-only mint_events table (6M+ rows in production); absence is
+  // carried separately through activityComputedAt so UI can say "pending".
+  const velocity1h = sql<number>`coalesce((select a.quantity
+    from mint_activity_snapshots a where a.project_id = ${projects.id}), 0)`;
+  const uniqueMinters1h = sql<number>`coalesce((select a.unique_recipients
+    from mint_activity_snapshots a where a.project_id = ${projects.id}), 0)`;
+  const activityComputedAt = sql<Date | null>`(select a.computed_at
+    from mint_activity_snapshots a where a.project_id = ${projects.id})`;
 
-  const uniqueMinters1h = sql<number>`
-    coalesce((select count(distinct m.recipient)::int
-       from mint_events m
-      where m.project_id = ${projects.id}
-        and m.observed_at > now() - interval '1 hour'), 0)`;
+  // Scalar per-column subqueries shared by filtering and presentation. Both
+  // exclude paused phases. Keeping one selector for phase, price, and WL is
+  // essential: a project can be eligible in an old phase but not the phase
+  // whose price/countdown is currently shown.
+  const currentStageCol = (col: string): SQL =>
+    sql`(select ds.${sql.raw(col)} from drop_stages ds
+      where ds.project_id = ${projects.id}
+        and not ds.paused
+        and ds.starts_at <= now()
+        and (ds.ends_at is null or ds.ends_at > now())
+      order by ds.updated_at desc, ds.starts_at asc limit 1)`;
+  const nextStageCol = (col: string): SQL =>
+    sql`(select ds.${sql.raw(col)} from drop_stages ds
+      where ds.project_id = ${projects.id}
+        and not ds.paused
+        and ds.starts_at > now()
+      order by ds.starts_at asc, ds.updated_at desc limit 1)`;
+  const decisionStageCol = (col: string): SQL =>
+    sql`coalesce(${currentStageCol(col)}, ${nextStageCol(col)})`;
+  const decisionStageId = sql`${decisionStageCol("id")}`;
+  const decisionStagePrice = sql`${decisionStageCol("price_wei")}`;
+  const hasWlHit = sql`exists (
+    select 1
+      from eligibility_checks ec
+      join wallets w on w.id = ec.wallet_id and w.enabled
+     where ec.project_id = ${projects.id}
+       and ec.stage_id = ${decisionStageId}
+       and ec.status = 'ELIGIBLE_RESTRICTED')`;
 
   const conditions: SQL[] = [];
 
@@ -568,11 +618,7 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
     case "latest":
       break;
     case "eligible": {
-      conditions.push(
-        sql`exists (select 1 from eligibility_checks ec
-               where ec.project_id = ${projects.id}
-                 and ec.status = 'ELIGIBLE_RESTRICTED')`,
-      );
+      conditions.push(hasWlHit);
       break;
     }
     case "watchlist": {
@@ -636,13 +682,29 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
     conditions.push(lte(projects.firstSeenAt, filters.firstSeenTo));
   }
   if (filters.price === "free") {
-    conditions.push(sql`not exists (
-      select 1 from drop_stages ds
-       where ds.project_id = ${projects.id} and ds.price_wei is not null and ds.price_wei <> '0')`);
+    conditions.push(sql`${decisionStagePrice} = '0'`);
   } else if (filters.price === "paid") {
-    conditions.push(sql`exists (
-      select 1 from drop_stages ds
-       where ds.project_id = ${projects.id} and ds.price_wei is not null and ds.price_wei <> '0')`);
+    conditions.push(sql`${decisionStagePrice} is not null and ${decisionStagePrice} <> '0'`);
+  }
+  if (filters.wl === "hit") {
+    conditions.push(hasWlHit);
+  } else if (filters.wl === "none") {
+    conditions.push(sql`not (${hasWlHit})`);
+  }
+  if (filters.social === "twitter") {
+    conditions.push(sql`nullif(btrim(${projects.twitterUsername}), '') is not null`);
+  } else if (filters.social === "website") {
+    conditions.push(sql`nullif(btrim(${projects.projectUrl}), '') is not null`);
+  } else if (filters.social === "either") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        or nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
+  } else if (filters.social === "both") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        and nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
   }
   if (filters.watchedBy !== undefined) {
     conditions.push(
@@ -711,28 +773,6 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
               ]
             : [desc(projects.lastSeenAt), desc(projects.id)];
 
-  // Scalar per-column subqueries: Postgres has no tuple-projection syntax
-  // for correlated subqueries; each field repeats the (cheap, indexed) lookup.
-  // Both exclude paused stages: a stage OpenSea no longer publishes is
-  // paused (not deleted) by the detail refresh, and a paused/stale row must
-  // never be the one whose price/label the feed shows (found live
-  // 2026-08-28: swoki showed a stale "FREE" from a superseded stage row).
-  const currentStageCol = (col: string): SQL =>
-    sql`(select ds.${sql.raw(col)} from drop_stages ds
-      where ds.project_id = ${projects.id}
-        and not ds.paused
-        and ds.starts_at <= now()
-        and (ds.ends_at is null or ds.ends_at > now())
-      order by ds.updated_at desc, ds.starts_at asc limit 1)`;
-  // The NEXT (not-yet-open) stage — what an upcoming drop will cost / when
-  // it opens. Null once every stage has started.
-  const nextStageCol = (col: string): SQL =>
-    sql`(select ds.${sql.raw(col)} from drop_stages ds
-      where ds.project_id = ${projects.id}
-        and not ds.paused
-        and ds.starts_at > now()
-      order by ds.starts_at asc, ds.updated_at desc limit 1)`;
-
   const rows = await db
     .select({
       id: projects.id,
@@ -755,16 +795,24 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
       supplyVerified: latestVerified,
       velocity1h,
       uniqueMinters1h,
+      activityComputedAt,
       // Same double-wrap shape as the currentStageCol fields below and for
       // the same reason: a `${projects.id}` placed DIRECTLY in a select-list
       // sql template renders as an unqualified `"id"`, which inside the
       // correlated subselect resolves to `ds.id` — never matching, so this
       // came back null for every row (found live 2026-08-28 via toSQL()).
       // Wrapping the inner template keeps it rendered as "projects"."id".
+      nextStageId: sql<string | null>`${nextStageCol("id")}`,
+      nextStageLabel: sql<string | null>`${nextStageCol("label")}`,
+      nextStageKind: sql<StageKind | null>`${nextStageCol("type")}`,
       nextStagePriceWei: sql<string | null>`${nextStageCol("price_wei")}`,
+      nextStageMaxPerWallet: sql<number | null>`${nextStageCol("max_per_wallet")}`,
+      nextStageEndsAt: sql<Date | null>`${nextStageCol("ends_at")}`,
+      stageId: sql<string | null>`${currentStageCol("id")}`,
       stageLabel: sql<string | null>`${currentStageCol("label")}`,
       stageKind: sql<StageKind | null>`${currentStageCol("type")}`,
       stagePriceWei: sql<string | null>`${currentStageCol("price_wei")}`,
+      stageMaxPerWallet: sql<number | null>`${currentStageCol("max_per_wallet")}`,
       stageStartsAt: sql<Date | null>`${currentStageCol("starts_at")}`,
       stageEndsAt: sql<Date | null>`${currentStageCol("ends_at")}`,
     })
@@ -794,6 +842,11 @@ export async function queryFeed(db: Db, filters: FeedFilters): Promise<FeedPage>
  * Returns rows changed.
  */
 export async function recomputeLifecycles(db: Db): Promise<number> {
+  // SOLD_OUT wins over the schedule (core/status.ts rule, mirrored in SQL):
+  // the latest VERIFIED supply snapshot with minted >= max. A drop whose
+  // supply went in an earlier phase must never sit under /live (seen live
+  // 2026-08-28: crypto2punk2robinhood 5000/5000 shown LIVE; Goat Street
+  // "WL FCFS" armed with zero supply left).
   const rows = await db.execute(sql`
     with st as (
       select p.id,
@@ -801,12 +854,16 @@ export async function recomputeLifecycles(db: Db): Promise<number> {
                   and s.starts_at <= now() and (s.ends_at is null or s.ends_at > now())) as live,
         (select min(s.starts_at) from drop_stages s where s.project_id = p.id and not s.paused
                   and s.starts_at > now()) as next_start,
-        exists (select 1 from drop_stages s where s.project_id = p.id) as has_stages
+        exists (select 1 from drop_stages s where s.project_id = p.id) as has_stages,
+        coalesce((select ss.verified and ss.max_supply is not null and ss.minted >= ss.max_supply
+                    from supply_snapshots ss where ss.project_id = p.id
+                   order by ss.observed_at desc limit 1), false) as sold_out
       from projects p
-      where p.lifecycle_status in ('LIVE', 'NEXT')
+      where p.lifecycle_status in ('LIVE', 'NEXT', 'SOLD_OUT', 'PAUSED')
     )
     update projects p
        set lifecycle_status = case
+             when st.sold_out then 'SOLD_OUT'
              when st.live then 'LIVE'
              when st.next_start is not null then 'NEXT'
              when st.has_stages then 'ENDED'
@@ -817,6 +874,7 @@ export async function recomputeLifecycles(db: Db): Promise<number> {
      where st.id = p.id
        and (
          p.lifecycle_status <> case
+             when st.sold_out then 'SOLD_OUT'
              when st.live then 'LIVE'
              when st.next_start is not null then 'NEXT'
              when st.has_stages then 'ENDED'
@@ -826,6 +884,45 @@ export async function recomputeLifecycles(db: Db): Promise<number> {
     returning p.id
   `);
   return unwrapRows<{ id: string }>(rows).length;
+}
+
+/** LIVE/NEXT projects with a contract — the on-chain supply sweep's targets. */
+export async function supplySweepTargets(
+  db: Db,
+  limit: number,
+): Promise<{ id: string; slug: string | null; contractAddress: string }[]> {
+  const rows = await db
+    .select({ id: projects.id, slug: projects.slug, contractAddress: projects.contractAddress })
+    .from(projects)
+    .where(
+      and(
+        inArray(projects.lifecycleStatus, ["LIVE", "NEXT"]),
+        sql`${projects.contractAddress} is not null`,
+      ),
+    )
+    .orderBy(asc(sql`coalesce(${projects.nextStageStart}, 'infinity'::timestamptz)`))
+    .limit(limit);
+  return rows.filter(
+    (r): r is typeof r & { contractAddress: string } => r.contractAddress !== null,
+  );
+}
+
+/** Record a VERIFIED on-chain supply reading (totalSupply / maxSupply). */
+export async function recordChainSupply(
+  db: Db,
+  projectId: string,
+  reading: { minted: bigint; maxSupply: bigint | null; blockNumber: bigint | null },
+  now: Date,
+): Promise<void> {
+  await db.insert(supplySnapshots).values({
+    projectId,
+    minted: reading.minted,
+    maxSupply: reading.maxSupply,
+    observedAt: now,
+    source: "chain:erc721",
+    verified: reading.maxSupply !== null,
+    blockNumber: reading.blockNumber,
+  });
 }
 
 export interface ProjectDetail {
@@ -1005,6 +1102,114 @@ export async function upcomingDropStages(
     )
     .orderBy(asc(dropStages.startsAt));
   return rows;
+}
+
+export interface CalendarStage {
+  readonly stageId: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectSlug: string | null;
+  readonly projectImageUrl: string | null;
+  readonly twitterUsername: string | null;
+  readonly projectUrl: string | null;
+  readonly discordUrl: string | null;
+  readonly safelistStatus: string | null;
+  readonly confidence: Confidence;
+  readonly lifecycleStatus: LifecycleStatus;
+  readonly lastSeenAt: Date;
+  readonly stageLabel: string;
+  readonly stageKind: StageKind;
+  readonly stagePriceWei: string | null;
+  readonly stageMaxPerWallet: number | null;
+  readonly startsAt: Date;
+  readonly endsAt: Date | null;
+}
+
+export interface CalendarStageFilters {
+  readonly now: Date;
+  readonly limit?: number;
+  readonly search?: string;
+  readonly price?: "free" | "paid";
+  readonly wl?: FeedWlFilter;
+  readonly social?: FeedSocialFilter;
+}
+
+/** Bounded, phase-level agenda for the calendar (one row per mint stage). */
+export async function listCalendarStages(
+  db: Db,
+  filters: CalendarStageFilters,
+): Promise<CalendarStage[]> {
+  const conditions: SQL[] = [gt(dropStages.startsAt, filters.now), eq(dropStages.paused, false)];
+  if (filters.search !== undefined && filters.search.trim() !== "") {
+    const term = filters.search.trim();
+    const match = or(
+      ilike(projects.name, `%${term}%`),
+      ilike(projects.slug, `%${term}%`),
+      eq(projects.contractAddress, term.toLowerCase()),
+    );
+    if (match !== undefined) {
+      conditions.push(match);
+    }
+  }
+  if (filters.price === "free") {
+    conditions.push(eq(dropStages.priceWei, "0"));
+  } else if (filters.price === "paid") {
+    conditions.push(sql`${dropStages.priceWei} is not null and ${dropStages.priceWei} <> '0'`);
+  }
+  const hasWlHit = sql`exists (
+    select 1
+      from eligibility_checks ec
+      join wallets w on w.id = ec.wallet_id and w.enabled
+     where ec.project_id = ${projects.id}
+       and ec.stage_id = ${dropStages.id}
+       and ec.status = 'ELIGIBLE_RESTRICTED')`;
+  if (filters.wl === "hit") {
+    conditions.push(hasWlHit);
+  } else if (filters.wl === "none") {
+    conditions.push(sql`not (${hasWlHit})`);
+  }
+  if (filters.social === "twitter") {
+    conditions.push(sql`nullif(btrim(${projects.twitterUsername}), '') is not null`);
+  } else if (filters.social === "website") {
+    conditions.push(sql`nullif(btrim(${projects.projectUrl}), '') is not null`);
+  } else if (filters.social === "either") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        or nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
+  } else if (filters.social === "both") {
+    conditions.push(
+      sql`(nullif(btrim(${projects.twitterUsername}), '') is not null
+        and nullif(btrim(${projects.projectUrl}), '') is not null)`,
+    );
+  }
+
+  return db
+    .select({
+      stageId: dropStages.id,
+      projectId: dropStages.projectId,
+      projectName: projects.name,
+      projectSlug: projects.slug,
+      projectImageUrl: projects.imageUrl,
+      twitterUsername: projects.twitterUsername,
+      projectUrl: projects.projectUrl,
+      discordUrl: projects.discordUrl,
+      safelistStatus: projects.safelistStatus,
+      confidence: projects.confidence,
+      lifecycleStatus: projects.lifecycleStatus,
+      lastSeenAt: projects.lastSeenAt,
+      stageLabel: dropStages.label,
+      stageKind: dropStages.type,
+      stagePriceWei: dropStages.priceWei,
+      stageMaxPerWallet: dropStages.maxPerWallet,
+      startsAt: dropStages.startsAt,
+      endsAt: dropStages.endsAt,
+    })
+    .from(dropStages)
+    .innerJoin(projects, eq(projects.id, dropStages.projectId))
+    .where(and(...conditions))
+    .orderBy(asc(dropStages.startsAt), asc(dropStages.id))
+    .limit(Math.min(Math.max(filters.limit ?? 250, 1), 500));
 }
 
 /**

@@ -196,6 +196,11 @@ export const projects = pgTable(
     discordUrl: text("discord_url"),
     safelistStatus: text("safelist_status"),
     socialsFetchedAt: timestamp("socials_fetched_at", { withTimezone: true }),
+    /** Last time `/drops/{slug}` was asked about this project (200 or 404).
+     *  Drives the re-check of stage-less recent collections (2026-09-02:
+     *  yolkies-nft was swept before its SeaDrop schedule existed and then
+     *  never asked again). */
+    dropCheckedAt: timestamp("drop_checked_at", { withTimezone: true }),
     confidence: text("confidence", {
       enum: ["verified", "corroborated", "single-source", "unverified"],
     })
@@ -365,6 +370,22 @@ export const mintAggregates = pgTable(
 );
 
 /**
+ * Exact rolling-one-hour activity prepared by the worker for read paths.
+ * Feed requests only read this one-row snapshot; they never aggregate the
+ * append-only mint_events table. `computedAt` is retained as provenance so
+ * callers can label an absent/stale snapshot instead of inventing freshness.
+ */
+export const mintActivitySnapshots = pgTable("mint_activity_snapshots", {
+  projectId: uuid("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+  computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  quantity: integer("quantity").notNull().default(0),
+  uniqueRecipients: integer("unique_recipients").notNull().default(0),
+});
+
+/**
  * Whale / holder-concentration analysis (feature-backlog.md §2, shipped
  * 2026-08-22). One row per project — the latest snapshot, not a history
  * (mint_aggregates already owns time-bucketed history; this is a
@@ -485,6 +506,11 @@ export const wallets = pgTable(
     encryptedSigningKey: text("encrypted_signing_key"),
     signingKeyFingerprint: text("signing_key_fingerprint"),
     signingKeyAddedAt: timestamp("signing_key_added_at", { withTimezone: true }),
+    // Worker-owned funding snapshot (2026-09-02): native balance read every
+    // minute for managed wallets so admin pages can show "can this wallet
+    // pay?" without calling an RPC in a page render. Decimal wei string.
+    nativeBalanceWei: text("native_balance_wei"),
+    balanceCheckedAt: timestamp("balance_checked_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

@@ -55,7 +55,14 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    volumes:
+    # `make wallet-keys` prints both halves. Save the private half to
+# ./secrets/wallet_key_private (chmod 600, gitignored) and set
+# WALLET_KEY_PUBLIC_KEY in .env.prod.
+secrets:
+  wallet_key_private:
+    file: ./secrets/wallet_key_private
+
+volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./traefik/acme.json:/acme/acme.json"
     security_opt:
@@ -109,6 +116,11 @@ services:
       VALKEY_URL: redis://valkey:6379/0
       PORT: "3960"
       HOSTNAME: "0.0.0.0"
+      # Managed minting keys: the web container must hold ONLY the public
+      # (encrypt-only) half. Blank the private half even if .env.prod has it,
+      # so a compromised web process can never decrypt a minting key.
+      WALLET_KEY_PRIVATE_KEY: ""
+      WALLET_KEY_PRIVATE_KEY_FILE: ""
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.hoodmint.rule=Host(`${APP_DOMAIN}`)"
@@ -144,6 +156,12 @@ services:
       DATABASE_URL: postgres://hoodmint:${POSTGRES_PASSWORD}@postgres:5432/hoodmint
       VALKEY_URL: redis://valkey:6379/0
       WORKER_HEALTH_PORT: "3963"
+      # The worker is the ONLY process that can decrypt managed minting keys.
+      # Mount the private half as a Compose secret (see `secrets:` below) so
+      # it never appears in .env.prod or `docker inspect` output.
+      WALLET_KEY_PRIVATE_KEY_FILE: /run/secrets/wallet_key_private
+    secrets:
+      - wallet_key_private
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3963/health/live || exit 1"]
       interval: 10s

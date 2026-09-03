@@ -29,3 +29,12 @@ Always read `DESIGN.md` before making any visual or UI decisions. Fonts, color r
 ## Local ports
 
 Host-published local services use the contiguous sequence starting at 3960 (web 3960, Postgres 3961, Valkey 3962, worker health 3963). Start with `scripts/start-dev.sh`; stop with `scripts/stop-dev.sh`. Production posture: `scripts/start-prod.sh` / `scripts/stop-prod.sh`. Unconfigured env is handled by `scripts/env-setup.sh` (see `docs/ops-setup.md`). Do not revert defaults to 3000/5432/6379.
+
+## Anti-patterns to avoid
+
+1. Never aggregate tracked-wallet eligibility across every phase and display it beside one current/next phase. Every decision-card eligibility lookup and WL filter must require the exact `{ projectId, stageId }`; a hit from an ended phase is not a hit for the displayed mint.
+2. Every dedicated database client must close on initialization/subscription failure before a reconnect is scheduled. Reconnect loops that abandon failed clients can silently exhaust PostgreSQL's connection ceiling.
+3. Page renders are snapshot readers: never call providers or aggregate `mint_events` in a feed request. Provider/WL checks and rolling metrics belong to non-overlapping worker tasks that persist provenance; page-level WL UI must stream independently. Worker periodic jobs must use the completion-based scheduler, never a naked `setInterval` in the entrypoint.
+4. Provider-error cleanup is best-effort and must not rethrow from a catch path. Never resolve a throttled credential again merely to invalidate it; otherwise BullMQ turns a parked provider into a short retry storm.
+5. Theme token tests must compare each dark/light selector against its matching TypeScript map. Checking that a value appears somewhere in the CSS permits cross-theme drift and is a false green.
+6. BullMQ provider jobs must complete-and-park on `RateLimited`/`AuthRequired`; never feed explicit provider backpressure into a generic seconds-scale retry policy. A later deterministic freshness job is the retry.

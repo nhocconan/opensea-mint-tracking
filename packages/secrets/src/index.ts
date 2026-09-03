@@ -10,6 +10,11 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
+  hkdfSync,
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
@@ -32,6 +37,26 @@ export interface SealedSecret {
   readonly keyVersion: number;
   readonly algorithm: "aes-256-gcm";
 }
+
+/**
+ * Asymmetric envelope (managed minting keys, 2026-08-28 hardening): sealed
+ * to a *recipient public key* so the process that encrypts (the
+ * internet-facing web app at import time) holds nothing that can decrypt.
+ * Only the worker — the one process that must sign — holds the matching
+ * X25519 private key. Layout: ephemeral X25519 public key (32) || nonce (12)
+ * || GCM tag (16) || body, base64. Key = HKDF-SHA256(ECDH shared secret,
+ * salt = ephPub || recipientPub, info = "hoodmint/wallet-key/v1").
+ */
+export interface SealedToRecipient {
+  readonly ciphertext: string;
+  readonly keyVersion: number;
+  readonly algorithm: typeof ASYMMETRIC_ALGORITHM;
+}
+
+export const ASYMMETRIC_ALGORITHM = "x25519-hkdf-sha256-aes-256-gcm" as const;
+
+/** Any sealed blob a wallet row may carry: legacy symmetric or envelope. */
+export type SealedWalletKey = SealedSecret | SealedToRecipient;
 
 function deriveKey(masterKeyB64: string): Buffer {
   const raw = Buffer.from(masterKeyB64, "base64");
@@ -76,6 +101,160 @@ export function openSecret(sealed: SealedSecret, masterKeyB64: string): string {
   });
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
+}
+
+/* ── X25519 envelope primitives ─────────────────────────────────────────── */
+
+// Raw 32-byte X25519 keys wrapped in their fixed DER prefixes (RFC 8410),
+// so the operator-facing format is just base64 of 32 bytes — same shape as
+// APP_ENCRYPTION_KEY — and never a PEM file on disk.
+const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
+const X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
+const HKDF_INFO = "hoodmint/wallet-key/v1";
+
+function raw32(b64: string, what: string): Buffer {
+  const raw = Buffer.from(b64, "base64");
+  if (raw.length !== 32) {
+    throw new Error(`${what} must decode to exactly 32 bytes`);
+  }
+  return raw;
+}
+
+function publicKeyFromRaw(raw: Buffer) {
+  return createPublicKey({ key: Buffer.concat([X25519_SPKI_PREFIX, raw]), format: "der", type: "spki" });
+}
+
+function privateKeyFromRaw(raw: Buffer) {
+  return createPrivateKey({
+    key: Buffer.concat([X25519_PKCS8_PREFIX, raw]),
+    format: "der",
+    type: "pkcs8",
+  });
+}
+
+function rawPublicKey(key: ReturnType<typeof createPublicKey>): Buffer {
+  return Buffer.from(key.export({ format: "der", type: "spki" })).subarray(X25519_SPKI_PREFIX.length);
+}
+
+export interface WalletKeypair {
+  /** Give to the web app (WALLET_KEY_PUBLIC_KEY). Encrypt-only; not secret. */
+  readonly publicKeyB64: string;
+  /** Worker ONLY (WALLET_KEY_PRIVATE_KEY). The one thing that can decrypt. */
+  readonly privateKeyB64: string;
+}
+
+/** Fresh X25519 recipient keypair, both halves as base64 raw 32 bytes. */
+export function generateWalletKeypair(): WalletKeypair {
+  const { publicKey, privateKey } = generateKeyPairSync("x25519");
+  const rawPriv = Buffer.from(privateKey.export({ format: "der", type: "pkcs8" })).subarray(
+    X25519_PKCS8_PREFIX.length,
+  );
+  return {
+    publicKeyB64: rawPublicKey(publicKey).toString("base64"),
+    privateKeyB64: rawPriv.toString("base64"),
+  };
+}
+
+/** Public half of a base64 raw X25519 private key (for config self-checks). */
+export function walletPublicKeyFor(privateKeyB64: string): string {
+  const priv = privateKeyFromRaw(raw32(privateKeyB64, "WALLET_KEY_PRIVATE_KEY"));
+  return rawPublicKey(createPublicKey(priv)).toString("base64");
+}
+
+/** Encrypt a UTF-8 secret so that only the holder of the private key can read it. */
+export function sealToRecipient(plaintext: string, recipientPublicKeyB64: string): SealedToRecipient {
+  const recipientRaw = raw32(recipientPublicKeyB64, "WALLET_KEY_PUBLIC_KEY");
+  const recipient = publicKeyFromRaw(recipientRaw);
+  const ephemeral = generateKeyPairSync("x25519");
+  const ephemeralRaw = rawPublicKey(ephemeral.publicKey);
+  const shared = diffieHellman({ privateKey: ephemeral.privateKey, publicKey: recipient });
+  const key = Buffer.from(
+    hkdfSync("sha256", shared, Buffer.concat([ephemeralRaw, recipientRaw]), HKDF_INFO, 32),
+  );
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength: GCM_AUTH_TAG_LENGTH });
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  key.fill(0);
+  shared.fill(0);
+  return {
+    ciphertext: Buffer.concat([ephemeralRaw, nonce, tag, encrypted]).toString("base64"),
+    keyVersion: CURRENT_KEY_VERSION,
+    algorithm: ASYMMETRIC_ALGORITHM,
+  };
+}
+
+/** Decrypt an envelope with the recipient private key; throws on tamper/wrong key. */
+export function openFromRecipient(sealed: SealedToRecipient, recipientPrivateKeyB64: string): string {
+  if (sealed.algorithm !== ASYMMETRIC_ALGORITHM) {
+    throw new Error(`unsupported cipher ${sealed.algorithm}`);
+  }
+  const priv = privateKeyFromRaw(raw32(recipientPrivateKeyB64, "WALLET_KEY_PRIVATE_KEY"));
+  const recipientRaw = rawPublicKey(createPublicKey(priv));
+  const blob = Buffer.from(sealed.ciphertext, "base64");
+  const ephemeralRaw = blob.subarray(0, 32);
+  const nonce = blob.subarray(32, 44);
+  const tag = blob.subarray(44, 44 + GCM_AUTH_TAG_LENGTH);
+  const body = blob.subarray(44 + GCM_AUTH_TAG_LENGTH);
+  const shared = diffieHellman({ privateKey: priv, publicKey: publicKeyFromRaw(ephemeralRaw) });
+  const key = Buffer.from(
+    hkdfSync("sha256", shared, Buffer.concat([ephemeralRaw, recipientRaw]), HKDF_INFO, 32),
+  );
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce, {
+    authTagLength: GCM_AUTH_TAG_LENGTH,
+  });
+  decipher.setAuthTag(tag);
+  try {
+    return Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
+  } finally {
+    key.fill(0);
+    shared.fill(0);
+  }
+}
+
+export interface WalletKeyOpeners {
+  /** APP_ENCRYPTION_KEY — opens legacy symmetric blobs (pre-envelope imports). */
+  readonly masterKeyB64: string;
+  /** WALLET_KEY_PRIVATE_KEY — opens envelope blobs. Worker only. */
+  readonly walletPrivateKeyB64?: string | undefined;
+}
+
+export function isSealedToRecipient(sealed: SealedWalletKey): sealed is SealedToRecipient {
+  return sealed.algorithm === ASYMMETRIC_ALGORITHM;
+}
+
+/**
+ * Parse + open a wallet's stored sealed-key JSON whichever scheme sealed it.
+ * The stored JSON is validated structurally BEFORE any crypto so a corrupt
+ * blob raises a fixed message — JSON.parse's own SyntaxError would quote a
+ * slice of the (cipher)text into the error, which then lands in attempt
+ * rows and logs.
+ */
+export function openWalletKey(sealedJson: string, openers: WalletKeyOpeners): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sealedJson);
+  } catch {
+    throw new Error("stored wallet key blob is not valid JSON");
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    typeof (parsed as { ciphertext?: unknown }).ciphertext !== "string" ||
+    typeof (parsed as { algorithm?: unknown }).algorithm !== "string"
+  ) {
+    throw new Error("stored wallet key blob has an unexpected shape");
+  }
+  const sealed = parsed as SealedWalletKey;
+  if (isSealedToRecipient(sealed)) {
+    if (openers.walletPrivateKeyB64 === undefined) {
+      throw new Error(
+        "wallet key is sealed to the worker keypair but WALLET_KEY_PRIVATE_KEY is not configured",
+      );
+    }
+    return openFromRecipient(sealed, openers.walletPrivateKeyB64);
+  }
+  return openSecret(sealed, openers.masterKeyB64);
 }
 
 /**
