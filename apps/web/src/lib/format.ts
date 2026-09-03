@@ -3,7 +3,7 @@
  * conversion happens only here. Wei display truncates to 4 significant
  * decimals; addresses are shown short with copy affordance elsewhere.
  */
-import { coerceDate, formatWei, type Wei } from "@hoodmint/core";
+import { coerceDate, formatUnitsShort, formatWei, type Wei } from "@hoodmint/core";
 
 /** Re-exported for call sites already importing from here — see @hoodmint/core's coerceDate for why this exists. */
 export const toDate = coerceDate;
@@ -96,4 +96,34 @@ export function formatVelocity(quantity: number, unique: number): string {
 
 export function shortAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
+/**
+ * Wallet native balance snapshot for admin tables: "0.0123 ETH · 2m ago",
+ * "—" when never read. Display only.
+ */
+export function formatBalance(
+  wei: string | null,
+  checkedAt: string | Date | null,
+  now: number = Date.now(),
+): string {
+  if (wei === null || !/^[0-9]+$/.test(wei)) {
+    return "—";
+  }
+  const eth = `${formatUnitsShort(BigInt(wei))} ETH`;
+  if (checkedAt === null) {
+    return eth;
+  }
+  const ageMs = now - (checkedAt instanceof Date ? checkedAt : new Date(checkedAt)).getTime();
+  if (!Number.isFinite(ageMs) || ageMs < 0) {
+    return eth;
+  }
+  const minutes = Math.floor(ageMs / 60_000);
+  const age =
+    minutes < 1
+      ? "just now"
+      : minutes < 60
+        ? `${minutes}m ago`
+        : `${Math.floor(minutes / 60)}h ago`;
+  return `${eth} · ${age}`;
 }

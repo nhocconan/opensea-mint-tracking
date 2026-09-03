@@ -63,7 +63,14 @@ export default async function AdminSpecialMintsPage({
   ]);
   const managedWallets: ManagedWalletOption[] = walletRows
     .filter((w) => w.hasSigningKey)
-    .map((w) => ({ id: w.id, address: w.address, label: w.label }));
+    .map((w) => ({
+      id: w.id,
+      address: w.address,
+      label: w.label,
+      nativeBalanceWei: w.nativeBalanceWei,
+      balanceCheckedAt:
+        w.balanceCheckedAt === null ? null : toDate(w.balanceCheckedAt).toISOString(),
+    }));
 
   const plans =
     detail === undefined

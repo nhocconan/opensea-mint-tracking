@@ -42,6 +42,7 @@ import { runRpcHealthCheck } from "./workers/rpc-health.ts";
 import { runSentimentScan } from "./workers/sentiment.ts";
 import { runStageStartingPass } from "./workers/stage-alerts.ts";
 import { runSupplySweep } from "./workers/supply.ts";
+import { refreshWalletBalances } from "./workers/wallet-balances.ts";
 
 const ctx = context();
 const { config, log, db } = ctx;
@@ -186,6 +187,10 @@ async function main(): Promise<void> {
   // RPC registry existed but nothing ever recorded health against it —
   // this is what makes rankRpcEndpoints() have real data to rank on.
   every(45_000, "rpc-health", () => runRpcHealthCheck(ctx));
+  // Managed-wallet native balance snapshot for the admin funding column
+  // (the arm action / presign pass do their own fresh read — this is the
+  // always-visible "can it pay?" signal, never a page-render RPC call).
+  every(60_000, "wallet-balances", () => refreshWalletBalances(ctx));
   // ADR 0009, item P5: same cadence as rpc-health since it reuses the
   // same best-endpoint resolution.
   every(45_000, "clock-calibration", () => runClockCalibration(ctx));

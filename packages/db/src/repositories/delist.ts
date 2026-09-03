@@ -6,7 +6,7 @@
  * of the live/next/calendar feeds: lifecycle → ENDED, future stages paused,
  * next_stage_start cleared.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import { dropStages, projects } from "../schema.ts";
 
@@ -52,5 +52,39 @@ export async function liveNextSlugs(db: Db, limit = 300): Promise<string[]> {
     )
     .orderBy(projects.nextStageStart)
     .limit(limit);
+  return rows.map((r) => r.slug as string);
+}
+
+/** Record that `/drops/{slug}` was consulted for this slug (any answer). */
+export async function markProjectDropChecked(db: Db, slug: string, at: Date): Promise<void> {
+  await db.update(projects).set({ dropCheckedAt: at }).where(eq(projects.slug, slug));
+}
+
+/**
+ * Recently discovered collections that still carry no stage schedule —
+ * candidates for a periodic `/drops/{slug}` re-check. A collection swept
+ * minutes after creation is usually asked about its drop BEFORE the creator
+ * has published the SeaDrop stages; without this, it stays a stage-less
+ * "collection" forever and never reaches the feeds (yolkies-nft, 2026-09-02).
+ * Least-recently-checked first so a bounded batch rotates through the whole
+ * window instead of re-asking the same newest slugs every pass.
+ */
+export async function stagelessRecentCollectionSlugs(
+  db: Db,
+  input: { firstSeenAfter: Date; limit: number },
+): Promise<string[]> {
+  const rows = await db
+    .select({ slug: projects.slug })
+    .from(projects)
+    .where(
+      and(
+        sql`${projects.slug} is not null`,
+        eq(projects.lifecycleStatus, "UNKNOWN"),
+        sql`${projects.firstSeenAt} >= ${input.firstSeenAfter.toISOString()}`,
+        sql`not exists (select 1 from drop_stages ds where ds.project_id = ${sql.raw('"projects"."id"')})`,
+      ),
+    )
+    .orderBy(sql`${projects.dropCheckedAt} asc nulls first`, desc(projects.firstSeenAt))
+    .limit(input.limit);
   return rows.map((r) => r.slug as string);
 }

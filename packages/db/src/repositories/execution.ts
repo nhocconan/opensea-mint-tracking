@@ -432,6 +432,9 @@ export interface PresignCandidate {
   readonly cachedTxAt: Date | string | null;
   readonly perPlanCeilingWei: string;
   readonly quantity: number;
+  /** Stage pricing for the presign funding gate (null = fire_at-only plan). */
+  readonly stagePriceWei: string | null;
+  readonly stageCurrency: string | null;
 }
 
 /**
@@ -459,6 +462,8 @@ export async function armedManagedPlansForPresign(db: Db, now: Date): Promise<Pr
       cachedTxAt: mintPlans.cachedTxAt,
       perPlanCeilingWei: mintPlans.perPlanCeilingWei,
       quantity: mintPlans.quantity,
+      stagePriceWei: dropStages.priceWei,
+      stageCurrency: dropStages.currency,
     })
     .from(mintPlans)
     .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
@@ -486,6 +491,8 @@ export async function armedManagedPlansForPresign(db: Db, now: Date): Promise<Pr
     cachedTxAt: r.cachedTxAt,
     perPlanCeilingWei: r.perPlanCeilingWei,
     quantity: r.quantity,
+    stagePriceWei: r.stagePriceWei ?? null,
+    stageCurrency: r.stageCurrency ?? null,
   }));
 }
 

@@ -1,6 +1,12 @@
 "use server";
 
-import { AUTO_MINT_POLICY_SETTING_KEY, isAppError, parseAutoMintPolicy } from "@hoodmint/core";
+import {
+  AUTO_MINT_POLICY_SETTING_KEY,
+  isAppError,
+  isNotADropMarkerFresh,
+  notADropSettingKey,
+  parseAutoMintPolicy,
+} from "@hoodmint/core";
 import {
   activateSigner,
   alertChannels,
@@ -27,11 +33,13 @@ import {
   getCredentialSecret,
   getDropStage,
   getMintPlan,
+  getSetting,
   getSigner,
   listWallets,
   markAuthRequiredChecksDue,
   markExecutionAttemptBroadcast,
   markProviderHealth,
+  projectBySlugWithStageCount,
   recordAudit,
   revokeCredential,
   revokeSigner as revokeSignerRepo,
@@ -78,6 +86,7 @@ import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { isUuid } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
+import { checkArmFunding } from "@/lib/funding.ts";
 import { gmt7LocalToUtc, parseMintTarget } from "@/lib/mint-target.ts";
 import { getSessionUser, requireApi, requireFreshStepUp } from "@/lib/session.ts";
 
@@ -2046,7 +2055,7 @@ export async function createMintPlanAction(input: {
  * its own separate, physical confirmation at fire time.
  */
 export async function armMintPlanAction(id: string, windowMinutes: number): Promise<ActionState> {
-  const { db } = container();
+  const { db, config } = container();
   let actor: string;
   try {
     const user = await requireFreshStepUp("execution:operate");
@@ -2059,6 +2068,25 @@ export async function armMintPlanAction(id: string, windowMinutes: number): Prom
   }
   if (!Number.isFinite(windowMinutes) || windowMinutes <= 0 || windowMinutes > 60) {
     return { ok: false, message: "Arm window must be between 1 and 60 minutes." };
+  }
+  // Funding gate: a managed wallet that cannot pay price + fee + gas is
+  // refused here, with the top-up amount, instead of expiring at fire time.
+  const draft = await getMintPlan(db, id);
+  if (draft === undefined) {
+    return { ok: false, message: "Plan not found." };
+  }
+  const draftStage = draft.stageId === null ? undefined : await getDropStage(db, draft.stageId);
+  const funding = await checkArmFunding(db, config, draft, draftStage);
+  if (!funding.ok) {
+    await recordAudit(db, {
+      actorUserId: actor,
+      action: "execution.mint_plan.arm",
+      targetType: "mint_plan",
+      targetId: id,
+      result: "failure",
+      metadata: { reason: "insufficient_funds" },
+    });
+    return { ok: false, message: funding.message };
   }
   const armed = await armMintPlan(db, id, actor, windowMinutes);
   if (armed === undefined) {
@@ -2196,6 +2224,20 @@ export async function resolveSpecialMintTargetAction(input: {
       result: "success",
       metadata: { kind: target.kind },
     });
+    // Known project but no schedule stored: it was swept before its SeaDrop
+    // stages existed (yolkies-nft, 2026-09-02). Re-ask OpenSea right now
+    // rather than handing the operator an empty phase picker.
+    if (project.lifecycleStatus === "UNKNOWN" && project.slug !== null) {
+      const known = await projectBySlugWithStageCount(db, project.slug);
+      if (known !== undefined && known.stages === 0) {
+        await enqueueDetail(config.VALKEY_URL, { slug: project.slug, freshnessBucket: "hot" });
+        return {
+          ok: true,
+          message: `Resolved "${project.name}", but no mint phases are stored yet — re-fetching the schedule from OpenSea now. Reload this page in ~30s; if phases still do not appear, OpenSea has no drop published for it (yet).`,
+          projectId: project.id,
+        };
+      }
+    }
     return { ok: true, message: `Resolved "${project.name}".`, projectId: project.id };
   }
   if (target.kind === "contract") {
@@ -2205,6 +2247,13 @@ export async function resolveSpecialMintTargetAction(input: {
         "That contract isn't tracked yet. Paste the OpenSea collection URL (or its slug) instead — a fetch can only be requested by slug.",
     };
   }
+  // A recent worker check may have found no drop for this slug: keep
+  // re-asking (schedules get published minutes after a collection appears)
+  // and only change the wording so the operator knows what OpenSea said.
+  const notADrop = await getSetting<unknown>(db, notADropSettingKey(target.slug)).catch(
+    () => undefined,
+  );
+  const recentlyNotADrop = isNotADropMarkerFresh(notADrop, Date.now());
   await enqueueDetail(config.VALKEY_URL, { slug: target.slug, freshnessBucket: "hot" });
   await recordAudit(db, {
     actorUserId: actor,
@@ -2216,7 +2265,9 @@ export async function resolveSpecialMintTargetAction(input: {
   });
   return {
     ok: false,
-    message: `"${target.slug}" isn't tracked yet — fetching it from OpenSea now. Retry in ~30s. If it never resolves it isn't an OpenSea drop.`,
+    message: recentlyNotADrop
+      ? `OpenSea reported no drop for "${target.slug}" within the last 30 minutes (the collection exists, but its SeaDrop schedule was not published then). Re-checking now — retry in ~30s.`
+      : `"${target.slug}" isn't tracked yet — fetching it from OpenSea now. Retry in ~30s.`,
   };
 }
 
@@ -2435,7 +2486,7 @@ export interface SpecialMintArmState extends ActionState {
  * fire_at; nothing about the window is taken from the client.
  */
 export async function armSpecialMintPlansAction(planIds: string[]): Promise<SpecialMintArmState> {
-  const { db } = container();
+  const { db, config } = container();
   let actor: string;
   try {
     const user = await requireFreshStepUp("execution:configure");
@@ -2485,6 +2536,22 @@ export async function armSpecialMintPlansAction(planIds: string[]): Promise<Spec
         targetId: planId,
         result: "failure",
         metadata: { reason: "fire_time_passed" },
+      });
+      continue;
+    }
+    // Funding gate (2026-09-02): live balance vs price × qty + fee + gas.
+    // Refuse with the top-up amount now, while there is still time to fund
+    // the wallet, rather than an EXPIRED row after the drop.
+    const funding = await checkArmFunding(db, config, plan, stage);
+    if (!funding.ok) {
+      results.push({ planId, ok: false, message: funding.message });
+      await recordAudit(db, {
+        actorUserId: actor,
+        action: "execution.special_mint.arm",
+        targetType: "mint_plan",
+        targetId: planId,
+        result: "failure",
+        metadata: { reason: "insufficient_funds" },
       });
       continue;
     }

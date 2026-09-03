@@ -2,7 +2,7 @@ import { countWallets, listWallets } from "@hoodmint/db";
 import { PAGE_SIZE, Pagination, SearchBox } from "@/components/list-controls.tsx";
 import { parsePage } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
+import { formatBalance, formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
 import { BulkWalletForm } from "./bulk-wallet-form.tsx";
 import { ImportKeyForm } from "./import-key-form.tsx";
 import { RemoveKeyButton } from "./remove-key-button.tsx";
@@ -64,6 +64,9 @@ export default async function AdminWalletsPage({
                   Minting
                 </th>
                 <th scope="col" className="py-1 font-normal">
+                  Balance
+                </th>
+                <th scope="col" className="py-1 font-normal">
                   Added
                 </th>
                 <th scope="col" className="py-1 font-normal">
@@ -106,6 +109,20 @@ export default async function AdminWalletsPage({
                       <span className="text-ink-faint">tracking only</span>
                     )}
                   </td>
+                  <td
+                    className={`py-1 ${
+                      w.hasSigningKey && w.nativeBalanceWei === "0"
+                        ? "text-magenta"
+                        : "text-ink-muted"
+                    }`}
+                    title={
+                      w.hasSigningKey
+                        ? "Native balance read by the worker every minute — must cover price × qty + OpenSea fee + gas before a plan can arm."
+                        : "Balance is tracked for managed wallets only."
+                    }
+                  >
+                    {w.hasSigningKey ? formatBalance(w.nativeBalanceWei, w.balanceCheckedAt) : "—"}
+                  </td>
                   <td className="py-1 text-ink-faint">{formatDateTimeUtc(w.createdAt)}</td>
                   <td className="py-1">
                     <WalletRowActions
@@ -119,7 +136,7 @@ export default async function AdminWalletsPage({
               ))}
               {wallets.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-2 text-ink-faint">
+                  <td colSpan={7} className="py-2 text-ink-faint">
                     {search !== ""
                       ? "No wallets match that search."
                       : "No wallets yet — eligibility needs at least one."}

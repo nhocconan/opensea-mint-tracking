@@ -15,11 +15,14 @@
  * today, per that amendment.
  */
 import {
+  assessMintFunding,
   CHAIN_CLOCK_OFFSET_SETTING_KEY,
   coerceDate,
   computeFirePhase,
   decidePresign,
   isAppError,
+  isInsufficientFundsError,
+  isNativeCurrency,
   isStalePresignError,
 } from "@hoodmint/core";
 import {
@@ -38,6 +41,7 @@ import {
   projects as projectsTable,
   publishEvent,
   recordExecutionAttempt,
+  recordWalletBalance,
   releaseMintPlanToArmed,
   savePresignedTx,
   signers as signersTable,
@@ -48,7 +52,9 @@ import { metrics } from "@hoodmint/observability";
 import {
   broadcastRawTransaction,
   buildExecuteMintCalldata,
+  fetchErc20Funding,
   fetchFeeContext,
+  fetchNativeBalance,
   simulateTransaction,
 } from "@hoodmint/providers";
 import { openWalletKey } from "@hoodmint/secrets";
@@ -56,7 +62,11 @@ import { signExecutorTransaction, signManagedMintTransaction } from "@hoodmint/s
 import { eq } from "drizzle-orm";
 import { privateKeyToAccount } from "viem/accounts";
 import type { WorkerContext } from "../context.ts";
-import { buildOpenSeaMintTx, burstBuildOpenSeaMintTx } from "../mint-tx.ts";
+import {
+  buildOpenSeaMintTx,
+  burstBuildOpenSeaMintTx,
+  isTerminalMintBuildError,
+} from "../mint-tx.ts";
 import { CACHE_TTL_MS } from "./pre-build.ts";
 import { resolveBestRpcUrl, resolveBroadcastRpcUrls } from "./rpc-health.ts";
 
@@ -100,6 +110,15 @@ const MAX_PARALLEL_FIRES = 8;
  */
 /** ± window around the fire target inside which a pass is "the race". */
 const FIRE_BURST_WINDOW_MS = 20_000;
+
+/**
+ * Presign funding gate back-off: an underfunded plan is re-checked (two RPC
+ * reads + one attempt row) at most this often, not every 200 ms tick, since
+ * nothing gets pre-signed for it and `decidePresign` would otherwise say
+ * "sign" on every tick of the lead window.
+ */
+const UNDERFUNDED_RECHECK_MS = 15_000;
+const underfundedRecheckAt = new Map<string, number>();
 
 /**
  * True when now is within ±window of the plan's fire target —
@@ -218,6 +237,9 @@ async function runPresignPass(
     if (pre.action === "wait" || pre.action === "expired") {
       continue;
     }
+    if ((underfundedRecheckAt.get(plan.planId) ?? 0) > localNowMs) {
+      continue;
+    }
     // Need calldata; the pre-build pass normally has it cached. If not,
     // build it now (one OpenSea round-trip, well before the open).
     const cachedFresh =
@@ -262,6 +284,34 @@ async function runPresignPass(
         log.warn({ planId: plan.planId }, "presign skipped: mint value exceeds per-plan ceiling");
         continue;
       }
+      // Funding gate (2026-09-02): can this wallet actually pay value + gas
+      // (and the ERC-20 price on a token-priced stage)? Learned the hard way
+      // on 2026-08-30 — OpenSea's "Insufficient balance to mint" only ever
+      // surfaced at T-0 and the plan sat retrying until it EXPIRED. Here it
+      // becomes a visible attempt row ~45s early while the plan stays armed,
+      // so a top-up before the open still fires.
+      const funding = await assessPresignFunding(
+        rpcUrl,
+        plan,
+        tx,
+        fees.maxFeePerGasWei,
+        config,
+        db,
+      );
+      if (!funding.ok) {
+        underfundedRecheckAt.set(plan.planId, localNowMs + UNDERFUNDED_RECHECK_MS);
+        log.warn(
+          { planId: plan.planId, reason: funding.reason },
+          "presign skipped: wallet underfunded",
+        );
+        await recordExecutionAttempt(db, {
+          planId: plan.planId,
+          status: "failed",
+          errorCode: funding.message.slice(0, 200),
+        });
+        continue;
+      }
+      underfundedRecheckAt.delete(plan.planId);
       const sealed = await getWalletSigningKeySealed(db, plan.walletId);
       if (sealed === undefined) {
         continue;
@@ -299,6 +349,54 @@ async function runPresignPass(
       );
     }
   }
+}
+
+/**
+ * Fresh funding read for one presign candidate: native balance (persisted
+ * as the wallet's snapshot too) and, when the stage is priced in an ERC-20,
+ * the token balance + allowance towards the SeaDrop contract (`tx.to`).
+ */
+async function assessPresignFunding(
+  rpcUrl: string,
+  plan: {
+    walletId: string;
+    walletAddress: string;
+    quantity: number;
+    stagePriceWei: string | null;
+    stageCurrency: string | null;
+  },
+  tx: { to: string; valueWei: string },
+  maxFeePerGasWei: string,
+  config: WorkerContext["config"],
+  db?: WorkerContext["db"],
+): Promise<ReturnType<typeof assessMintFunding>> {
+  const nativeBalanceWei = await fetchNativeBalance(rpcUrl, plan.walletAddress);
+  if (db !== undefined) {
+    await recordWalletBalance(db, plan.walletId, nativeBalanceWei).catch(() => undefined);
+  }
+  const erc20 =
+    !isNativeCurrency(plan.stageCurrency) &&
+    plan.stageCurrency !== null &&
+    plan.stagePriceWei !== null &&
+    /^[0-9]+$/.test(plan.stagePriceWei)
+      ? await fetchErc20Funding(rpcUrl, plan.stageCurrency, plan.walletAddress, tx.to).then(
+          (f) => ({
+            balance: f.balance,
+            required: BigInt(plan.stagePriceWei as string) * BigInt(Math.max(1, plan.quantity)),
+            allowance: f.allowance,
+            symbol: f.symbol,
+            decimals: f.decimals,
+          }),
+          () => undefined,
+        )
+      : undefined;
+  return assessMintFunding({
+    nativeBalanceWei,
+    valueWei: BigInt(tx.valueWei),
+    gasLimit: BigInt(config.MINT_PRESIGN_GAS_LIMIT),
+    maxFeePerGasWei: BigInt(maxFeePerGasWei),
+    ...(erc20 !== undefined ? { erc20 } : {}),
+  });
 }
 
 /** projectId for a plan without claiming it (presign is read-only on status). */
@@ -549,6 +647,29 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       await failMintPlanExecution(db, plan.id);
       return { expired, claimed: true, outcome: "minted_out", planId: plan.id };
     }
+    if (isInsufficientFundsError(message)) {
+      // The wallet cannot pay (Chill Guys 2026-08-30: OpenSea 422
+      // "Insufficient balance to mint" retried every tick until EXPIRED).
+      // Terminal for this plan — the funding gate at arm/presign time is
+      // where a top-up still helps; at T-0 retrying only burns quota.
+      log.warn({ planId: plan.id }, "wallet underfunded at fire — plan failed (terminal)");
+      await record("failed", { errorCode: `insufficient_funds: ${message}`.slice(0, 200) });
+      await failMintPlanExecution(db, plan.id);
+      return { expired, claimed: true, outcome: "insufficient_funds", planId: plan.id };
+    }
+    if (/provider returned 4\d\d/.test(message) && isTerminalMintBuildError(message)) {
+      // OpenSea's own 4xx verdict (per-wallet cap reached / already minted /
+      // exceeds) — it will answer the same way on every retry inside this
+      // window. Scoped to provider answers so an RPC message that happens
+      // to contain "exceeds" never becomes terminal.
+      log.warn(
+        { planId: plan.id },
+        "OpenSea refused the mint for this wallet — plan failed (terminal)",
+      );
+      await record("failed", { errorCode: `refused: ${message}`.slice(0, 200) });
+      await failMintPlanExecution(db, plan.id);
+      return { expired, claimed: true, outcome: "refused", planId: plan.id };
+    }
     log.error({ err: error, planId: plan.id }, "mint execution pass failed");
     await record("failed", { errorCode: message.slice(0, 200) });
     // A thrown error mid-pass (RPC blip, transient read failure) is usually
@@ -762,9 +883,15 @@ async function runManagedFire(
       const message = error instanceof Error ? error.message : String(error);
       await clearPresignedTx(db, plan.id);
       if (!isStalePresignError(message)) {
-        // Real failure (e.g. insufficient funds, reverted): record + retry
-        // within the window via the normal release path.
         await record("failed", { errorCode: message.slice(0, 200) });
+        if (isInsufficientFundsError(message)) {
+          // The RPC says the wallet cannot pay gas × price + value —
+          // terminal, a retry cannot change the balance.
+          await failMintPlanExecution(db, plan.id);
+          return;
+        }
+        // Other real failure (reverted, RPC hiccup): retry within the
+        // window via the normal release path.
         await releaseMintPlanToArmed(db, plan.id, new Date());
         return;
       }
@@ -857,6 +984,10 @@ async function runManagedFire(
         : "unknown_managed_signing_error";
     log.error({ err: error, planId: plan.id }, "managed-key signing/broadcast failed");
     await record("failed", { errorCode });
+    if (error instanceof Error && isInsufficientFundsError(error.message)) {
+      await failMintPlanExecution(db, plan.id);
+      return;
+    }
     await releaseMintPlanToArmed(db, plan.id, new Date());
   }
 }

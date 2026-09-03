@@ -5,7 +5,7 @@
  * refreshes for new/stale projects. Idempotent under at-least-once delivery:
  * all writes are upserts keyed by identity/alias.
  */
-import { freshnessBucket, isAppError } from "@hoodmint/core";
+import { freshnessBucket, isAppError, notADropSettingKey } from "@hoodmint/core";
 import {
   ensureProvider,
   finishScanRun,
@@ -417,7 +417,16 @@ export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promis
         log.info({ slug }, "detail refresh: drop no longer on OpenSea (404) — marked delisted");
         return;
       }
-      log.debug({ slug }, "detail refresh: slug is not a drop (404), leaving as collection");
+      // Remember the answer so Admin → Special mints can say "this is an
+      // OpenSea collection, not an OpenSea Drop" instead of "fetching, retry
+      // in 30s" forever (yolkies-nft, 2026-09-02). 24h TTL is read-side.
+      await setSetting(db, notADropSettingKey(slug), { at: new Date().toISOString() }).catch(
+        () => undefined,
+      );
+      log.info(
+        { slug },
+        "detail refresh: slug is not an OpenSea drop (404), leaving as collection",
+      );
       return;
     }
     throw error;

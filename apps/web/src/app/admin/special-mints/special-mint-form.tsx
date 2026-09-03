@@ -4,7 +4,7 @@ import { mintSpendCeilingWei } from "@hoodmint/core";
 import { useActionState, useMemo, useState } from "react";
 import { type ActionState, createSpecialMintAction } from "@/app/actions.ts";
 import { Countdown } from "@/components/feed-parts.tsx";
-import { formatDateTimeGmt7, formatPrice } from "@/lib/format.ts";
+import { formatBalance, formatDateTimeGmt7, formatPrice } from "@/lib/format.ts";
 import { gmt7LocalToUtc, utcToGmt7LocalInput } from "@/lib/mint-target.ts";
 
 export interface StageOption {
@@ -21,6 +21,9 @@ export interface ManagedWalletOption {
   readonly id: string;
   readonly address: string;
   readonly label: string | null;
+  /** Worker-owned native balance snapshot (wei string) + when it was read. */
+  readonly nativeBalanceWei: string | null;
+  readonly balanceCheckedAt: string | null;
 }
 
 const initial: ActionState = { ok: false, message: "" };
@@ -31,6 +34,15 @@ const MAX_QUANTITY = 20;
  *  refuse every fire (found live 2026-08-28). */
 function defaultCeilingWei(priceWei: string | null, quantity: number): string {
   return mintSpendCeilingWei(priceWei, quantity);
+}
+
+/** Snapshot balance below price × qty + fee allowance — a visual hint only;
+ *  the server-side arm gate (live read, plus gas) is the real refusal. */
+function underfunded(w: ManagedWalletOption, priceWei: string | null, quantity: number): boolean {
+  if (w.nativeBalanceWei === null || !/^[0-9]+$/.test(w.nativeBalanceWei)) {
+    return false;
+  }
+  return BigInt(w.nativeBalanceWei) < BigInt(mintSpendCeilingWei(priceWei, quantity));
 }
 
 /**
@@ -239,6 +251,16 @@ export function SpecialMintForm({
                 {w.label !== null ? (
                   <span className="font-mono text-[10px] text-ink-faint">{w.address}</span>
                 ) : null}
+                <span
+                  className={`ml-auto font-mono text-[10px] ${
+                    underfunded(w, stage?.priceWei ?? null, quantities[w.id] ?? 1)
+                      ? "text-magenta"
+                      : "text-ink-faint"
+                  }`}
+                  title="Native balance (worker snapshot). Arming refuses a wallet that cannot cover price × qty + OpenSea fee + gas."
+                >
+                  {formatBalance(w.nativeBalanceWei, w.balanceCheckedAt)}
+                </span>
               </label>
               <label className="flex items-center gap-1">
                 <span className="text-[10px] text-ink-faint uppercase">Qty</span>

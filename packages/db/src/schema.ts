@@ -196,6 +196,11 @@ export const projects = pgTable(
     discordUrl: text("discord_url"),
     safelistStatus: text("safelist_status"),
     socialsFetchedAt: timestamp("socials_fetched_at", { withTimezone: true }),
+    /** Last time `/drops/{slug}` was asked about this project (200 or 404).
+     *  Drives the re-check of stage-less recent collections (2026-09-02:
+     *  yolkies-nft was swept before its SeaDrop schedule existed and then
+     *  never asked again). */
+    dropCheckedAt: timestamp("drop_checked_at", { withTimezone: true }),
     confidence: text("confidence", {
       enum: ["verified", "corroborated", "single-source", "unverified"],
     })
@@ -501,6 +506,11 @@ export const wallets = pgTable(
     encryptedSigningKey: text("encrypted_signing_key"),
     signingKeyFingerprint: text("signing_key_fingerprint"),
     signingKeyAddedAt: timestamp("signing_key_added_at", { withTimezone: true }),
+    // Worker-owned funding snapshot (2026-09-02): native balance read every
+    // minute for managed wallets so admin pages can show "can this wallet
+    // pay?" without calling an RPC in a page render. Decimal wei string.
+    nativeBalanceWei: text("native_balance_wei"),
+    balanceCheckedAt: timestamp("balance_checked_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

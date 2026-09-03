@@ -50,6 +50,9 @@ export async function listWallets(db: Db, options: ListWalletsOptions = {}) {
       >`(${wallets.encryptedSigningKey}::jsonb ->> 'algorithm')`,
       signingKeyFingerprint: wallets.signingKeyFingerprint,
       signingKeyAddedAt: wallets.signingKeyAddedAt,
+      /** Worker-owned funding snapshot (wei string / when it was read). */
+      nativeBalanceWei: wallets.nativeBalanceWei,
+      balanceCheckedAt: wallets.balanceCheckedAt,
       createdAt: wallets.createdAt,
       updatedAt: wallets.updatedAt,
     })
@@ -137,6 +140,33 @@ export async function resealWalletSigningKey(
     .where(and(eq(wallets.id, walletId), eq(wallets.encryptedSigningKey, expectedSealedJson)))
     .returning({ id: wallets.id });
   return rows.length > 0;
+}
+
+/** Enabled managed wallets (id + address only) — the balance refresh
+ *  task's candidate list. Never the key blob. */
+export async function managedWalletAddresses(
+  db: Db,
+  limit = 500,
+): Promise<Array<{ id: string; address: string }>> {
+  return db
+    .select({ id: wallets.id, address: wallets.address })
+    .from(wallets)
+    .where(and(eq(wallets.enabled, true), sql`${wallets.encryptedSigningKey} is not null`))
+    .orderBy(wallets.createdAt)
+    .limit(limit);
+}
+
+/** Persist one wallet's native balance snapshot (worker + arm-time read). */
+export async function recordWalletBalance(
+  db: Db,
+  walletId: string,
+  nativeBalanceWei: bigint,
+  checkedAt: Date = new Date(),
+): Promise<void> {
+  await db
+    .update(wallets)
+    .set({ nativeBalanceWei: nativeBalanceWei.toString(10), balanceCheckedAt: checkedAt })
+    .where(eq(wallets.id, walletId));
 }
 
 /** The sealed blob only, for the worker to decrypt at fire time. */
