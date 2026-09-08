@@ -1,7 +1,7 @@
 import { user as userTable } from "@hoodmint/db";
 import { desc } from "drizzle-orm";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 import { getSessionUser, requirePage } from "@/lib/session.ts";
 import { CreateUserForm, UserRowActions } from "./user-management.tsx";
 
@@ -49,7 +49,7 @@ export default async function AdminUsersPage() {
                   Status
                 </th>
                 <th scope="col" className="py-1 font-normal">
-                  Created
+                  Created (GMT+7)
                 </th>
                 <th scope="col" className="py-1 font-normal">
                   <span className="sr-only">Actions</span>
@@ -76,7 +76,7 @@ export default async function AdminUsersPage() {
                   <td className={u.banned ? "text-magenta" : "text-ink-muted"}>
                     {u.banned ? "banned" : "active"}
                   </td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(u.createdAt)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(u.createdAt)}</td>
                   <td className="py-1">
                     <UserRowActions
                       userId={u.id}

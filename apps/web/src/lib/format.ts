@@ -3,10 +3,25 @@
  * conversion happens only here. Wei display truncates to 4 significant
  * decimals; addresses are shown short with copy affordance elsewhere.
  */
-import { coerceDate, formatUnitsShort, formatWei, type Wei } from "@hoodmint/core";
+import {
+  coerceDate,
+  DEFAULT_TIMEZONE,
+  formatDateTimeGmt7,
+  formatUnitsShort,
+  formatWei,
+  getDayKey,
+  type Wei,
+} from "@hoodmint/core";
 
 /** Re-exported for call sites already importing from here — see @hoodmint/core's coerceDate for why this exists. */
 export const toDate = coerceDate;
+export { DEFAULT_TIMEZONE, formatDateTimeGmt7, getDayKey };
+
+/**
+ * Standard UI display formatter for all system dates.
+ * Defaults to the operator's wall clock (Asia/Ho_Chi_Minh, GMT+7).
+ */
+export const formatDateTime = formatDateTimeGmt7;
 
 export function formatDateTimeUtc(iso: string | Date | null): string {
   if (iso === null) {
@@ -16,15 +31,10 @@ export function formatDateTimeUtc(iso: string | Date | null): string {
   return `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
-/**
- * The operator's own wall clock (Asia/Ho_Chi_Minh, a fixed UTC+07:00 with no
- * DST). Storage stays UTC everywhere (PRD §14); this is a display-only
- * projection, always rendered alongside the UTC value so a mint time can
- * never be read ambiguously. `hourCycle: "h23"` and `formatToParts` pin the
- * output shape across ICU versions instead of trusting a locale's default
- * ordering or a 24:00 midnight rendering.
- */
-export function formatDateTimeGmt7(iso: string | Date | null): string {
+export function formatDateTimeLocal(
+  iso: string | Date | null,
+  timeZone: string = DEFAULT_TIMEZONE,
+): string {
   if (iso === null) {
     return "—";
   }
@@ -32,30 +42,32 @@ export function formatDateTimeGmt7(iso: string | Date | null): string {
   if (Number.isNaN(date.getTime())) {
     return "—";
   }
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(date);
-  const at = (type: Intl.DateTimeFormatPartTypes): string =>
-    parts.find((p) => p.type === type)?.value ?? "";
-  return `${at("year")}-${at("month")}-${at("day")} ${at("hour")}:${at("minute")} GMT+7`;
-}
-
-export function formatDateTimeLocal(iso: string | Date | null): string {
-  if (iso === null) {
-    return "—";
-  }
-  const date = typeof iso === "string" ? new Date(iso) : iso;
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+export function formatTimeGmt7(
+  iso: string | Date | null,
+  timeZone: string = DEFAULT_TIMEZONE,
+): string {
+  if (iso === null) {
+    return "--:--";
+  }
+  const date = typeof iso === "string" ? new Date(iso) : iso;
+  if (Number.isNaN(date.getTime())) {
+    return "--:--";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
   }).format(date);
 }
 

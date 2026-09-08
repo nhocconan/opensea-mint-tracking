@@ -3,6 +3,7 @@
  * normalized domain data; the output feeds Telegram/webhook payloads.
  */
 import type { AlertType } from "@hoodmint/core";
+import { formatDateTimeGmt7 } from "@hoodmint/core";
 
 export interface AlertRenderInput {
   readonly alertType: AlertType;
@@ -82,10 +83,10 @@ export function renderAlertMessage(input: AlertRenderInput, nowIso: string): str
     lines.push(`Wallet: ${input.walletLabel ?? input.walletAddress}`);
   }
   if (countdown !== null) {
-    lines.push(`Starts: ${input.startsAtIso ?? "?"} (${countdown})`);
+    lines.push(`Starts: ${formatDateTimeGmt7(input.startsAtIso)} (${countdown})`);
   }
   if (input.endsAtIso !== null) {
-    lines.push(`Ends: ${input.endsAtIso}`);
+    lines.push(`Ends: ${formatDateTimeGmt7(input.endsAtIso)}`);
   }
   if (link !== null) {
     lines.push(`Mint: ${link}`);
@@ -102,6 +103,7 @@ export interface DiscordEmbedField {
 export interface DiscordEmbed {
   readonly title: string;
   readonly url?: string;
+  readonly description?: string;
   /** Decimal RGB (Discord's embed color is an int, not a hex string). */
   readonly color: number;
   readonly fields: readonly DiscordEmbedField[];
@@ -163,12 +165,16 @@ export function renderAlertEmbed(input: AlertRenderInput, nowIso: string): Disco
   if (countdown !== null) {
     fields.push({
       name: "Starts",
-      value: truncate(`${input.startsAtIso ?? "?"} (${countdown})`, 256),
+      value: truncate(`${formatDateTimeGmt7(input.startsAtIso)} (${countdown})`, 256),
       inline: false,
     });
   }
   if (input.endsAtIso !== null) {
-    fields.push({ name: "Ends", value: truncate(input.endsAtIso, 256), inline: false });
+    fields.push({
+      name: "Ends",
+      value: truncate(formatDateTimeGmt7(input.endsAtIso), 256),
+      inline: false,
+    });
   }
 
   return {

@@ -45,7 +45,11 @@ export type CredentialType =
   | "xai_user_token"
   | "xai_api_key"
   | "xai_oauth_client"
-  | "xai_device_pending";
+  | "xai_device_pending"
+  /** NeverFuckingTrade (NFT Trencher) API key for live mint radar and whitelist eligibility. */
+  | "nvt_api_key"
+  /** Discord Webhook URL for automated NVT eligible mint alerts. */
+  | "nvt_discord_webhook";
 
 export interface CreateCredentialInput {
   readonly type: CredentialType;

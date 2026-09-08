@@ -36,6 +36,7 @@ import {
   resealLegacyWalletKeys,
   runMaintenance,
 } from "./workers/maintenance.ts";
+import { runNvtScheduledScanPass } from "./workers/nvt-scan.ts";
 import { runSpeculativePreBuild } from "./workers/pre-build.ts";
 import { runRarityRefresh } from "./workers/rarity.ts";
 import { runRpcHealthCheck } from "./workers/rpc-health.ts";
@@ -230,6 +231,8 @@ async function main(): Promise<void> {
     ctx.log.warn({ err: error }, "boot-time wallet key re-seal failed (non-fatal)"),
   );
   every(60_000, "freshness", () => refreshProviderFreshness(ctx));
+  // Automated NVT eligibility scan & Discord alerts (configurable period, default hourly for next 24h)
+  every(60_000, "nvt-discord-scan", () => runNvtScheduledScanPass(ctx));
   // ADR 0007: sentiment/risk scan of LIVE/NEXT drops' X mentions. Self-gates
   // to a no-op unless X_SIGNALS_ENABLED + a real bearer token are set; 5-min
   // cadence keeps the metered X API cost bounded even when enabled.

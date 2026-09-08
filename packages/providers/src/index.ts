@@ -7,6 +7,8 @@ export * from "./chain/rpc-url.ts";
 export * from "./chain/seadrop.ts";
 export * from "./chain/simulate.ts";
 export * from "./http.ts";
+export * from "./nvt/client.ts";
+export * from "./nvt/schemas.ts";
 export * from "./opensea/client.ts";
 export * from "./opensea/normalizer.ts";
 export * from "./opensea/rate-limiter.ts";

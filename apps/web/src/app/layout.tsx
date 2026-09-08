@@ -46,8 +46,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const theme = resolveTheme(parseThemePreference(cookieStore.get(THEME_COOKIE)?.value));
 
   let signedIn = false;
+  let isAdmin = false;
   try {
-    signedIn = (await getSessionUser()) !== null;
+    const user = await getSessionUser();
+    signedIn = user !== null;
+    isAdmin = user?.role === "admin";
   } catch {
     // Session lookup best-effort; a signed-out shell is the safe default.
   }
@@ -61,7 +64,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     >
       <body className="min-h-dvh bg-base text-ink antialiased">
         {demoMode ? <DemoBanner /> : null}
-        <AppShell theme={theme} signedIn={signedIn}>
+        <AppShell theme={theme} signedIn={signedIn} isAdmin={isAdmin}>
           {children}
         </AppShell>
       </body>

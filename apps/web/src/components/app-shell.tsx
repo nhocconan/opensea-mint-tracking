@@ -3,6 +3,7 @@
 import type { Theme } from "@hoodmint/ui";
 import {
   Activity,
+  Award,
   CalendarDays,
   Clock3,
   Eye,
@@ -34,26 +35,37 @@ const NAV = [
   { href: "/calendar", label: "Calendar", mobileLabel: "Cal", icon: CalendarDays },
   { href: "/latest", label: "Latest", mobileLabel: "New", icon: Sparkles },
   { href: "/eligible", label: "Eligible", mobileLabel: "WL", icon: ShieldCheck },
+  {
+    href: "/my-mints-nvt",
+    label: "My Mints - NVT",
+    mobileLabel: "NVT",
+    icon: Award,
+    adminOnly: true,
+  },
   { href: "/watchlist", label: "Watchlist", mobileLabel: "Watch", icon: Star },
 ] as const;
-
-const COMMAND_ITEMS: readonly CommandItem[] = [
-  ...NAV.map(({ href, label }) => ({ href, label, group: "Navigate" })),
-  ...ADMIN_NAV.map(([href, label]) => ({ href, label, group: "Admin" })),
-];
 
 export function AppShell({
   children,
   theme,
   signedIn = false,
+  isAdmin = false,
 }: {
   children: ReactNode;
   theme: Theme;
   signedIn?: boolean;
+  isAdmin?: boolean;
 }) {
   const pathname = usePathname();
   const [paletteOpen, setPaletteOpen] = useState(false);
   useRadarEvents();
+
+  const navItems = NAV.filter((item) => !("adminOnly" in item && item.adminOnly) || isAdmin);
+
+  const commandItems: readonly CommandItem[] = [
+    ...navItems.map(({ href, label }) => ({ href, label, group: "Navigate" })),
+    ...(isAdmin ? ADMIN_NAV.map(([href, label]) => ({ href, label, group: "Admin" })) : []),
+  ];
 
   useEffect(() => {
     // ⌘K / Ctrl+K: focus the feed search box where one exists (PRD §5.1,
@@ -76,7 +88,7 @@ export function AppShell({
   }, []);
 
   const isActive = (href: string): boolean =>
-    href === "/" ? pathname === "/" : pathname.startsWith(href);
+    href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
@@ -88,7 +100,7 @@ export function AppShell({
         <Link href="/" className="mb-4 flex items-center px-2 py-1">
           <Logo className="size-6" />
         </Link>
-        {NAV.map(({ href, label, icon: Icon }) => (
+        {navItems.map(({ href, label, icon: Icon }) => (
           <Link
             key={href}
             href={href}
@@ -191,7 +203,7 @@ export function AppShell({
         aria-label="Primary mobile"
         className="fixed inset-x-0 bottom-0 z-40 flex border-t border-line bg-base-raised py-1 pb-[calc(0.25rem+env(safe-area-inset-bottom))] md:hidden"
       >
-        {NAV.map(({ href, label, mobileLabel, icon: Icon }) => (
+        {navItems.map(({ href, label, mobileLabel, icon: Icon }) => (
           <Link
             key={href}
             href={href}
@@ -210,7 +222,7 @@ export function AppShell({
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
-        items={COMMAND_ITEMS}
+        items={commandItems}
       />
     </div>
   );

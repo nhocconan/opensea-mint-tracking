@@ -3,6 +3,7 @@
 import { Check, Copy, Loader2, Star } from "lucide-react";
 import { useEffect, useState, useTransition } from "react";
 import { toggleWatchAction } from "@/app/actions.ts";
+import { formatDateTime } from "@/lib/format.ts";
 
 /** Live countdown in local time with UTC tooltip (PRD §5.2). */
 export function Countdown({
@@ -46,7 +47,7 @@ export function Countdown({
   return (
     <time
       dateTime={iso}
-      title={`${label}: ${new Date(iso).toISOString()} (UTC)`}
+      title={`${label}: ${formatDateTime(iso)}`}
       className="font-mono text-xs text-ink-muted tabular-nums"
     >
       {past ? `${pastPrefix} ` : ""}

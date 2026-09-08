@@ -8,6 +8,7 @@ export const ADMIN_NAV = [
   ["/admin/guide", "Guide"],
   ["/admin/sources", "Sources"],
   ["/admin/opensea", "OpenSea"],
+  ["/admin/nvt", "NeverFuckingTrade"],
   ["/admin/signals", "Signals"],
   ["/admin/wallets", "Wallets"],
   ["/admin/alerts", "Alerts"],

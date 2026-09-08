@@ -20,7 +20,7 @@ import {
   WalletEligibilityList,
 } from "@/components/mint-decision.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeLocal, formatDateTimeUtc, formatPrice } from "@/lib/format.ts";
+import { formatDateTime, formatDateTimeLocal, formatPrice, getDayKey } from "@/lib/format.ts";
 import { singleValue } from "@/lib/search-params.ts";
 import { getSessionUser } from "@/lib/session.ts";
 
@@ -76,7 +76,7 @@ export default async function CalendarPage({
 
   const groups = new Map<string, typeof stages>();
   for (const stage of stages) {
-    const dayKey = coerceDate(stage.startsAt).toISOString().slice(0, 10);
+    const dayKey = getDayKey(coerceDate(stage.startsAt));
     const bucket = groups.get(dayKey) ?? [];
     bucket.push(stage);
     groups.set(dayKey, bucket);
@@ -96,7 +96,7 @@ export default async function CalendarPage({
           </div>
           <h1 className="font-display text-xl font-semibold tracking-tight">Minting calendar</h1>
           <p className="mt-1 max-w-3xl text-xs text-ink-muted">
-            Every known upcoming phase, grouped by UTC day. Each event shows the phase, verified
+            Every known upcoming phase, grouped by day (GMT+7). Each event shows the phase, verified
             price, tracked-wallet WL verdict, official links and direct mint actions.
           </p>
         </div>
@@ -139,13 +139,16 @@ export default async function CalendarPage({
                 id={`day-${dayKey}`}
                 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase"
               >
-                {new Date(`${dayKey}T00:00:00Z`).toLocaleDateString(undefined, {
-                  weekday: "long",
-                  month: "short",
-                  day: "2-digit",
-                  timeZone: "UTC",
-                })}{" "}
-                · {dayKey} UTC
+                {(() => {
+                  const [year, month, day] = dayKey.split("-");
+                  const dateObj = new Date(Number(year), Number(month) - 1, Number(day), 12, 0, 0);
+                  const dateStr = dateObj.toLocaleDateString("en-US", {
+                    weekday: "long",
+                    month: "short",
+                    day: "2-digit",
+                  });
+                  return `${dateStr} · ${dayKey} GMT+7`;
+                })()}
               </h2>
               <div className="grid gap-3 xl:grid-cols-2">
                 {dayStages.map((stage) => {
@@ -197,7 +200,7 @@ export default async function CalendarPage({
                         </div>
                         <div>
                           <dt className="feed-section-label">Starts</dt>
-                          <dd className="font-mono text-xs" title={formatDateTimeUtc(start)}>
+                          <dd className="font-mono text-xs" title={formatDateTime(start)}>
                             {formatDateTimeLocal(start)}
                           </dd>
                           <dd>
@@ -236,7 +239,7 @@ export default async function CalendarPage({
                           {stale ? (
                             <span
                               className="font-mono text-[10px] text-amber"
-                              title={formatDateTimeUtc(stage.lastSeenAt)}
+                              title={formatDateTime(stage.lastSeenAt)}
                             >
                               stale evidence
                             </span>

@@ -21,7 +21,7 @@ import { notFound } from "next/navigation";
 import { CopyButton, Countdown } from "@/components/feed-parts.tsx";
 import { MintActions, ProjectSocialLinks } from "@/components/mint-decision.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeLocal, formatDateTimeUtc, formatPrice, shortAddress } from "@/lib/format.ts";
+import { formatDateTime, formatDateTimeLocal, formatPrice, shortAddress } from "@/lib/format.ts";
 import { getSessionUser } from "@/lib/session.ts";
 import { RarityRefreshButton } from "./rarity-refresh-button.tsx";
 
@@ -259,7 +259,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
             <thead>
               <tr className="text-ink-faint">
                 <th scope="col" className="py-1 font-normal">
-                  Bucket (UTC)
+                  Bucket (GMT+7)
                 </th>
                 <th scope="col" className="py-1 font-normal">
                   Mints
@@ -391,8 +391,8 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
                     </tbody>
                   </table>
                   <p className="mt-2 text-[10px] text-ink-faint">
-                    Computed {formatDateTimeUtc(holders.computedAt)} · advisory only — never a
-                    block, never eligibility.
+                    Computed {formatDateTime(holders.computedAt)} · advisory only — never a block,
+                    never eligibility.
                   </p>
                 </>
               );
@@ -483,7 +483,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
               <p className="text-[10px] text-ink-faint">
                 Advisory only — X chatter, never a block, never eligibility or confidence.{" "}
                 {signals.hype !== undefined
-                  ? `Computed ${formatDateTimeUtc(signals.hype.observedAt)}`
+                  ? `Computed ${formatDateTime(signals.hype.observedAt)}`
                   : null}
               </p>
             </div>
@@ -550,8 +550,8 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
                 </tbody>
               </table>
               <p className="mt-2 text-[10px] text-ink-faint">
-                {rarity.totalTokens} tokens ranked · computed {formatDateTimeUtc(rarity.computedAt)}{" "}
-                · "Rarity Score" method (sum of 1/trait-frequency) — advisory only.
+                {rarity.totalTokens} tokens ranked · computed {formatDateTime(rarity.computedAt)} ·
+                "Rarity Score" method (sum of 1/trait-frequency) — advisory only.
               </p>
             </>
           )}
@@ -617,7 +617,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
                       className="text-ink-faint"
                       title={coerceDate(alias.lastSeenAt).toISOString()}
                     >
-                      seen {formatDateTimeUtc(alias.lastSeenAt)}
+                      seen {formatDateTime(alias.lastSeenAt)}
                     </span>
                   </li>
                 ))}
@@ -627,9 +627,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
                 {evidenceRows.map((ev) => (
                   <li key={ev.id} className="flex justify-between gap-2">
                     <span>{ev.kind}</span>
-                    <span title={ev.fetchedAt.toISOString()}>
-                      {formatDateTimeUtc(ev.fetchedAt)}
-                    </span>
+                    <span title={ev.fetchedAt.toISOString()}>{formatDateTime(ev.fetchedAt)}</span>
                   </li>
                 ))}
                 {evidenceRows.length === 0 ? <li>No evidence retained yet.</li> : null}
@@ -649,15 +647,14 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
                   {conflicts.map((conflict, index) => (
                     <li key={index}>
                       {conflict.field}: {JSON.stringify(conflict.valueJson)} (
-                      {conflict.providerKind ?? "unknown"}, {formatDateTimeUtc(conflict.observedAt)}
-                      )
+                      {conflict.providerKind ?? "unknown"}, {formatDateTime(conflict.observedAt)})
                     </li>
                   ))}
                 </ul>
               )}
               <p className="mt-3 font-mono text-[10px] text-ink-faint">
-                Project first seen {formatDateTimeUtc(project.firstSeenAt)} · last seen{" "}
-                {formatDateTimeUtc(project.lastSeenAt)}
+                Project first seen {formatDateTime(project.firstSeenAt)} · last seen{" "}
+                {formatDateTime(project.lastSeenAt)}
                 {stale ? " · STALE" : ""}
               </p>
             </div>

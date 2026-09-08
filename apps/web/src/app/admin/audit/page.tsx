@@ -2,7 +2,7 @@ import { countAuditLogs, listAuditLogs } from "@hoodmint/db";
 import { PAGE_SIZE, Pagination, SearchBox } from "@/components/list-controls.tsx";
 import { parsePage } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +38,7 @@ export default async function AdminAuditPage({
           <thead>
             <tr className="text-[10px] text-ink-faint uppercase">
               <th scope="col" className="py-1 font-normal">
-                When (UTC)
+                When (GMT+7)
               </th>
               <th scope="col" className="py-1 font-normal">
                 Actor
@@ -60,7 +60,7 @@ export default async function AdminAuditPage({
           <tbody className="font-mono">
             {logs.map((log) => (
               <tr key={log.id}>
-                <td className="py-1 text-ink-faint">{formatDateTimeUtc(log.createdAt)}</td>
+                <td className="py-1 text-ink-faint">{formatDateTime(log.createdAt)}</td>
                 <td className="py-1">{log.actorUserId?.slice(0, 8) ?? "system"}</td>
                 <td className="py-1">{log.action}</td>
                 <td className="py-1 text-ink-muted">

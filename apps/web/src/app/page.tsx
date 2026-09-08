@@ -2,6 +2,7 @@ import { can } from "@hoodmint/auth";
 import {
   bestEligibilityByProject,
   eligibilityStageScopeKey,
+  findCredentialByType,
   listProviders,
   queryFeed,
   recentScanRuns,
@@ -19,7 +20,7 @@ import {
   WalletEligibilityList,
 } from "@/components/mint-decision.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc, formatPrice } from "@/lib/format.ts";
+import { formatDateTime, formatPrice } from "@/lib/format.ts";
 import { getSessionUser } from "@/lib/session.ts";
 
 export const dynamic = "force-dynamic";
@@ -57,12 +58,18 @@ export default async function PulsePage({
   let latestWallets: Promise<ReadonlyMap<string, readonly TrackedWalletEligibility[]>> =
     Promise.resolve(new Map());
   let dbUp = true;
+  let nvtConfigured = Boolean(config.NVT_API_KEY);
   try {
-    [providers, scans, eligibility] = await Promise.all([
+    const [providersRes, scansRes, eligibilityRes, nvtCred] = await Promise.all([
       listProviders(db),
       recentScanRuns(db, 5),
       bestEligibilityByProject(db),
+      findCredentialByType(db, "nvt_api_key").catch(() => undefined),
     ]);
+    providers = providersRes;
+    scans = scansRes;
+    eligibility = eligibilityRes;
+    nvtConfigured = nvtCred !== undefined || Boolean(config.NVT_API_KEY);
     const [live, next, latestPage] = await Promise.all([
       queryFeed(db, { view: "live", limit: 5 }),
       queryFeed(db, { view: "next", limit: 5 }),
@@ -90,12 +97,11 @@ export default async function PulsePage({
         </p>
       ) : null}
 
-      <header className="mb-4 flex flex-wrap items-end justify-between gap-2">
+      <header className="mb-4 flex flex-wrap items-end justify-between gap-2 border-b border-line pb-3">
         <div>
-          <h1 className="font-display text-lg font-semibold tracking-tight">Pulse</h1>
-          <p className="text-xs text-ink-muted">
-            Robinhood Chain · id {config.ROBINHOOD_CHAIN_ID} ·{" "}
-            {config.DEMO_MODE ? "demo mode" : "live mode"}
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Pulse</h1>
+          <p className="font-mono text-xs text-ink-muted">
+            Live overview: Robinhood Chain drops, stages, and eligibility hits.
           </p>
         </div>
         {user === null ? (
@@ -123,7 +129,7 @@ export default async function PulsePage({
           Database not reachable yet — run migrations (`make migrate`) and refresh.
         </p>
       ) : (
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div className="feed-card feed-track-live rounded-md border border-line bg-base-raised p-4">
             <div className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               Minting now
@@ -162,8 +168,35 @@ export default async function PulsePage({
               Open Eligible view →
             </Link>
           </div>
+          {user?.role === "admin" ? (
+            <div className="feed-card feed-track-nvt rounded-md border border-line bg-base-raised p-4">
+              <div className="flex items-center justify-between">
+                <div className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
+                  My Mints - NVT
+                </div>
+                <span
+                  className={`text-[9px] font-mono px-1.5 py-0.5 rounded-xs ${
+                    nvtConfigured ? "bg-acid/15 text-acid" : "bg-ink-muted/15 text-ink-faint"
+                  }`}
+                >
+                  {nvtConfigured ? "ACTIVE" : "SETUP"}
+                </span>
+              </div>
+              <div className="mt-1 font-display text-3xl font-semibold text-acid">Radar</div>
+              <Link
+                href="/my-mints-nvt"
+                className="mt-1 inline-flex min-h-6 items-center text-xs text-cyan hover:underline focus:outline-none focus:ring-2 focus:ring-cyan/50"
+              >
+                Open My Mints - NVT →
+              </Link>
+            </div>
+          ) : null}
 
-          <div className="rounded-md border border-line bg-base-raised p-4 md:col-span-2">
+          <div
+            className={`rounded-md border border-line bg-base-raised p-4 sm:col-span-2 ${
+              user?.role === "admin" ? "lg:col-span-3" : "lg:col-span-3"
+            }`}
+          >
             <h2 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               Provider health
             </h2>
@@ -225,7 +258,7 @@ export default async function PulsePage({
             </ul>
           </div>
 
-          <div className="rounded-md border border-line bg-base-raised p-4 md:col-span-3">
+          <div className="rounded-md border border-line bg-base-raised p-4 sm:col-span-2 lg:col-span-4">
             <h2 className="mb-2 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
               Latest discoveries
             </h2>
@@ -276,7 +309,7 @@ export default async function PulsePage({
                           <span className="text-acid">{formatPrice(stage.priceWei)}</span>
                         </span>
                         <span className="text-ink-faint">
-                          seen {formatDateTimeUtc(row.firstSeenAt)}
+                          seen {formatDateTime(row.firstSeenAt)}
                         </span>
                       </span>
                       <div className="mt-1">

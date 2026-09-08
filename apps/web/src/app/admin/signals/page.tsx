@@ -2,7 +2,7 @@ import { listCredentials, recentScanRuns } from "@hoodmint/db";
 import { XAI_SCOPE } from "@hoodmint/providers";
 import { RevokeButton } from "@/app/admin/opensea/credential-forms.tsx";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 import { ConnectXaiButton, XaiApiKeyForm, XaiClientOverrideForm } from "./xai-forms.tsx";
 
 export const dynamic = "force-dynamic";
@@ -74,7 +74,7 @@ export default async function AdminSignalsPage() {
                 "never"
               ) : (
                 <>
-                  {formatDateTimeUtc(lastScan.startedAt)}{" "}
+                  {formatDateTime(lastScan.startedAt)}{" "}
                   <span className={lastScan.status === "success" ? "text-acid" : "text-amber"}>
                     ({lastScan.status})
                   </span>
@@ -119,9 +119,7 @@ export default async function AdminSignalsPage() {
             <>
               <div className="flex justify-between gap-3">
                 <dt className="text-ink-faint">Access token expires</dt>
-                <dd className="font-mono text-ink-muted">
-                  {formatDateTimeUtc(userToken.expiresAt)}
-                </dd>
+                <dd className="font-mono text-ink-muted">{formatDateTime(userToken.expiresAt)}</dd>
               </div>
               <div className="flex justify-between gap-3">
                 <dt className="text-ink-faint">Scopes</dt>
@@ -209,7 +207,7 @@ export default async function AdminSignalsPage() {
                   <td className="py-1 text-magenta/80">
                     {metaString(c.metadata, "lastErrorCode") ?? "—"}
                   </td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(c.expiresAt)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(c.expiresAt)}</td>
                   <td className="py-1">
                     <RevokeButton id={c.id} />
                   </td>

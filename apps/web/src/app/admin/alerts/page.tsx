@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 import { ChannelForms, TestButton } from "./channel-forms.tsx";
 import { ChannelRowActions } from "./channel-row-actions.tsx";
 
@@ -52,7 +52,7 @@ export default async function AdminAlertsPage() {
                   Enabled
                 </th>
                 <th scope="col" className="py-1 font-normal">
-                  Last success
+                  Last success (GMT+7)
                 </th>
                 <th scope="col" className="py-1 font-normal">
                   Last error
@@ -73,7 +73,7 @@ export default async function AdminAlertsPage() {
                   <td className={c.enabled ? "py-1 text-acid" : "py-1 text-ink-faint"}>
                     {c.enabled ? "yes" : "no"}
                   </td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(c.last_success_at)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(c.last_success_at)}</td>
                   <td className="py-1 text-magenta/80">{c.last_error_code ?? "—"}</td>
                   <td className="py-1">
                     <TestButton channelId={c.id} />

@@ -53,6 +53,7 @@ import {
   sql,
   toggleWatch,
   unwrapRows,
+  updateCredentialMetadata,
   updateCredentialSecret,
   updateProvider,
   updateWallet,
@@ -65,12 +66,19 @@ import {
   createTelegramAdapter,
   createWebhookAdapter,
   createWebPushAdapter,
+  DEFAULT_NVT_SCAN_SETTINGS,
+  type NvtDiscordScanSettings,
+  runNvtDiscordScanPass,
 } from "@hoodmint/notifications";
 import {
   assertSafeRpcUrl,
   buildExecutorDeployData,
   buildSetAllowlistCalldata,
   buildSetOperatorCalldata,
+  NvtClient,
+  type NvtMint,
+  type NvtMintsFilter,
+  type NvtWlScanResponse,
   pollDeviceToken,
   requestDeviceAuthorization,
   resolveXaiClient,
@@ -1515,6 +1523,41 @@ export async function setDemoModeAction(enabled: boolean): Promise<ActionState> 
   return { ok: true, message: enabled ? "Demo mode on." : "Demo mode off." };
 }
 
+/** Update system timezone setting (admin only). Default is "Asia/Ho_Chi_Minh" (GMT+7). */
+export async function setSystemTimezoneAction(timezone: string): Promise<ActionState> {
+  const { db } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("system:operate");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const cleanTz = timezone.trim();
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: cleanTz });
+  } catch {
+    return { ok: false, message: `Invalid timezone identifier: "${cleanTz}"` };
+  }
+  await setSetting(db, "system_timezone", cleanTz);
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "system.timezone",
+    targetType: "system",
+    result: "success",
+    metadata: { timezone: cleanTz },
+  });
+  revalidatePath("/", "layout");
+  return { ok: true, message: `System timezone updated to ${cleanTz}.` };
+}
+
+export async function getSystemTimezoneAction(): Promise<string> {
+  const { db } = container();
+  return (
+    (await getSetting<string>(db, "system_timezone").catch(() => undefined)) ?? "Asia/Ho_Chi_Minh"
+  );
+}
+
 export async function ensureDefaultsAction(): Promise<ActionState> {
   const { db } = container();
   try {
@@ -2623,4 +2666,459 @@ export async function recordBrowserSignatureAction(
   });
   revalidatePath("/admin/execution");
   return { ok: true, message: "Recorded." };
+}
+
+/** Store a NeverFuckingTrade (NFT Trencher) API key, encrypted at rest (admin only). */
+export async function saveNvtApiKeyAction(input: { value: string }): Promise<ActionState> {
+  const { db, config } = container();
+  let actor: string | null = null;
+  try {
+    const user = await requireApi("credentials:manage");
+    actor = user.id;
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const value = input.value.trim();
+  if (value.length < 8) {
+    return { ok: false, message: "Value looks too short to be a valid NeverFuckingTrade API key." };
+  }
+  await createCredential(db, {
+    type: "nvt_api_key",
+    name: "NeverFuckingTrade API key",
+    secret: value,
+    masterKey: config.APP_ENCRYPTION_KEY,
+    createdBy: actor ?? undefined,
+  });
+  await recordAudit(db, {
+    actorUserId: actor,
+    action: "credential.create",
+    targetType: "credential",
+    targetId: "nvt_api_key",
+    metadata: { type: "nvt_api_key" },
+    result: "success",
+  });
+  revalidatePath("/admin/nvt");
+  revalidatePath("/eligible-nvt");
+  return { ok: true, message: "Saved and encrypted NeverFuckingTrade API key." };
+}
+
+/** Resolves active NVT key: stored credential first, then config. */
+export async function resolveNvtApiKey(): Promise<string | undefined> {
+  const { db, config } = container();
+  const stored = await findCredentialByType(db, "nvt_api_key");
+  if (stored !== undefined) {
+    const plaintext = await getCredentialSecret(db, stored.id, config.APP_ENCRYPTION_KEY);
+    if (plaintext !== undefined && plaintext.trim() !== "") {
+      return plaintext.trim();
+    }
+  }
+  return config.NVT_API_KEY;
+}
+
+export interface NvtTestResult extends ActionState {
+  readonly profile?: string | undefined;
+  readonly prefix?: string | undefined;
+  readonly usage?: number | undefined;
+  readonly limit?: number | undefined;
+  readonly tier?: string | undefined;
+  readonly address?: string | undefined;
+}
+
+/** Test NeverFuckingTrade API key connectivity and update stored metadata. */
+export async function testNvtApiKeyAction(): Promise<NvtTestResult> {
+  const { db, config } = container();
+  try {
+    await requireApi("credentials:manage");
+  } catch {
+    return { ok: false, message: "Insufficient role." };
+  }
+  const stored = await findCredentialByType(db, "nvt_api_key");
+  const key =
+    stored !== undefined
+      ? await getCredentialSecret(db, stored.id, config.APP_ENCRYPTION_KEY)
+      : config.NVT_API_KEY;
+
+  if (!key || key.trim() === "") {
+    return { ok: false, message: "No NeverFuckingTrade API key configured." };
+  }
+
+  try {
+    const client = new NvtClient({ apiKey: key, baseUrl: config.NVT_BASE_URL });
+    const me = await client.getMe();
+    if (stored !== undefined) {
+      await updateCredentialMetadata(db, stored.id, {
+        health: "healthy",
+        lastTestedAt: new Date().toISOString(),
+        lastErrorCode: null,
+        tier: me.tier,
+        usage: me.usage,
+        limit: me.limit,
+        prefix: me.prefix,
+        address: me.address ?? me.profile,
+      });
+    }
+    revalidatePath("/admin/nvt");
+    return {
+      ok: true,
+      message: `Connected successfully. Tier: ${me.tier ?? "active"}, Usage: ${me.usage ?? 0}/${me.limit ?? 120}`,
+      profile: me.profile,
+      prefix: me.prefix,
+      usage: me.usage,
+      limit: me.limit,
+      tier: me.tier,
+      address: me.address,
+    };
+  } catch (error) {
+    const errorCode = isAppError(error) ? error.category : "Error";
+    const errorMessage = error instanceof Error ? error.message : "Connection failed";
+    if (stored !== undefined) {
+      await updateCredentialMetadata(db, stored.id, {
+        health: "unhealthy",
+        lastTestedAt: new Date().toISOString(),
+        lastErrorCode: errorCode,
+      }).catch(() => undefined);
+    }
+    revalidatePath("/admin/nvt");
+    return {
+      ok: false,
+      message: `Test failed (${errorCode}): ${errorMessage}`,
+    };
+  }
+}
+
+export interface NvtAccountView {
+  readonly address: string;
+  readonly label?: string | null | undefined;
+  readonly source: "nvt_profile" | "nvt_wallet" | "radar_tracked";
+  readonly primary?: boolean | undefined;
+}
+
+export interface NvtMintsActionResult {
+  readonly ok: boolean;
+  readonly configured: boolean;
+  readonly message?: string | undefined;
+  readonly mints: readonly NvtMint[];
+  readonly accounts: readonly NvtAccountView[];
+  readonly nvtStatus?:
+    | {
+        readonly tier?: string | undefined;
+        readonly usage?: number | undefined;
+        readonly limit?: number | undefined;
+        readonly prefix?: string | undefined;
+        readonly address?: string | undefined;
+      }
+    | undefined;
+}
+
+/** Get full mint detail information and accounts from NeverFuckingTrade. */
+export async function getNvtMintsAction(filters?: NvtMintsFilter): Promise<NvtMintsActionResult> {
+  const { db, config } = container();
+  const key = await resolveNvtApiKey();
+
+  if (!key || key.trim() === "") {
+    return {
+      ok: false,
+      configured: false,
+      message: "NeverFuckingTrade API key is not configured. Please add your API key in Admin.",
+      mints: [],
+      accounts: [],
+    };
+  }
+
+  const client = new NvtClient({ apiKey: key, baseUrl: config.NVT_BASE_URL });
+
+  // Concurrently fetch mints, me profile, and tracked wallets
+  const [mintsResult, meResult, trackedWallets] = await Promise.all([
+    client.getMints(filters).catch((err) => {
+      return { error: err instanceof Error ? err.message : "Failed to load mints" };
+    }),
+    client.getMe().catch(() => null),
+    listWallets(db, { enabledOnly: true }).catch(() => []),
+  ]);
+
+  if ("error" in mintsResult) {
+    return {
+      ok: false,
+      configured: true,
+      message: mintsResult.error,
+      mints: [],
+      accounts: [],
+    };
+  }
+
+  const accountsMap = new Map<string, NvtAccountView>();
+
+  // Add profile address if present
+  if (meResult?.address) {
+    accountsMap.set(meResult.address.toLowerCase(), {
+      address: meResult.address,
+      label: "NVT Primary Profile",
+      source: "nvt_profile",
+      primary: true,
+    });
+  } else if (meResult?.profile?.startsWith("0x")) {
+    accountsMap.set(meResult.profile.toLowerCase(), {
+      address: meResult.profile,
+      label: "NVT Profile",
+      source: "nvt_profile",
+      primary: true,
+    });
+  }
+
+  // Add wallets returned by NVT /me
+  if (meResult?.wallets) {
+    for (const w of meResult.wallets) {
+      const addr = typeof w === "string" ? w : w.a;
+      if (addr?.startsWith("0x")) {
+        const lower = addr.toLowerCase();
+        if (!accountsMap.has(lower)) {
+          accountsMap.set(lower, {
+            address: addr,
+            label: typeof w === "object" && w.primary ? "NVT Primary Wallet" : "NVT Linked Wallet",
+            source: "nvt_wallet",
+            primary: typeof w === "object" ? Boolean(w.primary) : false,
+          });
+        }
+      }
+    }
+  }
+
+  // Add tracked wallets in HoodMint Radar
+  for (const w of trackedWallets) {
+    const lower = w.address.toLowerCase();
+    if (!accountsMap.has(lower)) {
+      accountsMap.set(lower, {
+        address: w.address,
+        label: w.label ? `${w.label} (Tracked)` : "Tracked Wallet",
+        source: "radar_tracked",
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    configured: true,
+    mints: mintsResult.mints,
+    accounts: [...accountsMap.values()],
+    nvtStatus: meResult
+      ? {
+          tier: meResult.tier,
+          usage: meResult.usage,
+          limit: meResult.limit,
+          prefix: meResult.prefix,
+          address: meResult.address ?? meResult.profile,
+        }
+      : undefined,
+  };
+}
+
+export interface NvtScanActionResult extends ActionState {
+  readonly listed?: NvtWlScanResponse["listed"] | undefined;
+  readonly checked?: number | undefined;
+  readonly seconds?: number | undefined;
+  readonly pass?: string | undefined;
+  readonly hours?: number | undefined;
+}
+
+/** Perform a whitelist scan on NeverFuckingTrade for an address. */
+export async function scanNvtWlAction(
+  address: string,
+  slugs?: string[],
+  openSeaPass?: string,
+): Promise<NvtScanActionResult> {
+  const { config } = container();
+  const key = await resolveNvtApiKey();
+
+  if (!key || key.trim() === "") {
+    return { ok: false, message: "NeverFuckingTrade API key is not configured." };
+  }
+
+  if (!address?.startsWith("0x")) {
+    return { ok: false, message: "Invalid wallet address." };
+  }
+
+  try {
+    const client = new NvtClient({ apiKey: key, baseUrl: config.NVT_BASE_URL });
+    const result = await client.scanWl({
+      address,
+      ...(slugs !== undefined ? { slugs } : {}),
+      ...(openSeaPass !== undefined ? { openSeaPass } : {}),
+    });
+    return {
+      ok: true,
+      message: `Scanned ${result.checked ?? 0} mints in ${result.seconds ?? 0}s. Found ${result.listed.length} eligible drop${result.listed.length === 1 ? "" : "s"}.`,
+      listed: result.listed,
+      checked: result.checked,
+      seconds: result.seconds,
+      pass: result.pass,
+      hours: result.hours,
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : "Scan failed";
+    return { ok: false, message: msg };
+  }
+}
+
+export interface NvtDiscordAdminData {
+  readonly hasWebhook: boolean;
+  readonly webhookFingerprint?: string | undefined;
+  readonly settings: NvtDiscordScanSettings;
+}
+
+/** Get NVT Discord webhook status and scan settings for Admin. */
+export async function getNvtDiscordAdminDataAction(): Promise<NvtDiscordAdminData> {
+  const { db } = container();
+  const webhookCred = await findCredentialByType(db, "nvt_discord_webhook");
+  const storedSettings = await getSetting<NvtDiscordScanSettings>(db, "nvt_scan_settings");
+  return {
+    hasWebhook: Boolean(webhookCred),
+    webhookFingerprint: webhookCred ? `••••${webhookCred.fingerprint.slice(-4)}` : undefined,
+    settings: {
+      ...DEFAULT_NVT_SCAN_SETTINGS,
+      ...(storedSettings ?? {}),
+    },
+  };
+}
+
+/** Save Discord Webhook and automated scan schedule settings. */
+export async function saveNvtDiscordSettingsAction(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const { db, config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can configure NVT Discord settings." };
+  }
+
+  const webhookRaw = formData.get("webhookUrl");
+  const webhookUrl = typeof webhookRaw === "string" ? webhookRaw.trim() : "";
+  const enabled = formData.get("enabled") === "true" || formData.get("enabled") === "on";
+  const periodMinutes = Math.max(
+    15,
+    Number.parseInt(String(formData.get("periodMinutes") || "60"), 10),
+  );
+  const lookForwardHours = Math.max(
+    1,
+    Number.parseInt(String(formData.get("lookForwardHours") || "24"), 10),
+  );
+
+  // If a new webhook URL is provided, validate and update/create credential
+  if (webhookUrl !== "") {
+    if (
+      !webhookUrl.startsWith("https://discord.com/api/webhooks/") &&
+      !webhookUrl.startsWith("https://discordapp.com/api/webhooks/")
+    ) {
+      return {
+        ok: false,
+        message: "Invalid Discord webhook URL (must begin with https://discord.com/api/webhooks/).",
+      };
+    }
+    const existing = await findCredentialByType(db, "nvt_discord_webhook");
+    if (existing) {
+      await updateCredentialSecret(db, existing.id, {
+        secret: webhookUrl,
+        masterKey: config.APP_ENCRYPTION_KEY,
+      });
+    } else {
+      await createCredential(db, {
+        type: "nvt_discord_webhook",
+        name: "NVT Discord Webhook",
+        secret: webhookUrl,
+        masterKey: config.APP_ENCRYPTION_KEY,
+        createdBy: sessionUser.id,
+      });
+    }
+  }
+
+  // Update scan settings in database
+  const currentSettings = await getSetting<NvtDiscordScanSettings>(db, "nvt_scan_settings");
+  await setSetting(db, "nvt_scan_settings", {
+    ...DEFAULT_NVT_SCAN_SETTINGS,
+    ...(currentSettings ?? {}),
+    enabled,
+    periodMinutes,
+    lookForwardHours,
+  });
+
+  revalidatePath("/admin/nvt");
+  return { ok: true, message: "NVT Discord settings saved successfully." };
+}
+
+/** Remove the Discord Webhook credential and disable automated alerts. */
+export async function removeNvtDiscordWebhookAction(): Promise<ActionState> {
+  const { db } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can remove NVT Discord settings." };
+  }
+
+  const existing = await findCredentialByType(db, "nvt_discord_webhook");
+  if (existing) {
+    await revokeCredential(db, existing.id);
+  }
+
+  const currentSettings = await getSetting<NvtDiscordScanSettings>(db, "nvt_scan_settings");
+  if (currentSettings) {
+    await setSetting(db, "nvt_scan_settings", {
+      ...currentSettings,
+      enabled: false,
+    });
+  }
+
+  revalidatePath("/admin/nvt");
+  return { ok: true, message: "Discord webhook removed and automated alerts disabled." };
+}
+
+/** Test sending an embed message to the Discord Webhook. */
+export async function testNvtDiscordWebhookAction(directUrl?: string): Promise<ActionState> {
+  const { db, config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can test Discord webhooks." };
+  }
+
+  let url = directUrl?.trim();
+  if (!url) {
+    const cred = await findCredentialByType(db, "nvt_discord_webhook");
+    if (!cred) {
+      return { ok: false, message: "No Discord webhook configured." };
+    }
+    url = await getCredentialSecret(db, cred.id, config.APP_ENCRYPTION_KEY);
+  }
+
+  if (!url) {
+    return { ok: false, message: "No webhook URL provided." };
+  }
+
+  const adapter = createDiscordAdapter();
+  const res = await adapter.sendTest({ url });
+  if (res.ok) {
+    return { ok: true, message: `Test message sent to Discord successfully (${res.latencyMs}ms).` };
+  }
+  return { ok: false, message: `Discord test failed: ${res.errorCode ?? "unknown error"}` };
+}
+
+/** Immediately trigger an NVT whitelist scan and push any hits to Discord. */
+export async function triggerNvtScanAndNotifyAction(): Promise<
+  ActionState & { count?: number | undefined }
+> {
+  const { db, config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can trigger scans." };
+  }
+
+  const result = await runNvtDiscordScanPass(db, config.APP_ENCRYPTION_KEY, {
+    ...(config.NVT_API_KEY ? { nvtApiKey: config.NVT_API_KEY } : {}),
+    ...(config.NVT_BASE_URL ? { nvtBaseUrl: config.NVT_BASE_URL } : {}),
+    forceSend: true,
+  });
+
+  revalidatePath("/admin/nvt");
+  return {
+    ok: result.ok,
+    message: result.message,
+    count: result.alertedCount,
+  };
 }

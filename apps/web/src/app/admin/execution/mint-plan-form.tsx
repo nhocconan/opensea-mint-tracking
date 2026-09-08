@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useState } from "react";
 import { type ActionState, createMintPlanAction } from "@/app/actions.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 import { type ProjectHit, ProjectPicker } from "./project-picker.tsx";
 
 export interface WalletOption {
@@ -155,7 +155,7 @@ export function MintPlanForm({
               <option value="">Coarse tick (default, ~30s)</option>
               {stages.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.label} — {formatDateTimeUtc(s.startsAt)}
+                  {s.label} — {formatDateTime(s.startsAt)}
                 </option>
               ))}
             </select>

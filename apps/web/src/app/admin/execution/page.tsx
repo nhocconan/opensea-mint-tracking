@@ -11,7 +11,7 @@ import {
 import { classifyLatency, getGasSnapshot } from "@hoodmint/providers";
 import Link from "next/link";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
+import { formatDateTime, shortAddress } from "@/lib/format.ts";
 import { requirePage } from "@/lib/session.ts";
 import { AutoMintPolicyPanel } from "./auto-mint-policy.tsx";
 import { BrowserSignPrompt } from "./browser-sign-prompt.tsx";
@@ -318,8 +318,8 @@ export default async function AdminExecutionPage() {
                 </td>
                 <td className="py-1">{p.quantity}</td>
                 <td className="py-1">{p.perPlanCeilingWei}</td>
-                <td className="py-1">{formatDateTimeUtc(p.armedUntil)}</td>
-                <td className="py-1 text-ink-faint">{formatDateTimeUtc(p.createdAt)}</td>
+                <td className="py-1">{formatDateTime(p.armedUntil)}</td>
+                <td className="py-1 text-ink-faint">{formatDateTime(p.createdAt)}</td>
                 <td className="py-1">
                   {p.status === "draft" ? (
                     <span className="flex items-center gap-1.5">
@@ -379,7 +379,7 @@ export default async function AdminExecutionPage() {
                 </td>
                 <td className="py-1">{a.txHash ? shortAddress(a.txHash) : "—"}</td>
                 <td className="py-1 text-ink-faint">{a.errorCode ?? "—"}</td>
-                <td className="py-1 text-ink-faint">{formatDateTimeUtc(a.attemptAt)}</td>
+                <td className="py-1 text-ink-faint">{formatDateTime(a.attemptAt)}</td>
               </tr>
             ))}
             {attempts.length === 0 ? (

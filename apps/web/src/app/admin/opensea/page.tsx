@@ -1,6 +1,6 @@
 import { listCredentials } from "@hoodmint/db";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 import { CredentialForm, RevokeButton } from "./credential-forms.tsx";
 import { RecheckEligibilityButton } from "./recheck-eligibility-button.tsx";
 
@@ -40,8 +40,8 @@ export default async function AdminOpenseaPage() {
               <th className="py-1 font-normal">Type</th>
               <th className="py-1 font-normal">Name</th>
               <th className="py-1 font-normal">Fingerprint</th>
-              <th className="py-1 font-normal">Expires</th>
-              <th className="py-1 font-normal">Created</th>
+              <th className="py-1 font-normal">Expires (GMT+7)</th>
+              <th className="py-1 font-normal">Created (GMT+7)</th>
               <th className="py-1 font-normal">Revoke</th>
             </tr>
           </thead>
@@ -51,8 +51,8 @@ export default async function AdminOpenseaPage() {
                 <td className="py-1">{c.type}</td>
                 <td className="py-1">{c.name}</td>
                 <td className="py-1 text-ink-muted">••••{c.fingerprint.slice(-4)}</td>
-                <td className="py-1 text-ink-faint">{formatDateTimeUtc(c.expiresAt)}</td>
-                <td className="py-1 text-ink-faint">{formatDateTimeUtc(c.createdAt)}</td>
+                <td className="py-1 text-ink-faint">{formatDateTime(c.expiresAt)}</td>
+                <td className="py-1 text-ink-faint">{formatDateTime(c.createdAt)}</td>
                 <td className="py-1">
                   <RevokeButton id={c.id} />
                 </td>

@@ -209,6 +209,10 @@ export const envSchema = z.object({
   XAI_MODEL: z.string().trim().min(1).default("grok-4"),
   XAI_API_KEY: z.string().trim().optional(),
 
+  /** NeverFuckingTrade (NFT Trencher) API key and base URL */
+  NVT_API_KEY: z.string().trim().optional(),
+  NVT_BASE_URL: httpsUrl.default("https://cdn.neverfuckingtrade.com/api/v1"),
+
   /** Web Push channel (feature-backlog.md, shipped 2026-08-22): opt-in
    *  like X signals above — no channel is active without an operator-
    *  generated VAPID keypair (`pnpm vapid-keys`). Unset means the
@@ -317,6 +321,7 @@ export function describeConfig(config: AppConfig): Record<string, unknown> {
     rpcConfigured: Boolean(config.RPC_URL),
     wsConfigured: Boolean(config.RPC_WS_URL),
     openseaKeyFromEnv: Boolean(config.OPENSEA_API_KEY),
+    nvtKeyFromEnv: Boolean(config.NVT_API_KEY),
     walletKeyEnvelopePublic: Boolean(config.WALLET_KEY_PUBLIC_KEY),
     walletKeyEnvelopePrivate: Boolean(config.WALLET_KEY_PRIVATE_KEY),
     patFromEnv: Boolean(config.OPENSEA_WALLET_PAT),

@@ -7,7 +7,7 @@ import {
 } from "@hoodmint/db";
 import { sql } from "drizzle-orm";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
+import { formatDateTime } from "@/lib/format.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -188,7 +188,7 @@ export default async function AdminOverviewPage() {
                   >
                     {p.healthStatus}
                   </td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(p.lastSuccessAt)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(p.lastSuccessAt)}</td>
                 </tr>
               ))}
               {providers.length === 0 ? (
@@ -259,8 +259,8 @@ export default async function AdminOverviewPage() {
                   >
                     {s.status}
                   </td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(s.startedAt)}</td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(s.finishedAt)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(s.startedAt)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(s.finishedAt)}</td>
                   <td className="py-1 text-ink-faint">{JSON.stringify(s.counts ?? {})}</td>
                 </tr>
               ))}

@@ -1,20 +1,25 @@
 import { getSetting, listOutbox } from "@hoodmint/db";
 import { container } from "@/lib/container.ts";
-import { formatDateTimeUtc } from "@/lib/format.ts";
-import { DemoModeToggle, ScanNowButton } from "./system-buttons.tsx";
+import { formatDateTime } from "@/lib/format.ts";
+import { DemoModeToggle, ScanNowButton, TimezoneSettingsForm } from "./system-buttons.tsx";
 
 export const dynamic = "force-dynamic";
 
-/** Admin → System (PRD §7.5): scan now, demo mode, outbox, retention policy. */
+/** Admin → System (PRD §7.5): scan now, demo mode, timezone, outbox, retention policy. */
 export default async function AdminSystemPage() {
   const { db } = container();
-  const [outbox, demoMode] = await Promise.all([
+  const [outbox, demoMode, systemTimezone] = await Promise.all([
     listOutbox(db, 20).catch(() => []),
     getSetting<boolean>(db, "demo_mode").catch(() => false),
+    getSetting<string>(db, "system_timezone").catch(() => undefined),
   ]);
 
   return (
     <div className="grid gap-3">
+      <section className="rounded-md border border-line bg-base-raised p-4">
+        <TimezoneSettingsForm initialTimezone={systemTimezone ?? "Asia/Ho_Chi_Minh"} />
+      </section>
+
       <section className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-base-raised p-4">
         <ScanNowButton />
         <DemoModeToggle enabled={demoMode === true} />
@@ -30,7 +35,7 @@ export default async function AdminSystemPage() {
               <th className="py-1 font-normal">Type</th>
               <th className="py-1 font-normal">Status</th>
               <th className="py-1 font-normal">Attempts</th>
-              <th className="py-1 font-normal">Next attempt</th>
+              <th className="py-1 font-normal">Next attempt (GMT+7)</th>
               <th className="py-1 font-normal">Last error</th>
             </tr>
           </thead>
@@ -50,7 +55,7 @@ export default async function AdminSystemPage() {
                   {row.status}
                 </td>
                 <td className="py-1">{row.attempts}</td>
-                <td className="py-1 text-ink-faint">{formatDateTimeUtc(row.nextAttemptAt)}</td>
+                <td className="py-1 text-ink-faint">{formatDateTime(row.nextAttemptAt)}</td>
                 <td className="py-1 text-magenta/80">{row.lastErrorCode ?? "—"}</td>
               </tr>
             ))}

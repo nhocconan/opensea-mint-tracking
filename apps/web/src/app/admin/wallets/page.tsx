@@ -2,7 +2,7 @@ import { countWallets, listWallets } from "@hoodmint/db";
 import { PAGE_SIZE, Pagination, SearchBox } from "@/components/list-controls.tsx";
 import { parsePage } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
-import { formatBalance, formatDateTimeUtc, shortAddress } from "@/lib/format.ts";
+import { formatBalance, formatDateTime, shortAddress } from "@/lib/format.ts";
 import { BulkWalletForm } from "./bulk-wallet-form.tsx";
 import { ImportKeyForm } from "./import-key-form.tsx";
 import { RemoveKeyButton } from "./remove-key-button.tsx";
@@ -67,7 +67,7 @@ export default async function AdminWalletsPage({
                   Balance
                 </th>
                 <th scope="col" className="py-1 font-normal">
-                  Added
+                  Added (GMT+7)
                 </th>
                 <th scope="col" className="py-1 font-normal">
                   <span className="sr-only">Actions</span>
@@ -123,7 +123,7 @@ export default async function AdminWalletsPage({
                   >
                     {w.hasSigningKey ? formatBalance(w.nativeBalanceWei, w.balanceCheckedAt) : "—"}
                   </td>
-                  <td className="py-1 text-ink-faint">{formatDateTimeUtc(w.createdAt)}</td>
+                  <td className="py-1 text-ink-faint">{formatDateTime(w.createdAt)}</td>
                   <td className="py-1">
                     <WalletRowActions
                       id={w.id}
