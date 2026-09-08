@@ -279,21 +279,28 @@ export async function runNvtDiscordScanPass(
     // 6. Resolve OpenSea Pass credentials
     const passCreds = await findCredentialsByType(db, "nvt_opensea_pass").catch(() => []);
     const passMap = new Map<string, { pass: string; id: string; expiresAt?: Date | null }>();
+    let primaryPass: { pass: string; id: string; expiresAt?: Date | null } | undefined;
+
     for (const cred of passCreds) {
       try {
         const pass = await getCredentialSecret(db, cred.id, masterKey);
         if (pass) {
+          const entry = { pass, id: cred.id, expiresAt: cred.expiresAt };
           const addr = (cred.metadata as { address?: string } | null)?.address?.toLowerCase();
-          if (addr) {
-            passMap.set(addr, { pass, id: cred.id, expiresAt: cred.expiresAt });
+          if (addr && addr !== "default" && addr !== "*") {
+            passMap.set(addr, entry);
           }
-          if (passCreds.length === 1 && !passMap.has("*")) {
-            passMap.set("*", { pass, id: cred.id, expiresAt: cred.expiresAt });
+          if (!primaryPass || (cred.expiresAt && new Date(cred.expiresAt).getTime() > Date.now())) {
+            primaryPass = entry;
           }
         }
       } catch (err) {
         log.warn({ err, credentialId: cred.id }, "could not decrypt OpenSea pass");
       }
+    }
+
+    if (primaryPass && !passMap.has("*")) {
+      passMap.set("*", primaryPass);
     }
 
     let authWarning: string | undefined;
@@ -304,7 +311,8 @@ export async function runNvtDiscordScanPass(
     const candidateSlugs = relevantMints.map((m) => m.slug).filter(Boolean);
 
     for (const account of accounts) {
-      const passInfo = passMap.get(account.address.toLowerCase()) ?? passMap.get("*");
+      const passInfo =
+        passMap.get(account.address.toLowerCase()) ?? passMap.get("*") ?? primaryPass;
       if (passInfo) anyPassFound = true;
 
       try {

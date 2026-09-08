@@ -2927,7 +2927,7 @@ export async function scanNvtWlAction(
   slugs?: string[],
   openSeaPass?: string,
 ): Promise<NvtScanActionResult> {
-  const { config } = container();
+  const { db, config } = container();
   const key = await resolveNvtApiKey();
 
   if (!key || key.trim() === "") {
@@ -2938,12 +2938,30 @@ export async function scanNvtWlAction(
     return { ok: false, message: "Invalid wallet address." };
   }
 
+  let resolvedPass = openSeaPass;
+  if (!resolvedPass) {
+    try {
+      const passCreds = await findCredentialsByType(db, "nvt_opensea_pass");
+      const matched = passCreds.find(
+        (c) =>
+          (c.metadata as { address?: string } | null)?.address?.toLowerCase() ===
+          address.toLowerCase(),
+      );
+      const targetCred = matched ?? passCreds[0];
+      if (targetCred) {
+        resolvedPass = await getCredentialSecret(db, targetCred.id, config.APP_ENCRYPTION_KEY);
+      }
+    } catch {
+      // Best-effort
+    }
+  }
+
   try {
     const client = new NvtClient({ apiKey: key, baseUrl: config.NVT_BASE_URL });
     const result = await client.scanWl({
       address,
       ...(slugs !== undefined ? { slugs } : {}),
-      ...(openSeaPass !== undefined ? { openSeaPass } : {}),
+      ...(resolvedPass !== undefined ? { openSeaPass: resolvedPass } : {}),
     });
     return {
       ok: true,
