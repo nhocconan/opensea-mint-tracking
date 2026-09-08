@@ -55,75 +55,101 @@ export default async function AdminNvtPage() {
     : undefined;
 
   return (
-    <div className="grid gap-3 md:grid-cols-2">
+    <div className="grid gap-4 md:grid-cols-2">
       {/* Overview Card */}
-      <section className="rounded-md border border-line bg-base-raised p-4 md:col-span-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-mono text-[11px] tracking-widest text-ink-faint uppercase">
-            NeverFuckingTrade (NFT Trencher) Live Radar &amp; Whitelist Service
-          </h2>
+      <section className="rounded-lg border border-line bg-base-raised p-5 shadow-xs md:col-span-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 pb-3">
+          <div className="flex items-center gap-2.5">
+            <span className="flex size-2 rounded-full bg-acid animate-pulse" aria-hidden />
+            <h2 className="font-display text-base font-semibold text-ink">
+              NeverFuckingTrade (NFT Trencher) Live Radar &amp; Whitelist Engine
+            </h2>
+          </div>
           <Link
             href="/my-mints-nvt"
-            className="inline-flex items-center gap-1 rounded-sm border border-acid/40 bg-acid/10 px-2.5 py-1 font-mono text-xs text-acid hover:bg-acid/20"
+            className="inline-flex items-center gap-1.5 rounded-md border border-acid/50 bg-acid/15 px-3 py-1.5 font-mono text-xs font-medium text-acid hover:bg-acid/25 transition-colors"
           >
-            Open My Mints - NVT &rarr;
+            <span>Open My Mints - NVT</span>
+            <span aria-hidden>&rarr;</span>
           </Link>
         </div>
-        <dl className="mt-3 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-4 font-mono">
-          <div>
-            <dt className="text-ink-faint">Status</dt>
-            <dd className="font-semibold">
-              {isConfigured ? (
-                health === "healthy" ? (
-                  <span className="text-acid">Configured &amp; Healthy</span>
-                ) : health === "unhealthy" ? (
-                  <span className="text-magenta">Degraded ({lastError ?? "error"})</span>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 font-mono text-xs">
+          <div className="rounded-md border border-line/60 bg-base/50 p-3">
+            <div className="text-[11px] text-ink-faint">Service Health</div>
+            <div className="mt-1 flex items-center gap-2">
+              <span
+                className={`size-2 rounded-full ${
+                  isConfigured && health === "healthy"
+                    ? "bg-acid"
+                    : isConfigured && health === "unhealthy"
+                      ? "bg-magenta"
+                      : isConfigured
+                        ? "bg-cyan"
+                        : "bg-amber"
+                }`}
+              />
+              <span className="font-semibold text-sm">
+                {isConfigured ? (
+                  health === "healthy" ? (
+                    <span className="text-acid">Healthy &amp; Active</span>
+                  ) : health === "unhealthy" ? (
+                    <span className="text-magenta">Degraded ({lastError ?? "error"})</span>
+                  ) : (
+                    <span className="text-cyan">Configured</span>
+                  )
                 ) : (
-                  <span className="text-cyan">Configured (Saved)</span>
-                )
-              ) : (
-                <span className="text-amber">Key not configured</span>
-              )}
-            </dd>
+                  <span className="text-amber">Key Required</span>
+                )}
+              </span>
+            </div>
           </div>
-          <div>
-            <dt className="text-ink-faint">Active credential source</dt>
-            <dd className="text-ink-muted">
+
+          <div className="rounded-md border border-line/60 bg-base/50 p-3">
+            <div className="text-[11px] text-ink-faint">Active Credential</div>
+            <div className="mt-1 truncate font-medium text-ink">
               {primaryCredential !== undefined
-                ? `Stored encrypted key (••••${primaryCredential.fingerprint.slice(-4)})`
+                ? `Stored key (••••${primaryCredential.fingerprint.slice(-4)})`
                 : hasEnvKey
-                  ? "NVT_API_KEY from environment"
-                  : "None"}
-            </dd>
+                  ? "NVT_API_KEY from env"
+                  : "Not configured"}
+            </div>
           </div>
-          <div>
-            <dt className="text-ink-faint">Base API URL</dt>
-            <dd className="truncate text-ink-muted">{config.NVT_BASE_URL}</dd>
-          </div>
-          <div>
-            <dt className="text-ink-faint">Quota &amp; Rate Limit</dt>
-            <dd className="text-ink-muted">
+
+          <div className="rounded-md border border-line/60 bg-base/50 p-3">
+            <div className="text-[11px] text-ink-faint">Quota &amp; Rate Limit</div>
+            <div className="mt-1 font-medium text-ink">
               {usage !== undefined ? `${usage} / ${limit}` : `${limit}`} req/min
-              {tier ? ` · ${tier.toUpperCase()}` : ""}
-            </dd>
+              {tier ? <span className="text-acid ml-1 font-mono text-[11px]">[{tier.toUpperCase()}]</span> : ""}
+            </div>
           </div>
+
+          <div className="rounded-md border border-line/60 bg-base/50 p-3">
+            <div className="text-[11px] text-ink-faint">API Endpoint</div>
+            <div className="mt-1 truncate font-medium text-ink-muted">
+              {config.NVT_BASE_URL}
+            </div>
+          </div>
+
           {profileAddress ? (
-            <div className="sm:col-span-2">
-              <dt className="text-ink-faint">Account address</dt>
-              <dd className="text-cyan truncate">{profileAddress}</dd>
+            <div className="rounded-md border border-line/60 bg-base/50 p-3 sm:col-span-2">
+              <div className="text-[11px] text-ink-faint">Associated Profile Account</div>
+              <div className="mt-1 truncate font-medium text-cyan">{profileAddress}</div>
             </div>
           ) : null}
+
           {lastTestedAt ? (
-            <div className="sm:col-span-2">
-              <dt className="text-ink-faint">Last verified</dt>
-              <dd className="text-ink-faint">{formatDateTime(new Date(lastTestedAt))}</dd>
+            <div className="rounded-md border border-line/60 bg-base/50 p-3 sm:col-span-2">
+              <div className="text-[11px] text-ink-faint">Last Health Check (GMT+7)</div>
+              <div className="mt-1 font-medium text-ink-muted">
+                {formatDateTime(new Date(lastTestedAt))}
+              </div>
             </div>
           ) : null}
-        </dl>
-        <p className="mt-3 text-[11px] text-ink-faint">
-          NeverFuckingTrade powers real-time mint discovery, whitelist stage validation (GTD / FCFS
-          / Allowlist), and cross-chain tracking across Robinhood Chain, Ethereum, Ink, and
-          HyperEVM.
+        </div>
+
+        <p className="mt-4 text-xs text-ink-faint border-t border-line/50 pt-3">
+          NeverFuckingTrade powers real-time drop discovery, SIWE OpenSea allowlist validation (GTD / FCFS / WL), and cross-chain tracking across Robinhood Chain, Ethereum, Ink, and HyperEVM.
         </p>
       </section>
 

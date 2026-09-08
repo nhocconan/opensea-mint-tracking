@@ -127,14 +127,24 @@ export function AppShell({
             <>
               <Link
                 href="/admin"
-                className="flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-acid"
+                aria-current={pathname.startsWith("/admin") && !pathname.startsWith("/admin/account") ? "page" : undefined}
+                className={`flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] transition-colors ${
+                  pathname.startsWith("/admin") && !pathname.startsWith("/admin/account")
+                    ? "border-l-2 border-acid bg-base-overlay text-acid font-medium"
+                    : "text-ink-faint hover:bg-base-overlay hover:text-acid"
+                }`}
               >
                 <Shield className="size-3" aria-hidden />
                 Admin
               </Link>
               <Link
                 href="/admin/account"
-                className="flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+                aria-current={pathname === "/admin/account" ? "page" : undefined}
+                className={`flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] transition-colors ${
+                  pathname === "/admin/account"
+                    ? "border-l-2 border-acid bg-base-overlay text-acid font-medium"
+                    : "text-ink-faint hover:bg-base-overlay hover:text-ink-muted"
+                }`}
               >
                 <UserCog className="size-3" aria-hidden />
                 Account
@@ -180,7 +190,12 @@ export function AppShell({
             <Link
               href="/admin"
               aria-label="Admin console"
-              className="inline-flex size-11 items-center justify-center rounded-sm text-ink-muted hover:bg-base-overlay hover:text-acid focus:outline-none focus:ring-2 focus:ring-acid/50"
+              aria-current={pathname.startsWith("/admin") ? "page" : undefined}
+              className={`inline-flex size-11 items-center justify-center rounded-sm transition-colors ${
+                pathname.startsWith("/admin")
+                  ? "border border-acid/50 bg-base-overlay text-acid"
+                  : "text-ink-muted hover:bg-base-overlay hover:text-acid"
+              } focus:outline-none focus:ring-2 focus:ring-acid/50`}
             >
               <UserCog className="size-4" aria-hidden />
             </Link>

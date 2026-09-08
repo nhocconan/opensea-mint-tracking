@@ -1,4 +1,8 @@
 import {
+  type MintPlan,
+  type ProviderRow,
+  type RpcEndpoint,
+  type ScanRun,
   listMintPlans,
   listProviders,
   listRpcEndpoints,
@@ -77,23 +81,32 @@ function StatTile({
         : tone === "magenta"
           ? "text-magenta"
           : "text-ink";
+  const borderTone =
+    tone === "acid"
+      ? "border-acid/40 hover:border-acid"
+      : tone === "amber"
+        ? "border-amber/40 hover:border-amber"
+        : tone === "magenta"
+          ? "border-magenta/40 hover:border-magenta"
+          : "border-line hover:border-line-strong";
+
   const body = (
-    <>
-      <dt className="font-mono text-[10px] tracking-wide text-ink-faint uppercase">{label}</dt>
-      <dd className={`mt-1 font-display text-2xl font-semibold ${valueClass}`}>{value}</dd>
-    </>
+    <div className="flex flex-col justify-between h-full">
+      <dt className="font-mono text-[10px] tracking-wider text-ink-faint uppercase">{label}</dt>
+      <dd className={`mt-2 font-display text-2xl font-bold tracking-tight ${valueClass}`}>{value}</dd>
+    </div>
   );
   if (href !== undefined) {
     return (
       <a
         href={href}
-        className="block rounded-md border border-line bg-base-raised p-3 transition-colors hover:border-acid/40"
+        className={`group block rounded-lg border bg-base-raised p-3.5 shadow-xs transition-all hover:bg-base-overlay ${borderTone}`}
       >
         {body}
       </a>
     );
   }
-  return <div className="rounded-md border border-line bg-base-raised p-3">{body}</div>;
+  return <div className={`rounded-lg border bg-base-raised p-3.5 shadow-xs ${borderTone}`}>{body}</div>;
 }
 
 /** Admin → Overview (PRD §7.5): health, queues, scans, latency. */
@@ -101,8 +114,8 @@ export default async function AdminOverviewPage() {
   const { db } = container();
   const [providers, scans, outbox, latency, jobStats, counts, mintPlans, rpcEndpoints] =
     await Promise.all([
-      listProviders(db).catch(() => []),
-      recentScanRuns(db, 10).catch(() => []),
+      listProviders(db).catch((): ProviderRow[] => []),
+      recentScanRuns(db, 10).catch((): ScanRun[] => []),
       pendingOutboxDepth(db).catch(() => -1),
       (async () => {
         const started = Date.now();
@@ -122,8 +135,8 @@ export default async function AdminOverviewPage() {
             channelsErrored: 0,
           }) as OverviewCounts,
       ),
-      listMintPlans(db, 200).catch(() => []),
-      listRpcEndpoints(db).catch(() => []),
+      listMintPlans(db, 200).catch((): MintPlan[] => []),
+      listRpcEndpoints(db).catch((): RpcEndpoint[] => []),
     ]);
   const armedPlans = mintPlans.filter((p) => p.status === "armed").length;
   const rpcEnabled = rpcEndpoints.filter((r) => r.enabled).length;

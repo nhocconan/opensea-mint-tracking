@@ -166,10 +166,10 @@ export async function setupAction(input: {
         sameSite: "lax",
         secure: container().config.APP_ENV === "production",
         path: "/",
-        ...(attrs.some((a) => a.trim().startsWith("Max-Age="))
+        ...(attrs.some((a: string) => a.trim().startsWith("Max-Age="))
           ? {
               maxAge: Number.parseInt(
-                (attrs.find((a) => a.trim().startsWith("Max-Age=")) ?? "").split("=")[1] ??
+                (attrs.find((a: string) => a.trim().startsWith("Max-Age=")) ?? "").split("=")[1] ??
                   "604800",
                 10,
               ),

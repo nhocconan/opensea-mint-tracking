@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Shield } from "lucide-react";
+import { AdminNav } from "@/components/admin-nav.tsx";
 import { SignOutButton } from "@/components/sign-out-button.tsx";
-import { ADMIN_NAV } from "@/lib/admin-nav.ts";
 import { getSessionUser, requirePage } from "@/lib/session.ts";
 
 export const metadata: Metadata = { title: "Admin" };
@@ -12,32 +12,47 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   const user = await getSessionUser();
 
   return (
-    <div className="px-4 py-5">
-      <header className="mb-4">
-        <div className="flex items-center justify-between gap-3">
-          <h1 className="font-display text-lg font-semibold tracking-tight">Admin console</h1>
-          <div className="flex items-center gap-2">
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 space-y-6">
+      <header className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="flex size-8 items-center justify-center rounded-md border border-acid/50 bg-acid/15 text-acid">
+              <Shield className="size-4" aria-hidden />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="font-display text-lg font-bold tracking-tight text-ink">
+                  Admin Console
+                </h1>
+                <span className="rounded-full border border-acid/40 bg-acid/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-acid uppercase tracking-wider">
+                  Protected
+                </span>
+              </div>
+              <p className="font-mono text-[11px] text-ink-faint">
+                HoodMint Radar Operator Control Center · Autonomous mint tracking &amp; execution
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
             {user?.email !== undefined ? (
-              <span className="hidden font-mono text-[11px] text-ink-faint sm:inline">
-                {user.email}
-              </span>
+              <div className="flex items-center gap-1.5 rounded-md border border-line bg-base-raised px-2.5 py-1">
+                <span className="size-1.5 rounded-full bg-acid" />
+                <span className="font-mono text-xs text-ink-muted">{user.email}</span>
+                <span className="rounded-xs border border-line bg-base px-1 font-mono text-[9px] uppercase text-ink-faint">
+                  Admin
+                </span>
+              </div>
             ) : null}
             <SignOutButton />
           </div>
         </div>
-        <nav aria-label="Admin sections" className="mt-2 flex flex-wrap gap-1.5">
-          {ADMIN_NAV.map(([href, label]) => (
-            <Link
-              key={href}
-              href={href}
-              className="rounded-xs border border-line px-2.5 py-1 font-mono text-[11px] text-ink-muted hover:border-acid hover:text-acid"
-            >
-              {label}
-            </Link>
-          ))}
-        </nav>
+
+        <AdminNav />
       </header>
-      {children}
+
+      <main className="min-w-0">{children}</main>
     </div>
   );
 }
+
