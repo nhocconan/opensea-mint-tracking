@@ -6,6 +6,7 @@ import { formatDateTime } from "@/lib/format.ts";
 import {
   NvtApiKeyForm,
   NvtDiscordSettingsForm,
+  NvtOpenSeaPassForm,
   NvtTestButton,
   RevokeNvtCredentialButton,
 } from "./nvt-forms.tsx";
@@ -31,7 +32,8 @@ export default async function AdminNvtPage() {
   const { db, config } = container();
   const allCredentials = await listCredentials(db).catch(() => []);
   const nvtCredentials = allCredentials.filter(
-    (c) => c.type === "nvt_api_key" || c.type === "nvt_discord_webhook",
+    (c) =>
+      c.type === "nvt_api_key" || c.type === "nvt_discord_webhook" || c.type === "nvt_opensea_pass",
   );
   const primaryCredential = nvtCredentials.find((c) => c.type === "nvt_api_key");
   const discordData = await getNvtDiscordAdminDataAction();
@@ -173,6 +175,11 @@ export default async function AdminNvtPage() {
           </p>
         </div>
       </section>
+
+      {/* OpenSea SIWE Pass for Whitelist Scanning */}
+      <div className="md:col-span-2">
+        <NvtOpenSeaPassForm passes={discordData.openSeaPasses} />
+      </div>
 
       {/* Automated Discord Alerts & Scan Schedule */}
       <div className="md:col-span-2">

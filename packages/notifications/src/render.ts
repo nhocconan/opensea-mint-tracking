@@ -111,13 +111,99 @@ export interface DiscordEmbed {
   readonly timestamp: string;
 }
 
-// Discord embed limits, verified against docs.discord.com/developers/resources/message
-// 2026-08-22: title <=256, field.name <=256, field.value <=1024, combined
-// title+description+field.name+field.value+footer.text+author.name across
-// all embeds <=6000. We send one embed with a handful of short fields, well
-// under the combined cap, but truncate defensively anyway.
-function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+// Discord embed limits, verified against docs.discord.com/developers/resources/message:
+// title <=256, description <=4096, field.name <=256, field.value <=1024, fields <=25,
+// footer.text <=2048, total combined embed characters across fields+title+desc+footer <=6000.
+// Single content message <=2000 characters.
+export function truncateDiscordString(value: string, max: number): string {
+  if (!value) return "";
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/** Formats a date into Discord native relative timestamp (e.g. <t:1725760000:R> -> "in 2 hours"). */
+export function formatDiscordRelativeTime(dateIso: string | number | Date): string {
+  const ms = new Date(dateIso).getTime();
+  if (Number.isNaN(ms)) return "";
+  const sec = Math.floor(ms / 1000);
+  return `<t:${sec}:R>`;
+}
+
+/** Formats a date into Discord native full timestamp (e.g. <t:1725760000:F>). */
+export function formatDiscordFullTime(dateIso: string | number | Date): string {
+  const ms = new Date(dateIso).getTime();
+  if (Number.isNaN(ms)) return "";
+  const sec = Math.floor(ms / 1000);
+  return `<t:${sec}:F>`;
+}
+
+/** Chunks text into safe paragraphs/lines strictly under maxLen (default 1900 < 2000 limit). */
+export function chunkDiscordMessage(content: string, maxLen = 1900): string[] {
+  if (content.length <= maxLen) return [content];
+  const lines = content.split("\n");
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const line of lines) {
+    if (current.length + line.length + 1 > maxLen) {
+      if (current.length > 0) {
+        chunks.push(current.trim());
+        current = "";
+      }
+      if (line.length > maxLen) {
+        for (let i = 0; i < line.length; i += maxLen) {
+          chunks.push(line.slice(i, i + maxLen));
+        }
+      } else {
+        current = line;
+      }
+    } else {
+      current = current ? `${current}\n${line}` : line;
+    }
+  }
+
+  if (current.trim().length > 0) {
+    chunks.push(current.trim());
+  }
+
+  return chunks;
+}
+
+/** Enforces Discord's strict embed field limits and maximum 6000 total character budget. */
+export function sanitizeDiscordEmbed(embed: DiscordEmbed): DiscordEmbed {
+  const title = truncateDiscordString(embed.title, 256);
+  const description = embed.description
+    ? truncateDiscordString(embed.description, 4000)
+    : undefined;
+  const footerText = truncateDiscordString(embed.footer.text, 2048);
+
+  const fields: DiscordEmbedField[] = (embed.fields ?? []).slice(0, 25).map((f) => ({
+    name: truncateDiscordString(f.name, 256) || "—",
+    value: truncateDiscordString(f.value, 1024) || "—",
+    ...(f.inline !== undefined ? { inline: f.inline } : {}),
+  }));
+
+  let totalChars = title.length + (description?.length ?? 0) + footerText.length;
+  const safeFields: DiscordEmbedField[] = [];
+
+  for (const f of fields) {
+    const fLen = f.name.length + f.value.length;
+    if (totalChars + fLen > 5500) {
+      break;
+    }
+    totalChars += fLen;
+    safeFields.push(f);
+  }
+
+  return {
+    title,
+    ...(embed.url ? { url: embed.url } : {}),
+    ...(description ? { description } : {}),
+    color: embed.color,
+    fields: safeFields,
+    footer: { text: footerText },
+    timestamp: embed.timestamp,
+  };
 }
 
 const EMBED_TITLE_BY_TYPE: Record<AlertType, (input: AlertRenderInput) => string> = {
@@ -129,10 +215,6 @@ const EMBED_TITLE_BY_TYPE: Record<AlertType, (input: AlertRenderInput) => string
   source_failure: (i) => `🛠 PROVIDER ISSUE: ${i.projectName}`,
 };
 
-// Matches the DESIGN.md acid/cyan/magenta/amber role palette: acid for a
-// positive eligible hit, amber for time-pressure, magenta for
-// live/critical, cyan for informational, grey for an operational (not a
-// mint) signal.
 const EMBED_COLOR_BY_TYPE: Record<AlertType, number> = {
   restricted_eligible: 0x39ff88,
   stage_starting: 0xffb300,
@@ -141,7 +223,7 @@ const EMBED_COLOR_BY_TYPE: Record<AlertType, number> = {
   source_failure: 0x8a8f98,
 };
 
-/** Same inputs as renderAlertMessage, structured for a Discord embed. */
+/** Same inputs as renderAlertMessage, structured and sanitized for a Discord embed. */
 export function renderAlertEmbed(input: AlertRenderInput, nowIso: string): DiscordEmbed {
   const link =
     input.openseaUrl ??
@@ -151,38 +233,48 @@ export function renderAlertEmbed(input: AlertRenderInput, nowIso: string): Disco
   const countdown = formatCountdown(input.startsAtIso, nowIso);
 
   const fields: DiscordEmbedField[] = [
-    { name: "Stage", value: truncate(input.stageLabel, 256), inline: true },
-    { name: "Price", value: truncate(input.stagePriceDisplay ?? "?", 256), inline: true },
-    { name: "Max/wallet", value: truncate(String(input.maxPerWallet ?? "?"), 256), inline: true },
+    { name: "Stage", value: truncateDiscordString(input.stageLabel, 256), inline: true },
+    {
+      name: "Price",
+      value: truncateDiscordString(input.stagePriceDisplay ?? "?", 256),
+      inline: true,
+    },
+    {
+      name: "Max/wallet",
+      value: truncateDiscordString(String(input.maxPerWallet ?? "?"), 256),
+      inline: true,
+    },
   ];
   if (input.walletAddress !== "") {
     fields.push({
       name: "Wallet",
-      value: truncate(input.walletLabel ?? input.walletAddress, 256),
+      value: truncateDiscordString(input.walletLabel ?? input.walletAddress, 256),
       inline: true,
     });
   }
   if (countdown !== null) {
     fields.push({
       name: "Starts",
-      value: truncate(`${formatDateTimeGmt7(input.startsAtIso)} (${countdown})`, 256),
+      value: truncateDiscordString(`${formatDateTimeGmt7(input.startsAtIso)} (${countdown})`, 256),
       inline: false,
     });
   }
   if (input.endsAtIso !== null) {
     fields.push({
       name: "Ends",
-      value: truncate(formatDateTimeGmt7(input.endsAtIso), 256),
+      value: truncateDiscordString(formatDateTimeGmt7(input.endsAtIso), 256),
       inline: false,
     });
   }
 
-  return {
-    title: truncate(EMBED_TITLE_BY_TYPE[input.alertType](input), 256),
+  const rawEmbed: DiscordEmbed = {
+    title: truncateDiscordString(EMBED_TITLE_BY_TYPE[input.alertType](input), 256),
     ...(link !== null ? { url: link } : {}),
     color: EMBED_COLOR_BY_TYPE[input.alertType],
-    fields: fields.slice(0, 25),
+    fields,
     footer: { text: "HoodMint Radar" },
     timestamp: nowIso,
   };
+
+  return sanitizeDiscordEmbed(rawEmbed);
 }

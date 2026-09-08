@@ -6,7 +6,7 @@
 import { AppError } from "@hoodmint/core";
 import { redactUrl } from "@hoodmint/secrets";
 import * as webpush from "web-push";
-import type { DiscordEmbed } from "./render.ts";
+import { type DiscordEmbed, sanitizeDiscordEmbed, truncateDiscordString } from "./render.ts";
 import { assertSafeWebhookUrl } from "./ssrf.ts";
 
 export type FetchLike = (url: string, init: TimedRequestInit) => Promise<Response>;
@@ -142,10 +142,16 @@ export interface DiscordConfig {
 const DISCORD_WEBHOOK_URL_PATTERN =
   /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
 
+export interface DiscordPayload {
+  readonly content?: string | undefined;
+  readonly embeds?: readonly DiscordEmbed[] | undefined;
+}
+
 export interface DiscordAdapter {
   validate(config: DiscordConfig): Promise<AppError | null>;
   sendTest(config: DiscordConfig): Promise<SendResult>;
   send(config: DiscordConfig, embed: DiscordEmbed): Promise<SendResult>;
+  sendPayload(config: DiscordConfig, payload: DiscordPayload): Promise<SendResult>;
 }
 
 /**
@@ -163,12 +169,22 @@ export function createDiscordAdapter(
     payload: Record<string, unknown>,
   ): Promise<SendResult> => {
     const guard = await assertSafeWebhookUrl(config.url, options);
+
+    // Defensively sanitize payload before delivering to Discord
+    const safePayload: Record<string, unknown> = {};
+    if (typeof payload.content === "string") {
+      safePayload.content = truncateDiscordString(payload.content, 2000);
+    }
+    if (Array.isArray(payload.embeds)) {
+      safePayload.embeds = payload.embeds.slice(0, 10).map((e) => sanitizeDiscordEmbed(e));
+    }
+
     return timedSend(
       guard.toString(),
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(safePayload),
         timeoutMs: 10_000,
       },
       fetchImpl,
@@ -216,6 +232,18 @@ export function createDiscordAdapter(
     async send(config, embed) {
       try {
         return await deliver(config, { embeds: [embed] });
+      } catch (error) {
+        return {
+          ok: false,
+          latencyMs: 0,
+          sanitizedResponse: error instanceof Error ? sanitizeBody(error.message) : "",
+          errorCode: "ssrf_blocked",
+        };
+      }
+    },
+    async sendPayload(config, payload) {
+      try {
+        return await deliver(config, payload as Record<string, unknown>);
       } catch (error) {
         return {
           ok: false,

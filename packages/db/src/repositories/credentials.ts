@@ -49,7 +49,9 @@ export type CredentialType =
   /** NeverFuckingTrade (NFT Trencher) API key for live mint radar and whitelist eligibility. */
   | "nvt_api_key"
   /** Discord Webhook URL for automated NVT eligible mint alerts. */
-  | "nvt_discord_webhook";
+  | "nvt_discord_webhook"
+  /** OpenSea session pass (SIWE signature) for NVT gated allowlist scanning (3 days). */
+  | "nvt_opensea_pass";
 
 export interface CreateCredentialInput {
   readonly type: CredentialType;

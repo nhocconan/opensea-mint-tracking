@@ -28,6 +28,7 @@ import {
   disarmMintPlan,
   ensureProvider,
   findCredentialByType,
+  findCredentialsByType,
   findProjectByContractAddress,
   findProjectBySlugOrId,
   getCredentialSecret,
@@ -2959,17 +2960,42 @@ export async function scanNvtWlAction(
   }
 }
 
+export interface NvtOpenSeaPassView {
+  readonly id: string;
+  readonly address?: string | undefined;
+  readonly fingerprint: string;
+  readonly expiresAt?: string | null | undefined;
+  readonly hoursLeft: number;
+}
+
 export interface NvtDiscordAdminData {
   readonly hasWebhook: boolean;
   readonly webhookFingerprint?: string | undefined;
   readonly settings: NvtDiscordScanSettings;
+  readonly openSeaPasses: readonly NvtOpenSeaPassView[];
 }
 
-/** Get NVT Discord webhook status and scan settings for Admin. */
+/** Get NVT Discord webhook status, scan settings, and OpenSea passes for Admin. */
 export async function getNvtDiscordAdminDataAction(): Promise<NvtDiscordAdminData> {
   const { db } = container();
   const webhookCred = await findCredentialByType(db, "nvt_discord_webhook");
   const storedSettings = await getSetting<NvtDiscordScanSettings>(db, "nvt_scan_settings");
+
+  const rawPasses = await findCredentialsByType(db, "nvt_opensea_pass").catch(() => []);
+  const nowMs = Date.now();
+  const openSeaPasses: NvtOpenSeaPassView[] = rawPasses.map((p) => {
+    const expiresMs = p.expiresAt ? new Date(p.expiresAt).getTime() : nowMs + 72 * 3600 * 1000;
+    const hoursLeft = Math.max(0, Math.round((expiresMs - nowMs) / 3600_000));
+    const addr = (p.metadata as { address?: string } | null)?.address;
+    return {
+      id: p.id,
+      address: addr,
+      fingerprint: `••••${p.fingerprint.slice(-4)}`,
+      expiresAt: p.expiresAt ? p.expiresAt.toISOString() : null,
+      hoursLeft,
+    };
+  });
+
   return {
     hasWebhook: Boolean(webhookCred),
     webhookFingerprint: webhookCred ? `••••${webhookCred.fingerprint.slice(-4)}` : undefined,
@@ -2977,6 +3003,7 @@ export async function getNvtDiscordAdminDataAction(): Promise<NvtDiscordAdminDat
       ...DEFAULT_NVT_SCAN_SETTINGS,
       ...(storedSettings ?? {}),
     },
+    openSeaPasses,
   };
 }
 
@@ -2994,6 +3021,11 @@ export async function saveNvtDiscordSettingsAction(
   const webhookRaw = formData.get("webhookUrl");
   const webhookUrl = typeof webhookRaw === "string" ? webhookRaw.trim() : "";
   const enabled = formData.get("enabled") === "true" || formData.get("enabled") === "on";
+  const notifyWhitelistHits =
+    formData.get("notifyWhitelistHits") === "true" || formData.get("notifyWhitelistHits") === "on";
+  const notifyUpcomingDigest =
+    formData.get("notifyUpcomingDigest") === "true" ||
+    formData.get("notifyUpcomingDigest") === "on";
   const periodMinutes = Math.max(
     15,
     Number.parseInt(String(formData.get("periodMinutes") || "60"), 10),
@@ -3037,6 +3069,8 @@ export async function saveNvtDiscordSettingsAction(
     ...DEFAULT_NVT_SCAN_SETTINGS,
     ...(currentSettings ?? {}),
     enabled,
+    notifyWhitelistHits,
+    notifyUpcomingDigest,
     periodMinutes,
     lookForwardHours,
   });
@@ -3120,5 +3154,201 @@ export async function triggerNvtScanAndNotifyAction(): Promise<
     ok: result.ok,
     message: result.message,
     count: result.alertedCount,
+  };
+}
+
+/** Request SIWE nonce message from NVT for wallet signing. */
+export async function getNvtWlNonceAction(
+  address: string,
+): Promise<ActionState & { message?: string | undefined }> {
+  const { config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can request SIWE nonces." };
+  }
+  if (!address?.startsWith("0x")) {
+    return { ok: false, message: "Invalid wallet address." };
+  }
+
+  const key = await resolveNvtApiKey();
+  if (!key) {
+    return { ok: false, message: "NeverFuckingTrade API key is not configured." };
+  }
+
+  try {
+    const client = new NvtClient({ apiKey: key, baseUrl: config.NVT_BASE_URL });
+    const res = await client.getWlNonce(address);
+    return { ok: true, message: res.message };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to obtain SIWE nonce from NVT";
+    return { ok: false, message: msg };
+  }
+}
+
+/** Submit SIWE signature to NVT and store the 3-day (72h) OpenSea Pass. */
+export async function submitNvtWlSignatureAction(
+  address: string,
+  message: string,
+  signature: string,
+): Promise<ActionState & { hours?: number | undefined }> {
+  const { db, config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can submit wallet signatures." };
+  }
+  if (!address || !signature) {
+    return { ok: false, message: "Missing address or signature." };
+  }
+
+  const key = await resolveNvtApiKey();
+  if (!key) {
+    return { ok: false, message: "NeverFuckingTrade API key is not configured." };
+  }
+
+  try {
+    const client = new NvtClient({ apiKey: key, baseUrl: config.NVT_BASE_URL });
+    const passRes = await client.submitWlPass({ address, message, signature });
+    const hours = passRes.hours ?? 72;
+    const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
+
+    const existing = await findCredentialsByType(db, "nvt_opensea_pass");
+    const matched = existing.find(
+      (e) =>
+        (e.metadata as { address?: string } | null)?.address?.toLowerCase() ===
+        address.toLowerCase(),
+    );
+
+    if (matched) {
+      await updateCredentialSecret(db, matched.id, {
+        secret: passRes.pass,
+        masterKey: config.APP_ENCRYPTION_KEY,
+        expiresAt,
+        metadata: {
+          address: address.toLowerCase(),
+          hours,
+          activatedAt: new Date().toISOString(),
+        },
+      });
+    } else {
+      await createCredential(db, {
+        type: "nvt_opensea_pass",
+        name: `OpenSea Pass (${address.slice(0, 6)}...${address.slice(-4)})`,
+        secret: passRes.pass,
+        masterKey: config.APP_ENCRYPTION_KEY,
+        expiresAt,
+        metadata: {
+          address: address.toLowerCase(),
+          hours,
+          activatedAt: new Date().toISOString(),
+        },
+        createdBy: sessionUser.id,
+      });
+    }
+
+    revalidatePath("/admin/nvt");
+    revalidatePath("/my-mints-nvt");
+    return {
+      ok: true,
+      message: `OpenSea Pass activated successfully for ${address.slice(0, 6)}...${address.slice(-4)} (valid for ${hours} hours).`,
+      hours,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to activate OpenSea Pass";
+    return { ok: false, message: msg };
+  }
+}
+
+/** Directly save an OpenSea Pass string. */
+export async function saveNvtOpenSeaPassDirectAction(
+  address: string,
+  pass: string,
+  hours = 72,
+): Promise<ActionState> {
+  const { db, config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can save OpenSea passes." };
+  }
+  const cleanPass = pass.trim();
+  if (!cleanPass) {
+    return { ok: false, message: "OpenSea pass cannot be empty." };
+  }
+
+  const cleanAddr = address?.trim().toLowerCase() || "default";
+  const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
+
+  const existing = await findCredentialsByType(db, "nvt_opensea_pass");
+  const matched = existing.find(
+    (e) => (e.metadata as { address?: string } | null)?.address?.toLowerCase() === cleanAddr,
+  );
+
+  if (matched) {
+    await updateCredentialSecret(db, matched.id, {
+      secret: cleanPass,
+      masterKey: config.APP_ENCRYPTION_KEY,
+      expiresAt,
+      metadata: {
+        address: cleanAddr,
+        hours,
+        manual: true,
+        savedAt: new Date().toISOString(),
+      },
+    });
+  } else {
+    await createCredential(db, {
+      type: "nvt_opensea_pass",
+      name: `OpenSea Pass (${cleanAddr.slice(0, 8)})`,
+      secret: cleanPass,
+      masterKey: config.APP_ENCRYPTION_KEY,
+      expiresAt,
+      metadata: {
+        address: cleanAddr,
+        hours,
+        manual: true,
+        savedAt: new Date().toISOString(),
+      },
+      createdBy: sessionUser.id,
+    });
+  }
+
+  revalidatePath("/admin/nvt");
+  revalidatePath("/my-mints-nvt");
+  return { ok: true, message: `OpenSea Pass saved successfully (valid for ${hours}h).` };
+}
+
+/** Revoke an OpenSea Pass credential. */
+export async function revokeNvtOpenSeaPassAction(id: string): Promise<ActionState> {
+  const { db } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can revoke credentials." };
+  }
+  await revokeCredential(db, id);
+  revalidatePath("/admin/nvt");
+  revalidatePath("/my-mints-nvt");
+  return { ok: true, message: "OpenSea pass revoked successfully." };
+}
+
+/** Send 24h Upcoming Drops Digest directly to Discord. */
+export async function sendNvtUpcomingDigestAction(): Promise<ActionState> {
+  const { db, config } = container();
+  const sessionUser = await getSessionUser();
+  if (sessionUser?.role !== "admin") {
+    return { ok: false, message: "Only administrators can trigger Discord alerts." };
+  }
+
+  const result = await runNvtDiscordScanPass(db, config.APP_ENCRYPTION_KEY, {
+    ...(config.NVT_API_KEY ? { nvtApiKey: config.NVT_API_KEY } : {}),
+    ...(config.NVT_BASE_URL ? { nvtBaseUrl: config.NVT_BASE_URL } : {}),
+    sendUpcomingDigest: true,
+    forceSend: true,
+  });
+
+  revalidatePath("/admin/nvt");
+  return {
+    ok: result.ok,
+    message: result.ok
+      ? `Upcoming drops digest sent to Discord successfully (${result.dropsFound} drops evaluated).`
+      : result.message,
   };
 }

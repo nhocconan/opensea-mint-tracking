@@ -129,3 +129,10 @@ export const nvtWlNonceResponseSchema = z.object({
 });
 
 export type NvtWlNonceResponse = z.infer<typeof nvtWlNonceResponseSchema>;
+
+export const nvtWlPassResponseSchema = z.object({
+  pass: z.string(),
+  hours: z.number().optional().default(72),
+});
+
+export type NvtWlPassResponse = z.infer<typeof nvtWlPassResponseSchema>;

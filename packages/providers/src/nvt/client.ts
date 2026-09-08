@@ -13,11 +13,13 @@ import {
   type NvtMint,
   type NvtMintsResponse,
   type NvtWlNonceResponse,
+  type NvtWlPassResponse,
   type NvtWlScanResponse,
   nvtMeResponseSchema,
   nvtMintSchema,
   nvtMintsResponseSchema,
   nvtWlNonceResponseSchema,
+  nvtWlPassResponseSchema,
   nvtWlScanResponseSchema,
 } from "./schemas.ts";
 
@@ -211,6 +213,45 @@ export class NvtClient {
     const parsed = nvtWlNonceResponseSchema.safeParse(result.json);
     if (!parsed.success) {
       throw new AppError("InvalidPayload", "failed to parse /wl/nonce response from NVT", {
+        hint: parsed.error.message,
+      });
+    }
+    return parsed.data;
+  }
+
+  /**
+   * POST /api/v1/wl/pass
+   * Exchanges an EIP-191 signed SIWE message for a 3-day (72h) OpenSea session pass.
+   */
+  public async submitWlPass(options: {
+    address: string;
+    message: string;
+    signature: string;
+  }): Promise<NvtWlPassResponse> {
+    const headers = await this.getAuthHeaders();
+    headers["Content-Type"] = "application/json";
+
+    const wlBase = this.baseUrl.includes("cdn.neverfuckingtrade.com")
+      ? this.baseUrl.replace("cdn.neverfuckingtrade.com", "neverfuckingtrade.com")
+      : this.baseUrl;
+    const url = `${wlBase}/wl/pass`;
+
+    const result = await fetchJson(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        address: options.address,
+        message: options.message,
+        signature: options.signature,
+      }),
+      ...(this.fetchImpl !== undefined ? { fetchImpl: this.fetchImpl } : {}),
+      timeoutMs: this.timeoutMs,
+      retries: 1,
+    });
+
+    const parsed = nvtWlPassResponseSchema.safeParse(result.json);
+    if (!parsed.success) {
+      throw new AppError("InvalidPayload", "failed to parse /wl/pass response from NVT", {
         hint: parsed.error.message,
       });
     }
