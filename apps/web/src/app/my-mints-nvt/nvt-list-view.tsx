@@ -251,33 +251,33 @@ export function NvtListView({
                 {/* Links */}
                 <td className="whitespace-nowrap px-3 py-3 text-right">
                   <div className="inline-flex items-center gap-1.5">
-                    {mint.links.mint ? (
+                    {mint.links.opensea || mint.slug ? (
+                      <a
+                        href={mint.links.opensea || `https://opensea.io/collection/${mint.slug}`}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="rounded-xs border border-cyan/50 bg-cyan/15 px-2.5 py-1 text-[10px] font-semibold text-cyan hover:bg-cyan/25"
+                      >
+                        OpenSea ↗
+                      </a>
+                    ) : null}
+                    {mint.links.mint && mint.links.mint !== mint.links.opensea ? (
                       <a
                         href={mint.links.mint}
                         target="_blank"
                         rel="noreferrer noopener"
-                        className="rounded-xs border border-acid/40 bg-acid/10 px-2 py-1 text-[10px] font-semibold text-acid hover:bg-acid/20"
+                        className="rounded-xs border border-line bg-base p-1 text-ink-muted hover:text-ink"
+                        title="Mint / Project Site"
                       >
-                        Mint ↗
+                        <Globe className="size-3" />
                       </a>
                     ) : null}
-                    {mint.links.opensea ? (
-                      <a
-                        href={mint.links.opensea}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="rounded-xs border border-cyan/40 bg-cyan/10 p-1 text-cyan hover:bg-cyan/20"
-                        title="OpenSea"
-                      >
-                        <ExternalLink className="size-3" />
-                      </a>
-                    ) : null}
-                    {mint.links.site ? (
+                    {mint.links.site && mint.links.site !== mint.links.mint ? (
                       <a
                         href={mint.links.site}
                         target="_blank"
                         rel="noreferrer noopener"
-                        className="rounded-xs border border-line bg-base p-1 text-ink-muted hover:text-ink"
+                        className="rounded-xs border border-line bg-base p-1 text-ink-faint hover:text-ink"
                         title="Website"
                       >
                         <Globe className="size-3" />

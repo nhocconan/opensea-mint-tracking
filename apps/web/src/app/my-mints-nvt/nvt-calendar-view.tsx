@@ -213,25 +213,25 @@ export function NvtCalendarView({
                       </div>
 
                       <div className="flex items-center gap-2">
-                        {mint.links.mint ? (
+                        {mint.links.opensea || mint.slug ? (
+                          <a
+                            href={mint.links.opensea || `https://opensea.io/collection/${mint.slug}`}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="rounded-sm border border-cyan/50 bg-cyan/15 px-3 py-1.5 text-xs font-semibold text-cyan hover:bg-cyan/25 inline-flex items-center gap-1"
+                          >
+                            OpenSea <ExternalLink className="size-3" />
+                          </a>
+                        ) : null}
+                        {mint.links.mint && mint.links.mint !== mint.links.opensea ? (
                           <a
                             href={mint.links.mint}
                             target="_blank"
                             rel="noreferrer noopener"
-                            className="rounded-sm border border-acid/50 bg-acid/15 px-3 py-1.5 text-xs font-semibold text-acid hover:bg-acid/25"
+                            className="rounded-sm border border-line bg-base px-2.5 py-1.5 text-xs text-ink-muted hover:text-ink"
+                            title="Website / Mint Site"
                           >
-                            Mint ↗
-                          </a>
-                        ) : null}
-                        {mint.links.opensea ? (
-                          <a
-                            href={mint.links.opensea}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="rounded-sm border border-cyan/40 bg-cyan/10 p-1.5 text-cyan hover:bg-cyan/20"
-                            title="OpenSea"
-                          >
-                            <ExternalLink className="size-3.5" />
+                            Site ↗
                           </a>
                         ) : null}
                       </div>

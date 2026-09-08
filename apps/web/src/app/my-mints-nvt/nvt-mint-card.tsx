@@ -159,23 +159,24 @@ export function NvtMintCard({
 
         {/* Action buttons */}
         <div className="flex items-center gap-1.5">
-          {mint.links?.mint ? (
+          {mint.links?.opensea || mint.slug ? (
+            <a
+              href={mint.links?.opensea || `https://opensea.io/collection/${mint.slug}`}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1 rounded-sm border border-cyan/50 bg-cyan/15 px-2.5 py-1 font-mono text-xs font-medium text-cyan hover:bg-cyan/25"
+            >
+              OpenSea <ExternalLink className="size-3" aria-hidden />
+            </a>
+          ) : null}
+          {mint.links?.mint && mint.links.mint !== mint.links?.opensea ? (
             <a
               href={mint.links.mint}
               target="_blank"
               rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 rounded-sm border border-acid/50 bg-acid/15 px-2.5 py-1 font-mono text-xs text-acid hover:bg-acid/25"
+              className="inline-flex items-center gap-1 rounded-sm border border-line bg-base px-2 py-1 font-mono text-xs text-ink-muted hover:text-ink hover:border-line-strong"
             >
-              Mint <ExternalLink className="size-3" aria-hidden />
-            </a>
-          ) : mint.links?.opensea ? (
-            <a
-              href={mint.links.opensea}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 rounded-sm border border-cyan/50 bg-cyan/15 px-2.5 py-1 font-mono text-xs text-cyan hover:bg-cyan/25"
-            >
-              OpenSea <ExternalLink className="size-3" aria-hidden />
+              Site <ExternalLink className="size-3" aria-hidden />
             </a>
           ) : null}
         </div>

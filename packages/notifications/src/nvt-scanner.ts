@@ -95,18 +95,21 @@ export function buildUpcomingDigestEmbeds(
           : stage?.price != null
             ? `${stage.price} ${stage.currency ?? "ETH"}`
             : "—";
-      const link =
-        m.links.mint ||
+      const openSeaLink =
         m.links.opensea ||
-        (m.slug ? `https://opensea.io/collection/${m.slug}` : "");
-      const nameFormatted = link
-        ? `[${truncateDiscordString(m.name, 35)}](${link})`
+        (m.slug ? `https://opensea.io/collection/${m.slug}` : "") ||
+        m.links.mint ||
+        m.links.site ||
+        "";
+      const nameFormatted = openSeaLink
+        ? `[${truncateDiscordString(m.name, 35)}](${openSeaLink})`
         : `**${truncateDiscordString(m.name, 35)}**`;
       const tierBadge =
         m.tier === "hot" ? "🔥 HOT" : m.tier === "warm" ? "⚡ WARM" : (m.tier?.toUpperCase() ?? "");
 
+      const openseaAction = openSeaLink ? ` · [⛵ OpenSea](${openSeaLink})` : "";
       lines.push(
-        `• ${nameFormatted} (\`${m.chain.toUpperCase()}\`${tierBadge ? ` · ${tierBadge}` : ""})\n  └ **${truncateDiscordString(stage?.label ?? "Stage", 25)}** · Price: \`${priceDisplay}\` · Starts: **${gmt7Time} GMT+7** (${relTime})`,
+        `• ${nameFormatted} (\`${m.chain.toUpperCase()}\`${tierBadge ? ` · ${tierBadge}` : ""})\n  └ **${truncateDiscordString(stage?.label ?? "Stage", 25)}** · Price: \`${priceDisplay}\` · Starts: **${gmt7Time} GMT+7** (${relTime})${openseaAction}`,
       );
     }
 
@@ -420,10 +423,10 @@ export async function runNvtDiscordScanPass(
         const stageStartMs = new Date(hit.stageStart).getTime();
         const relTime = formatDiscordRelativeTime(stageStartMs);
         const countdown = formatCountdown(hit.stageStart, nowIso);
-        const mintUrl =
-          hit.mint.links.mint ||
+        const openSeaUrl =
           hit.mint.links.opensea ||
-          (hit.mint.slug ? `https://opensea.io/collection/${hit.mint.slug}/overview` : undefined);
+          (hit.mint.slug ? `https://opensea.io/collection/${hit.mint.slug}` : undefined) ||
+          hit.mint.links.mint;
 
         const fields: DiscordEmbedField[] = [
           {
@@ -474,13 +477,15 @@ export async function runNvtDiscordScanPass(
         ];
 
         const linkParts: string[] = [];
-        if (hit.mint.links.mint) linkParts.push(`[🌐 Mint Site](${hit.mint.links.mint})`);
-        if (hit.mint.links.opensea || hit.mint.slug) {
-          linkParts.push(
-            `[⛵ OpenSea](${hit.mint.links.opensea || `https://opensea.io/collection/${hit.mint.slug}`})`,
-          );
+        if (openSeaUrl) {
+          linkParts.push(`[⛵ Mint on OpenSea](${openSeaUrl})`);
         }
-        if (hit.mint.links.x) linkParts.push(`[🐦 Twitter/X](${hit.mint.links.x})`);
+        if (hit.mint.links.mint && hit.mint.links.mint !== openSeaUrl) {
+          linkParts.push(`[🌐 Website](${hit.mint.links.mint})`);
+        }
+        if (hit.mint.links.x) {
+          linkParts.push(`[🐦 Twitter/X](${hit.mint.links.x})`);
+        }
         if (linkParts.length > 0) {
           fields.push({
             name: "Direct Links",
@@ -491,7 +496,7 @@ export async function runNvtDiscordScanPass(
 
         const rawEmbed: DiscordEmbed = {
           title: `🎯 NVT WL HIT: ${truncateDiscordString(hit.mint.name, 100)}`,
-          ...(mintUrl ? { url: mintUrl } : {}),
+          ...(openSeaUrl ? { url: openSeaUrl } : {}),
           color: 0x39ff88, // Acid green
           description: `Your account **${hit.account.label}** is whitelisted for **${hit.mint.name}** starting within the next ${lookForwardHours}h!`,
           fields,
