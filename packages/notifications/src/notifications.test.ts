@@ -487,4 +487,11 @@ describe("buildUpcomingDigestEmbeds", () => {
     expect(embed?.description).toContain("Mở tự do cho tất cả (Không cần WL)");
     expect(embed?.description).not.toContain("👤 Ví:");
   });
+
+  it("defaults notifyUpcomingDigest to true to ensure scheduled scans always push eligible mints", async () => {
+    const { DEFAULT_NVT_SCAN_SETTINGS } = await import("./nvt-scanner.ts");
+    expect(DEFAULT_NVT_SCAN_SETTINGS.notifyUpcomingDigest).toBe(true);
+    expect(DEFAULT_NVT_SCAN_SETTINGS.includeLivePublic).toBe(true);
+    expect(DEFAULT_NVT_SCAN_SETTINGS.notifyWhitelistHits).toBe(true);
+  });
 });

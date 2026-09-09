@@ -186,7 +186,7 @@ export function NvtDiscordSettingsForm({ data }: { data: NvtDiscordAdminData }) 
     data.settings.notifyWhitelistHits ?? true,
   );
   const [notifyUpcomingDigest, setNotifyUpcomingDigest] = useState(
-    data.settings.notifyUpcomingDigest ?? false,
+    data.settings.notifyUpcomingDigest ?? true,
   );
   const [includeLivePublic, setIncludeLivePublic] = useState(
     data.settings.includeLivePublic ?? true,

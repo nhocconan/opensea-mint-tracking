@@ -35,7 +35,7 @@ export interface NvtDiscordScanSettings {
   readonly periodMinutes: number; // default 60 (hourly)
   readonly lookForwardHours: number; // default 24 (next 24 hours)
   readonly notifyWhitelistHits?: boolean | undefined; // default true
-  readonly notifyUpcomingDigest?: boolean | undefined; // default false
+  readonly notifyUpcomingDigest?: boolean | undefined; // default true (push upcoming eligible drops list on each scan pass)
   readonly includeLivePublic?: boolean | undefined; // default true (include drops that are already open / live now)
   readonly lastRunAt?: string | undefined;
   readonly lastAlertCount?: number | undefined;
@@ -58,7 +58,7 @@ export const DEFAULT_NVT_SCAN_SETTINGS: NvtDiscordScanSettings = {
   periodMinutes: 60,
   lookForwardHours: 24,
   notifyWhitelistHits: true,
-  notifyUpcomingDigest: false,
+  notifyUpcomingDigest: true,
   includeLivePublic: true,
 };
 
@@ -571,7 +571,8 @@ export async function runNvtDiscordScanPass(
     const newAlertedKeys = new Set(lastAlertedSet);
 
     // 9. Dispatch to Discord: ONLY send mints the user can mint!
-    const shouldSendDigest = options?.sendUpcomingDigest || settings.notifyUpcomingDigest;
+    const shouldSendDigest =
+      options?.sendUpcomingDigest || settings.notifyUpcomingDigest !== false;
     const shouldSendWl = settings.notifyWhitelistHits !== false;
 
     if (shouldSendDigest) {
