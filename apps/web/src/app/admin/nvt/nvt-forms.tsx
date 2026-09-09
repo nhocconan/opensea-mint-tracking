@@ -349,7 +349,7 @@ export function NvtDiscordSettingsForm({ data }: { data: NvtDiscordAdminData }) 
               className="size-4 rounded border-line bg-base text-acid focus:ring-acid/40"
             />
             <label htmlFor="notifyUpcomingDigest" className="font-mono text-xs text-ink-muted">
-              Push 24h upcoming drops digest overview on each scan pass
+              Push upcoming eligible drops list on each scan pass (only mints your wallets can mint)
             </label>
           </div>
         </div>
@@ -392,7 +392,7 @@ export function NvtDiscordSettingsForm({ data }: { data: NvtDiscordAdminData }) 
                 className="inline-flex items-center gap-1.5 rounded-sm border border-cyan/50 bg-cyan/15 px-3 py-1.5 font-mono text-xs text-cyan hover:bg-cyan/25 disabled:opacity-50"
               >
                 <Sparkles className="size-3" />
-                {digestPending ? "Pushing…" : "Push 24h Digest to Discord"}
+                {digestPending ? "Pushing…" : "Push Eligible Mints (Next 24h)"}
               </button>
 
               <ConfirmDialog

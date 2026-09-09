@@ -60,17 +60,61 @@ export const DEFAULT_NVT_SCAN_SETTINGS: NvtDiscordScanSettings = {
   notifyUpcomingDigest: false,
 };
 
+export interface MatchedAccountStage {
+  readonly stage: {
+    readonly label: string;
+    readonly kind?: string | undefined;
+    readonly price?: string | number | null | undefined;
+    readonly currency?: string | undefined;
+    readonly start: string;
+    readonly end?: string | null | undefined;
+  };
+  readonly wallets: readonly { readonly address: string; readonly label: string }[];
+}
+
+export interface EligibleMintDigestItem {
+  readonly mint: NvtMint;
+  readonly stages: readonly MatchedAccountStage[];
+}
+
+function isEligibleDigestItem(
+  item: NvtMint | EligibleMintDigestItem,
+): item is EligibleMintDigestItem {
+  return "mint" in item && Array.isArray((item as EligibleMintDigestItem).stages);
+}
+
 /**
- * Builds visually clean, character-safe Discord embeds for upcoming drops within the window.
+ * Builds visually clean, character-safe Discord embeds for mints the user is eligible to mint.
  * Strictly adheres to Discord's 4,000 char embed description and 6,000 char total limits.
  */
 export function buildUpcomingDigestEmbeds(
-  mints: readonly NvtMint[],
+  items: readonly (NvtMint | EligibleMintDigestItem)[],
   options: { lookForwardHours: number; nowIso: string },
 ): DiscordEmbed[] {
-  const sorted = [...mints].sort((a, b) => {
-    const aTime = a.next_stage?.start ? new Date(a.next_stage.start).getTime() : 0;
-    const bTime = b.next_stage?.start ? new Date(b.next_stage.start).getTime() : 0;
+  if (items.length === 0) {
+    return [
+      sanitizeDiscordEmbed({
+        title: `🎯 MINTS BẠN CÓ THỂ MINT (${options.lookForwardHours}h tới) · HoodMint Radar`,
+        description: `Không có dự án nào ví của bạn đủ điều kiện mint (Whitelist / Allowlist) trong ${options.lookForwardHours}h tới.`,
+        color: 0x8a8f98,
+        fields: [],
+        footer: { text: "HoodMint Radar · GMT+7 · NeverFuckingTrade" },
+        timestamp: options.nowIso,
+      }),
+    ];
+  }
+
+  const sorted = [...items].sort((a, b) => {
+    const aTime = isEligibleDigestItem(a)
+      ? Math.min(...a.stages.map((s) => new Date(s.stage.start).getTime()))
+      : a.next_stage?.start
+        ? new Date(a.next_stage.start).getTime()
+        : 0;
+    const bTime = isEligibleDigestItem(b)
+      ? Math.min(...b.stages.map((s) => new Date(s.stage.start).getTime()))
+      : b.next_stage?.start
+        ? new Date(b.next_stage.start).getTime()
+        : 0;
     return aTime - bTime;
   });
 
@@ -83,18 +127,10 @@ export function buildUpcomingDigestEmbeds(
     const totalParts = Math.ceil(sorted.length / chunkSize);
 
     const lines: string[] = [];
-    for (const m of slice) {
-      const stage = m.next_stage ?? m.stages[0];
-      const stageStart = stage?.start ? new Date(stage.start).getTime() : 0;
-      const relTime = stageStart > 0 ? formatDiscordRelativeTime(stageStart) : "soon";
-      const gmt7Time =
-        stageStart > 0 ? formatDateTimeGmt7(new Date(stageStart).toISOString()) : "TBD";
-      const priceDisplay =
-        stage?.price === 0
-          ? "FREE"
-          : stage?.price != null
-            ? `${stage.price} ${stage.currency ?? "ETH"}`
-            : "—";
+    for (const item of slice) {
+      const isEligible = isEligibleDigestItem(item);
+      const m = isEligible ? item.mint : item;
+
       const openSeaLink =
         m.links.opensea ||
         (m.slug ? `https://opensea.io/collection/${m.slug}` : "") ||
@@ -108,20 +144,55 @@ export function buildUpcomingDigestEmbeds(
         m.tier === "hot" ? "🔥 HOT" : m.tier === "warm" ? "⚡ WARM" : (m.tier?.toUpperCase() ?? "");
 
       const openseaAction = openSeaLink ? ` · [⛵ OpenSea](${openSeaLink})` : "";
-      lines.push(
-        `• ${nameFormatted} (\`${m.chain.toUpperCase()}\`${tierBadge ? ` · ${tierBadge}` : ""})\n  └ **${truncateDiscordString(stage?.label ?? "Stage", 25)}** · Price: \`${priceDisplay}\` · Starts: **${gmt7Time} GMT+7** (${relTime})${openseaAction}`,
-      );
+
+      if (isEligible && item.stages.length > 0) {
+        const stageLines = item.stages
+          .map(({ stage, wallets }) => {
+            const stageStart = new Date(stage.start).getTime();
+            const relTime = stageStart > 0 ? formatDiscordRelativeTime(stageStart) : "soon";
+            const gmt7Time =
+              stageStart > 0 ? formatDateTimeGmt7(new Date(stageStart).toISOString()) : "TBD";
+            const priceDisplay =
+              stage.price === 0
+                ? "FREE"
+                : stage.price != null
+                  ? `${stage.price} ${stage.currency ?? "ETH"}`
+                  : "—";
+            const walletLabels = wallets.map((w) => w.label).join(", ");
+            return `  └ **${truncateDiscordString(stage.label, 30)}** (\`${(stage.kind ?? "WL").toUpperCase()}\`) · Giá: \`${priceDisplay}\` · Bắt đầu: **${gmt7Time} GMT+7** (${relTime})\n    👤 Ví: \`${walletLabels}\``;
+          })
+          .join("\n");
+
+        lines.push(
+          `• ${nameFormatted} (\`${m.chain.toUpperCase()}\`${tierBadge ? ` · ${tierBadge}` : ""})${openseaAction}\n${stageLines}`,
+        );
+      } else {
+        const stage = m.next_stage ?? m.stages[0];
+        const stageStart = stage?.start ? new Date(stage.start).getTime() : 0;
+        const relTime = stageStart > 0 ? formatDiscordRelativeTime(stageStart) : "soon";
+        const gmt7Time =
+          stageStart > 0 ? formatDateTimeGmt7(new Date(stageStart).toISOString()) : "TBD";
+        const priceDisplay =
+          stage?.price === 0
+            ? "FREE"
+            : stage?.price != null
+              ? `${stage.price} ${stage.currency ?? "ETH"}`
+              : "—";
+        lines.push(
+          `• ${nameFormatted} (\`${m.chain.toUpperCase()}\`${tierBadge ? ` · ${tierBadge}` : ""})\n  └ **${truncateDiscordString(stage?.label ?? "Stage", 25)}** · Giá: \`${priceDisplay}\` · Bắt đầu: **${gmt7Time} GMT+7** (${relTime})${openseaAction}`,
+        );
+      }
     }
 
     const titleText =
       totalParts > 1
-        ? `📋 UPCOMING DROPS (Next ${options.lookForwardHours}h) · Part ${partNum}/${totalParts}`
-        : `📋 UPCOMING DROPS (Next ${options.lookForwardHours}h) · HoodMint Radar`;
+        ? `🎯 MINTS BẠN CÓ THỂ MINT (${options.lookForwardHours}h tới) · Phần ${partNum}/${totalParts}`
+        : `🎯 MINTS BẠN CÓ THỂ MINT (${options.lookForwardHours}h tới) · HoodMint Radar`;
 
     const embed: DiscordEmbed = {
       title: titleText,
-      description: lines.join("\n\n"),
-      color: 0x00f0ff,
+      description: `Tổng hợp **${sorted.length}** dự án ví của bạn có Whitelist / đủ điều kiện mint trong ${options.lookForwardHours}h tới:\n\n${lines.join("\n\n")}`,
+      color: 0x39ff88,
       fields: [],
       footer: { text: "HoodMint Radar · GMT+7 · NeverFuckingTrade" },
       timestamp: options.nowIso,
@@ -363,7 +434,7 @@ export async function runNvtDiscordScanPass(
         "OpenSea Pass is not configured. Gated allowlists require signing in with your wallet at /admin/nvt (pass valid for 3 days).";
     }
 
-    // 8. Find eligible hits
+    // 8. Find eligible hits & group into eligible mints
     interface EligibleHit {
       readonly mint: NvtMint;
       readonly stageLabel: string;
@@ -375,22 +446,37 @@ export async function runNvtDiscordScanPass(
       readonly key: string;
     }
 
+    interface MatchedStage {
+      readonly stage: {
+        readonly label: string;
+        readonly kind?: string | undefined;
+        readonly price?: string | number | null | undefined;
+        readonly currency?: string | undefined;
+        readonly start: string;
+        readonly end?: string | null | undefined;
+      };
+      readonly wallets: { address: string; label: string }[];
+    }
+
+    const eligibleMintsMap = new Map<string, { mint: NvtMint; stages: MatchedStage[] }>();
     const hits: EligibleHit[] = [];
     const lastAlertedSet = new Set(settings.lastAlertedKeys ?? []);
 
     for (const mint of relevantMints) {
-      for (const account of accounts) {
-        const accountHits = wlMap.get(account.address.toLowerCase());
-        const eligibleStages = accountHits
-          ? ((mint.slug ? accountHits.get(mint.slug.toLowerCase()) : undefined) ??
-            (mint.contract ? accountHits.get(mint.contract.toLowerCase()) : undefined))
-          : undefined;
+      for (const stage of mint.stages) {
+        const stageStart = new Date(stage.start).getTime();
+        const stageEnd = stage.end ? new Date(stage.end).getTime() : undefined;
+        if (stageEnd !== undefined && stageEnd < now) continue;
+        if (stageStart > windowEnd) continue;
 
-        for (const stage of mint.stages) {
-          const stageStart = new Date(stage.start).getTime();
-          const stageEnd = stage.end ? new Date(stage.end).getTime() : undefined;
-          if (stageEnd !== undefined && stageEnd < now) continue;
-          if (stageStart > windowEnd) continue;
+        const stageMatchedWallets: { address: string; label: string }[] = [];
+
+        for (const account of accounts) {
+          const accountHits = wlMap.get(account.address.toLowerCase());
+          const eligibleStages = accountHits
+            ? ((mint.slug ? accountHits.get(mint.slug.toLowerCase()) : undefined) ??
+              (mint.contract ? accountHits.get(mint.contract.toLowerCase()) : undefined))
+            : undefined;
 
           // Is account eligible for this stage?
           const isEligible =
@@ -401,33 +487,77 @@ export async function runNvtDiscordScanPass(
             ) ?? false;
 
           if (isEligible) {
+            stageMatchedWallets.push(account);
             const key = `${mint.id}:${stage.label}:${account.address.toLowerCase()}`;
-            if (!options?.forceSend && lastAlertedSet.has(key)) {
-              continue;
+            if (options?.forceSend || !lastAlertedSet.has(key)) {
+              hits.push({
+                mint,
+                stageLabel: stage.label,
+                stageKind: stage.kind,
+                stagePrice: stage.price ?? null,
+                stageCurrency: stage.currency ?? "ETH",
+                stageStart: stage.start,
+                account,
+                key,
+              });
             }
-            hits.push({
+          }
+        }
+
+        if (stageMatchedWallets.length > 0) {
+          const existing = eligibleMintsMap.get(mint.id);
+          if (existing) {
+            existing.stages.push({ stage, wallets: stageMatchedWallets });
+          } else {
+            eligibleMintsMap.set(mint.id, {
               mint,
-              stageLabel: stage.label,
-              stageKind: stage.kind,
-              stagePrice: stage.price ?? null,
-              stageCurrency: stage.currency ?? "ETH",
-              stageStart: stage.start,
-              account,
-              key,
+              stages: [{ stage, wallets: stageMatchedWallets }],
             });
           }
         }
       }
     }
 
+    const eligibleMints: EligibleMintDigestItem[] = [...eligibleMintsMap.values()].sort((a, b) => {
+      const aStart = Math.min(...a.stages.map((s) => new Date(s.stage.start).getTime()));
+      const bStart = Math.min(...b.stages.map((s) => new Date(s.stage.start).getTime()));
+      return aStart - bStart;
+    });
+
     let alertedCount = 0;
     const newAlertedKeys = new Set(lastAlertedSet);
 
-    // 9. Dispatch Whitelist alerts to Discord
+    // 9. Dispatch to Discord: ONLY send mints the user can mint!
+    const shouldSendDigest = options?.sendUpcomingDigest || settings.notifyUpcomingDigest;
     const shouldSendWl = settings.notifyWhitelistHits !== false;
-    if (shouldSendWl && hits.length > 0) {
-      const toSend = hits.slice(0, 10);
-      for (const hit of toSend) {
+
+    if (shouldSendDigest) {
+      // User requested or scheduled the upcoming eligible drops digest.
+      // STRICT RULE: ONLY send mints the user can actually mint! Never dump all 50+ mints.
+      if (eligibleMints.length > 0 || options?.sendUpcomingDigest) {
+        const digestEmbeds = buildUpcomingDigestEmbeds(eligibleMints, {
+          lookForwardHours,
+          nowIso,
+        });
+
+        for (const embed of digestEmbeds) {
+          const sendRes = await discordAdapter.send({ url: webhookUrl }, embed);
+          if (sendRes.ok) {
+            alertedCount++;
+          } else {
+            errors.push(`Discord digest delivery failed: ${sendRes.errorCode}`);
+          }
+        }
+        for (const h of hits) {
+          newAlertedKeys.add(h.key);
+        }
+      }
+    } else if (shouldSendWl && hits.length > 0) {
+      // Whitelist hits found:
+      // If exactly 1 hit and not a manual force-scan, send a single rich embed card.
+      // If multiple hits, consolidate into a single clean list embed rather than blasting 10+ spam messages!
+      if (hits.length === 1 && !options?.forceSend && hits[0] !== undefined) {
+        const hit = hits[0];
         const stageStartMs = new Date(hit.stageStart).getTime();
         const relTime = formatDiscordRelativeTime(stageStartMs);
         const countdown = formatCountdown(hit.stageStart, nowIso);
@@ -520,23 +650,25 @@ export async function runNvtDiscordScanPass(
         } else {
           errors.push(`Discord delivery failed for ${hit.mint.name}: ${sendRes.errorCode}`);
         }
-      }
-    }
+      } else {
+        // Multiple hits: consolidate into the clean list of eligible mints!
+        const hitMintIds = new Set(hits.map((h) => h.mint.id));
+        const mintsToAlert = eligibleMints.filter((m) => hitMintIds.has(m.mint.id));
+        const listEmbeds = buildUpcomingDigestEmbeds(mintsToAlert, {
+          lookForwardHours,
+          nowIso,
+        });
 
-    // 10. Dispatch Upcoming Drops Digest (if requested or configured)
-    const shouldSendDigest = options?.sendUpcomingDigest || settings.notifyUpcomingDigest;
-    if (shouldSendDigest && relevantMints.length > 0) {
-      const digestEmbeds = buildUpcomingDigestEmbeds(relevantMints, {
-        lookForwardHours,
-        nowIso,
-      });
-
-      for (const embed of digestEmbeds) {
-        const sendRes = await discordAdapter.send({ url: webhookUrl }, embed);
-        if (sendRes.ok) {
-          alertedCount++;
-        } else {
-          errors.push(`Discord digest delivery failed: ${sendRes.errorCode}`);
+        for (const embed of listEmbeds) {
+          const sendRes = await discordAdapter.send({ url: webhookUrl }, embed);
+          if (sendRes.ok) {
+            alertedCount++;
+          } else {
+            errors.push(`Discord delivery failed: ${sendRes.errorCode}`);
+          }
+        }
+        for (const h of hits) {
+          newAlertedKeys.add(h.key);
         }
       }
     }
@@ -556,8 +688,8 @@ export async function runNvtDiscordScanPass(
 
     // 12. Formulate clear result message
     let resultMessage: string;
-    if (hits.length > 0) {
-      resultMessage = `Scan complete: ${relevantMints.length} upcoming drops evaluated, ${hits.length} whitelist hit(s) found, ${alertedCount} Discord alert(s) sent.`;
+    if (eligibleMints.length > 0) {
+      resultMessage = `Scan complete: ${relevantMints.length} upcoming drops evaluated, ${eligibleMints.length} eligible mint(s) you can mint found, ${alertedCount} Discord message(s) sent.`;
     } else if (authWarning) {
       resultMessage = `Scan complete: ${relevantMints.length} upcoming drops evaluated (0 WL hits). ⚠️ ${authWarning}`;
     } else {

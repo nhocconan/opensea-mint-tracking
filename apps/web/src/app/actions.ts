@@ -3365,8 +3365,6 @@ export async function sendNvtUpcomingDigestAction(): Promise<ActionState> {
   revalidatePath("/admin/nvt");
   return {
     ok: result.ok,
-    message: result.ok
-      ? `Upcoming drops digest sent to Discord successfully (${result.dropsFound} drops evaluated).`
-      : result.message,
+    message: result.message,
   };
 }

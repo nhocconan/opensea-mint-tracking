@@ -17,6 +17,7 @@
     "@hoodmint/providers": "workspace:*",
     "@hoodmint/secrets": "workspace:*",
     "@hoodmint/observability": "workspace:*",
+    "drizzle-orm": "0.45.2",
     "web-push": "3.6.7"
   },
   "devDependencies": {

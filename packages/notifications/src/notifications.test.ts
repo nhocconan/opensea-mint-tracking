@@ -368,3 +368,71 @@ describe("renderAlertMessage", () => {
     expect(walletField?.value.endsWith("…")).toBe(true);
   });
 });
+
+describe("buildUpcomingDigestEmbeds", () => {
+  it("builds a concise list embed for eligible mints only", async () => {
+    const { buildUpcomingDigestEmbeds } = await import("./nvt-scanner.ts");
+    const eligibleItem = {
+      mint: {
+        id: "m-1",
+        chain: "robinhood",
+        contract: "0x1111111111111111111111111111111111111111",
+        name: "Robin Degen Club",
+        slug: "robin-degen-club",
+        links: {
+          opensea: "https://opensea.io/collection/robin-degen-club",
+          mint: null,
+          site: null,
+          x: null,
+        },
+        stages: [],
+        status: "upcoming",
+        minted: 0,
+        supply: 1000,
+        tier: "hot",
+        flags: [],
+      },
+      stages: [
+        {
+          stage: {
+            label: "Allowlist Mint",
+            kind: "wl",
+            price: 0,
+            currency: "ETH",
+            start: "2026-08-16T15:00:00.000Z",
+          },
+          wallets: [
+            { address: "0x5ea7317319dd0927c5397e0321c631cdb6fa768d", label: "NVT Primary" },
+          ],
+        },
+      ],
+    };
+
+    const embeds = buildUpcomingDigestEmbeds([eligibleItem], {
+      lookForwardHours: 24,
+      nowIso: "2026-08-16T14:00:00.000Z",
+    });
+
+    expect(embeds).toHaveLength(1);
+    const embed = embeds[0];
+    expect(embed).toBeDefined();
+    expect(embed?.title).toContain("MINTS BẠN CÓ THỂ MINT");
+    expect(embed?.description).toContain("Robin Degen Club");
+    expect(embed?.description).toContain("Allowlist Mint");
+    expect(embed?.description).toContain("FREE");
+    expect(embed?.description).toContain("NVT Primary");
+    expect(embed?.description).toContain("https://opensea.io/collection/robin-degen-club");
+    expect(embed?.color).toBe(0x39ff88);
+  });
+
+  it("handles empty eligible list gracefully with informational embed", async () => {
+    const { buildUpcomingDigestEmbeds } = await import("./nvt-scanner.ts");
+    const embeds = buildUpcomingDigestEmbeds([], {
+      lookForwardHours: 24,
+      nowIso: "2026-08-16T14:00:00.000Z",
+    });
+
+    expect(embeds).toHaveLength(1);
+    expect(embeds[0]?.description).toContain("Không có dự án nào ví của bạn đủ điều kiện mint");
+  });
+});
