@@ -3044,6 +3044,9 @@ export async function saveNvtDiscordSettingsAction(
   const notifyUpcomingDigest =
     formData.get("notifyUpcomingDigest") === "true" ||
     formData.get("notifyUpcomingDigest") === "on";
+  const includeLivePublic = formData.has("includeLivePublic")
+    ? formData.get("includeLivePublic") === "true" || formData.get("includeLivePublic") === "on"
+    : true;
   const periodMinutes = Math.max(
     15,
     Number.parseInt(String(formData.get("periodMinutes") || "60"), 10),
@@ -3089,6 +3092,7 @@ export async function saveNvtDiscordSettingsAction(
     enabled,
     notifyWhitelistHits,
     notifyUpcomingDigest,
+    includeLivePublic,
     periodMinutes,
     lookForwardHours,
   });

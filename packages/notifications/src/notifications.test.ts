@@ -435,4 +435,56 @@ describe("buildUpcomingDigestEmbeds", () => {
     expect(embeds).toHaveLength(1);
     expect(embeds[0]?.description).toContain("Không có dự án nào ví của bạn đủ điều kiện mint");
   });
+
+  it("renders live open public drops with live badge and open label without claiming whitelist hit", async () => {
+    const { buildUpcomingDigestEmbeds } = await import("./nvt-scanner.ts");
+    const livePublicItem = {
+      mint: {
+        id: "public-drop-1",
+        chain: "ethereum",
+        contract: "0x2222222222222222222222222222222222222222",
+        name: "Open Public Collection",
+        slug: "open-public-collection",
+        links: {
+          opensea: "https://opensea.io/collection/open-public-collection",
+          mint: null,
+          site: null,
+          x: null,
+        },
+        stages: [],
+        status: "live",
+        minted: 50,
+        supply: 1000,
+        tier: "warm",
+        flags: [],
+      },
+      stages: [
+        {
+          stage: {
+            label: "Public stage",
+            kind: "public",
+            price: 0,
+            currency: "ETH",
+            start: "2026-08-16T13:00:00.000Z",
+            end: "2026-08-16T15:00:00.000Z",
+          },
+          wallets: [{ address: "", label: "Mở tự do" }],
+        },
+      ],
+    };
+
+    const embeds = buildUpcomingDigestEmbeds([livePublicItem], {
+      lookForwardHours: 24,
+      nowIso: "2026-08-16T14:00:00.000Z", // 1h after start, 1h before end => LIVE NOW
+    });
+
+    expect(embeds).toHaveLength(1);
+    const embed = embeds[0];
+    expect(embed).toBeDefined();
+    expect(embed?.description).toContain("Open Public Collection");
+    expect(embed?.description).toContain("Public stage");
+    expect(embed?.description).toContain("ĐANG MỞ BÁN (Live Now)");
+    expect(embed?.description).toContain("Mở tự do cho tất cả (Không cần WL)");
+    expect(embed?.description).not.toContain("👤 Ví:");
+  });
 });

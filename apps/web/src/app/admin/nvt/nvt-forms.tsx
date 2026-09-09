@@ -188,6 +188,9 @@ export function NvtDiscordSettingsForm({ data }: { data: NvtDiscordAdminData }) 
   const [notifyUpcomingDigest, setNotifyUpcomingDigest] = useState(
     data.settings.notifyUpcomingDigest ?? false,
   );
+  const [includeLivePublic, setIncludeLivePublic] = useState(
+    data.settings.includeLivePublic ?? true,
+  );
   const [periodMinutes, setPeriodMinutes] = useState(data.settings.periodMinutes || 60);
   const [lookForwardHours, setLookForwardHours] = useState(data.settings.lookForwardHours || 24);
   const [digestPending, startDigestTransition] = useTransition();
@@ -244,6 +247,7 @@ export function NvtDiscordSettingsForm({ data }: { data: NvtDiscordAdminData }) 
           formData.set("enabled", String(enabled));
           formData.set("notifyWhitelistHits", String(notifyWhitelistHits));
           formData.set("notifyUpcomingDigest", String(notifyUpcomingDigest));
+          formData.set("includeLivePublic", String(includeLivePublic));
           formData.set("periodMinutes", String(periodMinutes));
           formData.set("lookForwardHours", String(lookForwardHours));
           startSaveTransition(async () => {
@@ -350,6 +354,19 @@ export function NvtDiscordSettingsForm({ data }: { data: NvtDiscordAdminData }) 
             />
             <label htmlFor="notifyUpcomingDigest" className="font-mono text-xs text-ink-muted">
               Push upcoming eligible drops list on each scan pass (only mints your wallets can mint)
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2 pl-6">
+            <input
+              id="includeLivePublic"
+              type="checkbox"
+              checked={includeLivePublic}
+              onChange={(e) => setIncludeLivePublic(e.target.checked)}
+              className="size-4 rounded border-line bg-base text-acid focus:ring-acid/40"
+            />
+            <label htmlFor="includeLivePublic" className="font-mono text-xs text-ink-muted">
+              Include drops that are already open / live now (mở hẳn luôn mint được)
             </label>
           </div>
         </div>

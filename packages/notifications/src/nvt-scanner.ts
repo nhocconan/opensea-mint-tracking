@@ -36,6 +36,7 @@ export interface NvtDiscordScanSettings {
   readonly lookForwardHours: number; // default 24 (next 24 hours)
   readonly notifyWhitelistHits?: boolean | undefined; // default true
   readonly notifyUpcomingDigest?: boolean | undefined; // default false
+  readonly includeLivePublic?: boolean | undefined; // default true (include drops that are already open / live now)
   readonly lastRunAt?: string | undefined;
   readonly lastAlertCount?: number | undefined;
   readonly lastStatus?: "ok" | "error" | "warning" | undefined;
@@ -58,6 +59,7 @@ export const DEFAULT_NVT_SCAN_SETTINGS: NvtDiscordScanSettings = {
   lookForwardHours: 24,
   notifyWhitelistHits: true,
   notifyUpcomingDigest: false,
+  includeLivePublic: true,
 };
 
 export interface MatchedAccountStage {
@@ -146,9 +148,17 @@ export function buildUpcomingDigestEmbeds(
       const openseaAction = openSeaLink ? ` · [⛵ OpenSea](${openSeaLink})` : "";
 
       if (isEligible && item.stages.length > 0) {
+        const nowMs = options.nowIso ? new Date(options.nowIso).getTime() : Date.now();
         const stageLines = item.stages
           .map(({ stage, wallets }) => {
             const stageStart = new Date(stage.start).getTime();
+            const stageEnd = stage.end ? new Date(stage.end).getTime() : undefined;
+            const isLive = stageStart <= nowMs && (stageEnd === undefined || stageEnd > nowMs);
+            const isPublic =
+              (stage.kind ?? "").toLowerCase() === "public" ||
+              stage.label.toLowerCase().includes("public");
+            const isPublicOpen = isPublic && (wallets.length === 0 || wallets[0]?.address === "");
+
             const relTime = stageStart > 0 ? formatDiscordRelativeTime(stageStart) : "soon";
             const gmt7Time =
               stageStart > 0 ? formatDateTimeGmt7(new Date(stageStart).toISOString()) : "TBD";
@@ -158,8 +168,16 @@ export function buildUpcomingDigestEmbeds(
                 : stage.price != null
                   ? `${stage.price} ${stage.currency ?? "ETH"}`
                   : "—";
-            const walletLabels = wallets.map((w) => w.label).join(", ");
-            return `  └ **${truncateDiscordString(stage.label, 30)}** (\`${(stage.kind ?? "WL").toUpperCase()}\`) · Giá: \`${priceDisplay}\` · Bắt đầu: **${gmt7Time} GMT+7** (${relTime})\n    👤 Ví: \`${walletLabels}\``;
+
+            const timingText = isLive
+              ? `🟢 **ĐANG MỞ BÁN (Live Now)**${stageEnd ? ` (kết thúc ${formatDiscordRelativeTime(stageEnd)})` : ""}`
+              : `Bắt đầu: **${gmt7Time} GMT+7** (${relTime})`;
+
+            const walletLine = isPublicOpen
+              ? `    🌐 \`Mở tự do cho tất cả (Không cần WL)\``
+              : `    👤 Ví: \`${wallets.map((w) => w.label).join(", ")}\``;
+
+            return `  └ **${truncateDiscordString(stage.label, 30)}** (\`${(stage.kind ?? "WL").toUpperCase()}\`) · Giá: \`${priceDisplay}\` · ${timingText}\n${walletLine}`;
           })
           .join("\n");
 
@@ -504,6 +522,11 @@ export async function runNvtDiscordScanPass(
           }
         }
 
+        const isPublic =
+          stage.kind?.toLowerCase() === "public" || stage.label.toLowerCase().includes("public");
+        const isLiveNow = stageStart <= now && (stageEnd === undefined || stageEnd > now);
+        const includeLivePublic = settings.includeLivePublic !== false;
+
         if (stageMatchedWallets.length > 0) {
           const existing = eligibleMintsMap.get(mint.id);
           if (existing) {
@@ -512,6 +535,26 @@ export async function runNvtDiscordScanPass(
             eligibleMintsMap.set(mint.id, {
               mint,
               stages: [{ stage, wallets: stageMatchedWallets }],
+            });
+          }
+        } else if (
+          includeLivePublic &&
+          isPublic &&
+          isLiveNow &&
+          mint.status !== "sold_out" &&
+          mint.status !== "ended"
+        ) {
+          // Live open public stage ("mở hẳn luôn mint được").
+          // Strictly adhere to AGENTS.md: Never report public-stage eligibility as a whitelist hit.
+          // Therefore, do NOT add to `hits` array, but include in eligibleMints digest as public open mint.
+          const publicWallets = [{ address: "", label: "Mở tự do" }];
+          const existing = eligibleMintsMap.get(mint.id);
+          if (existing) {
+            existing.stages.push({ stage, wallets: publicWallets });
+          } else {
+            eligibleMintsMap.set(mint.id, {
+              mint,
+              stages: [{ stage, wallets: publicWallets }],
             });
           }
         }
