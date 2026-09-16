@@ -58,6 +58,7 @@ import {
   fetchErc20Funding,
   fetchFeeContext,
   fetchNativeBalance,
+  readMintStats,
   simulateTransaction,
 } from "@hoodmint/providers";
 import { openWalletKey } from "@hoodmint/secrets";
@@ -522,6 +523,11 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       ...(extra.txHash !== undefined ? { txHash: extra.txHash } : {}),
     });
 
+  // Captured for the catch block below, which runs outside this try's scope
+  // but still has to ask the contract about a "minted out" verdict.
+  let fireUrlsSeen: readonly string[] = [];
+  let mintStatsTarget: { contract: string; minter: string } | null = null;
+
   try {
     // ADR 0009, item P2: best-ranked registry endpoint over the legacy
     // single RPC_URL, same fallback-when-empty behavior as chain.ts.
@@ -536,6 +542,7 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       config.RPC_URL,
     );
     const fireUrls = mintRpcUrls(config, registryUrls);
+    fireUrlsSeen = fireUrls;
     const rpcUrl = fireUrls[0];
     if (!rpcUrl) {
       await record("failed", { errorCode: "no_rpc_configured" });
@@ -559,6 +566,9 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       .from(projectsTable)
       .where(eq(projectsTable.id, plan.projectId));
     const [wallet] = await db.select().from(walletsTable).where(eq(walletsTable.id, plan.walletId));
+    if (project?.contractAddress != null && wallet !== undefined) {
+      mintStatsTarget = { contract: project.contractAddress, minter: wallet.address };
+    }
 
     // PREFETCH, STARTED FIRST. Measured on the 2026-09-15 21:00 GTD: the burst waits
     // 230-1200ms for OpenSea to flip, and only THEN did the fire path ask the
@@ -1034,21 +1044,51 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       // So: terminal only once OUR stage is genuinely open. Before that,
       // release and keep competing.
       const targetMs = await fireTargetMs(db, plan);
-      const stageOpen = mintedOutIsTerminal({ nowMs: Date.now(), fireTargetMs: targetMs });
+      // Ask the contract before believing the message (playbook §4). A drop
+      // with tokens left is not minted out; OpenSea reports a spent phase
+      // allocation with the same words it uses for a spent collection.
+      let supply: { currentTotalSupply: bigint; maxSupply: bigint } | null = null;
+      if (mintStatsTarget !== null && fireUrlsSeen.length > 0) {
+        const target = mintStatsTarget;
+        supply = await withRpcFailover(fireUrlsSeen, (url) =>
+          readMintStats(url, target.contract, target.minter, 2_000),
+        ).catch((err: unknown) => {
+          log.warn(
+            { planId: plan.id, err },
+            "could not read on-chain supply for a minted-out verdict — falling back to the clock",
+          );
+          return null;
+        });
+      }
+      const stageOpen = mintedOutIsTerminal({
+        nowMs: Date.now(),
+        fireTargetMs: targetMs,
+        supply,
+      });
       // Keep OpenSea's own words. Overwriting them with a fixed string made
       // this failure undiagnosable after the fact.
       const rawErr = `minted_out: ${message}`.slice(0, 200);
       if (!stageOpen) {
         log.warn(
-          { planId: plan.id, msUntilStage: targetMs === null ? null : targetMs - Date.now() },
-          "provider reported minted-out BEFORE our stage opened — about another phase, releasing to keep competing",
+          {
+            planId: plan.id,
+            msUntilStage: targetMs === null ? null : targetMs - Date.now(),
+            totalSupply: supply?.currentTotalSupply?.toString() ?? null,
+            maxSupply: supply?.maxSupply?.toString() ?? null,
+          },
+          "provider reported minted-out but the drop is NOT out of supply — about another phase, releasing to keep competing",
         );
         await record("failed", { errorCode: `minted_out_pre_open: ${message}`.slice(0, 200) });
         await releaseMintPlanToArmed(db, plan.id, new Date());
         return { expired, claimed: true, outcome: "minted_out_pre_open", planId: plan.id };
       }
       log.warn(
-        { planId: plan.id, providerMessage: message },
+        {
+          planId: plan.id,
+          providerMessage: message,
+          totalSupply: supply?.currentTotalSupply?.toString() ?? null,
+          maxSupply: supply?.maxSupply?.toString() ?? null,
+        },
         "drop fully minted out — plan failed (terminal)",
       );
       await record("failed", { errorCode: rawErr });

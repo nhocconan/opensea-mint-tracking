@@ -51,9 +51,39 @@ describe("mintedOutIsTerminal", () => {
     expect(mintedOutIsTerminal({ nowMs: T - 1, fireTargetMs: T })).toBe(false);
   });
 
-  it("is terminal once our stage is open", () => {
-    expect(mintedOutIsTerminal({ nowMs: T, fireTargetMs: T })).toBe(true);
+  // Live 2026-09-16 21:30 projectcpu: the plan was killed at T+2s on a 422
+  // about the GTD phase, and the collection went on to mint 14,774 more
+  // tokens (10,517 -> 25,291 of 29,150). `now >= fireTarget` guarded the
+  // wrong half of the window — OpenSea's clock trails ours by 343-1200ms.
+  it("is NOT terminal inside the grace covering OpenSea's clock lag", () => {
+    expect(mintedOutIsTerminal({ nowMs: T, fireTargetMs: T })).toBe(false);
+    expect(mintedOutIsTerminal({ nowMs: T + 2_000, fireTargetMs: T })).toBe(false);
+  });
+
+  it("is terminal once the stage is open past the grace, with no supply reading", () => {
     expect(mintedOutIsTerminal({ nowMs: T + 5_000, fireTargetMs: T })).toBe(true);
+    expect(mintedOutIsTerminal({ nowMs: T + 60_000, fireTargetMs: T })).toBe(true);
+  });
+
+  // The contract outranks both the message and the clock (playbook §4).
+  it("is NOT terminal while the contract still has supply, however late", () => {
+    expect(
+      mintedOutIsTerminal({
+        nowMs: T + 600_000,
+        fireTargetMs: T,
+        supply: { currentTotalSupply: 25_291n, maxSupply: 29_150n },
+      }),
+    ).toBe(false);
+  });
+
+  it("is terminal when the contract agrees the supply is gone", () => {
+    expect(
+      mintedOutIsTerminal({
+        nowMs: T,
+        fireTargetMs: T,
+        supply: { currentTotalSupply: 29_150n, maxSupply: 29_150n },
+      }),
+    ).toBe(true);
   });
 
   it("trusts the provider when there is no known target to argue with", () => {

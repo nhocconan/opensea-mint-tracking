@@ -194,19 +194,43 @@ export async function buildOpenSeaMintTx(
  * Is a provider "minted out" answer terminal for THIS plan?
  *
  * OpenSea's /mint takes no stage argument — it answers about whichever stage
- * it currently considers active. The fire path deliberately starts polling
- * before our own stage opens, so an early "minted out" is usually about the
- * PREVIOUS phase, whose allocation is spent by then. Both FCFS phases on
- * 2026-09-16 were lost to this: each plan was killed 757ms after its
- * published start, before any calldata had been obtained, while supply
- * remained (hoodminers 4173/5000 five minutes earlier).
+ * it currently considers active, and its clock trails ours by a measured
+ * 343-1200 ms. So a "minted out" arriving around our stage start is usually a
+ * statement about the PREVIOUS phase, whose allocation is naturally spent by
+ * then, not about ours.
  *
- * Terminal only once our own stage is genuinely open.
+ * The first version of this guard compared `now >= fireTarget` and nothing
+ * else. That protects the wrong half of the window: on the 2026-09-16 21:30
+ * projectcpu FCFS the plan was killed at T+2 s on a 422 about the GTD phase,
+ * and the collection then minted 14,774 more tokens in eight minutes
+ * (10,517 -> 25,291 of 29,150) with our plan already dead.
+ *
+ * So the clock is no longer the authority; the contract is (playbook §4).
+ * `getMintStats` reports the collection's real supply, and a drop with
+ * tokens left is not minted out no matter what the message says — a spent
+ * per-stage `maxTokenSupplyForStage` reads identically from the outside.
+ * Retrying stays bounded by the plan deadline and revert cap, so this cannot
+ * run away.
  */
+export const MINTED_OUT_CLOCK_LAG_GRACE_MS = 5_000;
+
 export function mintedOutIsTerminal(input: {
   nowMs: number;
   fireTargetMs: number | null;
+  /** On-chain supply, when `getMintStats` could be read. */
+  supply?: { currentTotalSupply: bigint; maxSupply: bigint } | null;
+  graceMs?: number;
 }): boolean {
-  // No known target: we cannot argue it is early, so trust the provider.
-  return input.fireTargetMs === null || input.nowMs >= input.fireTargetMs;
+  // The contract wins. Tokens left ⇒ the drop is not minted out, and the
+  // message is about a phase allocation or a stage we have not reached.
+  if (input.supply != null && input.supply.maxSupply > 0n) {
+    return input.supply.currentTotalSupply >= input.supply.maxSupply;
+  }
+  // No supply reading: fall back to the clock, but only past a grace wide
+  // enough to cover OpenSea's lag, so T+2 s can never be terminal again.
+  if (input.fireTargetMs === null) {
+    // No known target: we cannot argue it is early, so trust the provider.
+    return true;
+  }
+  return input.nowMs >= input.fireTargetMs + (input.graceMs ?? MINTED_OUT_CLOCK_LAG_GRACE_MS);
 }
