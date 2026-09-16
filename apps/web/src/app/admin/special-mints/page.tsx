@@ -1,10 +1,16 @@
 import {
   type ExecutionAttempt,
+  eligibilityStageScopeKey,
   getProjectDetail,
   latestAttemptPerPlan,
   listMintPlanHistory,
   listMintPlansForProject,
   listWallets,
+  stageCapsForProject,
+  type TrackedWalletEligibility,
+  trackedWalletEligibilityForStages,
+  type WalletDropMintTotals,
+  walletMintTotalsForProject,
 } from "@hoodmint/db";
 import type { Metadata } from "next";
 import Link from "next/link";
@@ -23,6 +29,9 @@ import { TargetForm } from "./target-form.tsx";
 
 export const metadata: Metadata = { title: "Special mints" };
 export const dynamic = "force-dynamic";
+
+/** Same freshness threshold the feed and calendar use for their STALE chip. */
+const STALE_AFTER_MS = 3 * 60 * 60 * 1000;
 
 function isUuidParam(value: string | string[] | undefined): value is string {
   return (
@@ -61,6 +70,16 @@ export default async function AdminSpecialMintsPage({
       : getProjectDetail(db, projectId).catch(() => undefined),
     listWallets(db, { enabledOnly: true }).catch(() => []),
   ]);
+  // How much of this drop each wallet has ALREADY taken. `max_per_wallet` is
+  // cumulative across every phase, so the picker must show the remainder, not
+  // the raw cap. Confirmed = indexed mint_events; broadcast = plans already
+  // fired whose logs the chain worker may not have indexed yet.
+  const mintedByWallet =
+    detail === undefined
+      ? new Map<string, WalletDropMintTotals>()
+      : await walletMintTotalsForProject(db, detail.project.id).catch(
+          () => new Map<string, WalletDropMintTotals>(),
+        );
   const managedWallets: ManagedWalletOption[] = walletRows
     .filter((w) => w.hasSigningKey)
     .map((w) => ({
@@ -70,6 +89,9 @@ export default async function AdminSpecialMintsPage({
       nativeBalanceWei: w.nativeBalanceWei,
       balanceCheckedAt:
         w.balanceCheckedAt === null ? null : toDate(w.balanceCheckedAt).toISOString(),
+      alreadyMinted: mintedByWallet.get(w.id)?.alreadyMinted ?? 0,
+      confirmedMinted: mintedByWallet.get(w.id)?.confirmedQuantity ?? 0,
+      broadcastMinted: mintedByWallet.get(w.id)?.broadcastQuantity ?? 0,
     }));
 
   const plans =
@@ -83,6 +105,25 @@ export default async function AdminSpecialMintsPage({
     ...new Set([...plans.map((p) => p.id), ...history.map((p) => p.id)]),
   ]).catch(() => new Map<string, ExecutionAttempt>());
 
+  // drop_stages.max_per_wallet comes from the /drops feed's `max_per_wallet`,
+  // which returns 1 for every stage of every drop on this chain and is NOT
+  // the cap SeaDrop enforces (`minterNumMinted + qty > cap`). The real number
+  // is OpenSea's max_total_mintable_by_wallet, stored on eligibility_checks.
+  // Patching the stage row is useless — the detail refresh rewrites it within
+  // minutes — so the display reads the authoritative value, same as the clamp.
+  const authoritativeCaps = new Map<string, number>();
+  if (detail !== undefined) {
+    const capRows = await stageCapsForProject(db, detail.project.id).catch(
+      () => [] as { stageId: string; cap: number }[],
+    );
+    for (const row of capRows) {
+      authoritativeCaps.set(row.stageId, row.cap);
+    }
+  }
+
+  // Phase rows are a stored snapshot of what OpenSea last published, not a
+  // live read: carry `updatedAt` so the form can label its age, and `paused`
+  // so a superseded phase cannot be picked (its `startsAt` is stale).
   const stages: StageOption[] =
     detail === undefined
       ? []
@@ -93,8 +134,30 @@ export default async function AdminSpecialMintsPage({
           priceWei: s.priceWei,
           startsAt: toDate(s.startsAt).toISOString(),
           endsAt: s.endsAt === null ? null : toDate(s.endsAt).toISOString(),
-          maxPerWallet: s.maxPerWallet,
+          maxPerWallet: authoritativeCaps.get(s.id) ?? s.maxPerWallet,
+          paused: s.paused,
+          observedAt: toDate(s.updatedAt).toISOString(),
+          stale: Date.now() - toDate(s.updatedAt).getTime() > STALE_AFTER_MS,
         }));
+
+  // Per-wallet eligibility for EVERY phase of this collection, each looked up
+  // on its exact { projectId, stageId } pair (AGENTS.md anti-pattern #1) so
+  // the picker can key its chips on the phase the operator selected — a hit
+  // from another phase is not a hit for this one.
+  const eligibilityByStage: Record<string, Record<string, string>> = {};
+  if (detail !== undefined && detail.stages.length > 0) {
+    const scopes = detail.stages.map((s) => ({ projectId: detail.project.id, stageId: s.id }));
+    const byScope = await trackedWalletEligibilityForStages(db, scopes).catch(
+      () => new Map<string, TrackedWalletEligibility[]>(),
+    );
+    for (const s of detail.stages) {
+      const perWallet: Record<string, string> = {};
+      for (const w of byScope.get(eligibilityStageScopeKey(detail.project.id, s.id)) ?? []) {
+        perWallet[w.walletId] = w.status;
+      }
+      eligibilityByStage[s.id] = perWallet;
+    }
+  }
 
   // Latest supply snapshot (the worker's on-chain sweep writes one every
   // 2 min for LIVE/NEXT drops). Sold out = verified minted >= max.
@@ -108,6 +171,10 @@ export default async function AdminSpecialMintsPage({
     latestSupply?.verified === true &&
     latestSupply.maxSupply !== null &&
     latestSupply.minted >= latestSupply.maxSupply;
+  const supplyObservedIso =
+    latestSupply === undefined ? null : toDate(latestSupply.observedAt).toISOString();
+  const supplyStale =
+    supplyObservedIso !== null && Date.now() - Date.parse(supplyObservedIso) > STALE_AFTER_MS;
 
   const draftPlans = plans
     .filter((p) => p.status === "draft")
@@ -174,6 +241,16 @@ export default async function AdminSpecialMintsPage({
                     ? "not read yet"
                     : `${latestSupply.minted.toString()} / ${latestSupply.maxSupply?.toString() ?? "?"}`}
                   {soldOut ? " · SOLD OUT" : ""}
+                  {/* A snapshot, not a live read — never render it as if it
+                      were current (AGENTS.md: label stale/uncertain claims). */}
+                  {supplyObservedIso === null ? null : (
+                    <span
+                      className={`block text-[10px] ${supplyStale ? "text-amber" : "text-ink-faint"}`}
+                    >
+                      {supplyStale ? "⚠ STALE · " : ""}as of {formatDateTimeGmt7(supplyObservedIso)}{" "}
+                      · <Countdown iso={supplyObservedIso} label="Supply read" pastPrefix="read" />
+                    </span>
+                  )}
                 </dd>
               </div>
             </dl>
@@ -190,6 +267,7 @@ export default async function AdminSpecialMintsPage({
             stages={stages}
             wallets={managedWallets}
             initialStageId={requestedStageId}
+            eligibilityByStage={eligibilityByStage}
           />
 
           {draftPlans.length > 0 ? <ArmAllControl plans={draftPlans} /> : null}
@@ -243,8 +321,17 @@ export default async function AdminSpecialMintsPage({
                           : null;
                     const fireIso = fireAt === null ? null : fireAt.toISOString();
                     const attempt = attempts.get(p.id);
+                    // The arm window is capped at 24h; the fire instant is
+                    // not. When the window closes first the plan expires
+                    // before it can ever fire — say so instead of showing a
+                    // calm "armed" row.
+                    const armedUntil = p.armedUntil === null ? null : toDate(p.armedUntil);
+                    const windowClosesBeforeFire =
+                      armedUntil !== null &&
+                      fireAt !== null &&
+                      armedUntil.getTime() < fireAt.getTime();
                     return (
-                      <tr key={p.id}>
+                      <tr key={p.id} className={windowClosesBeforeFire ? "text-amber" : undefined}>
                         <td className="py-1" title={p.walletAddress}>
                           {p.walletLabel ?? shortAddress(p.walletAddress)}
                         </td>
@@ -273,8 +360,17 @@ export default async function AdminSpecialMintsPage({
                         <td className="py-1">
                           <Countdown iso={fireIso} label="Fire" />
                         </td>
-                        <td className="py-1 text-ink-faint">
-                          {p.armedUntil === null ? "—" : formatDateTimeGmt7(toDate(p.armedUntil))}
+                        <td
+                          className={
+                            windowClosesBeforeFire ? "py-1 text-amber" : "py-1 text-ink-faint"
+                          }
+                        >
+                          {armedUntil === null ? "—" : formatDateTimeGmt7(armedUntil)}
+                          {windowClosesBeforeFire ? (
+                            <span className="block text-[10px] text-amber">
+                              ⚠ window closes before fire
+                            </span>
+                          ) : null}
                         </td>
                         <td className={p.presigned ? "py-1 text-acid" : "py-1 text-ink-faint"}>
                           {p.presigned ? "yes" : "no"}
@@ -313,7 +409,7 @@ export default async function AdminSpecialMintsPage({
 
       <section className="rounded-md border border-line bg-base-raised p-4">
         <h2 className="mb-1 font-mono text-[11px] tracking-widest text-ink-faint uppercase">
-          History — every special mint, newest first
+          History — every special mint, latest mint time first
         </h2>
         <p className="mb-2 text-[11px] text-ink-faint">
           Outcome = the plan's final status plus its last execution attempt (tx hash on success,

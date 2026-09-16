@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose -f docker-compose.prod.yml up --build -d)",
+      "Bash(docker compose -f docker-compose.prod.yml up -d)",
+      "Bash(docker exec hoodmint-radar-prod-postgres-1 psql:*)"
+    ]
+  }
+}

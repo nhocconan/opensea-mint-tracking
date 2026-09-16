@@ -31,7 +31,11 @@ export function ArmAllControl({
       <p className="mt-1 text-[11px] text-ink-faint">
         Arms {plans.length} draft plan(s) after a single passkey verification. The window is derived
         server-side from each plan's own phase end (capped 24h) or manual fire time + 4h. Armed
-        plans expire on their own — arming is never open-ended.
+        plans expire on their own — arming is never open-ended. A plan whose fire instant falls
+        outside that window (more than 24h away, or already past on a phase that is not open) is
+        refused instead of armed, and anything that could not be verified is called out in amber. A
+        quantity above what the wallet still has left on this drop (the per-wallet cap is cumulative
+        across every phase) is armed clamped to the remainder, not refused.
       </p>
       <button
         type="button"
@@ -61,7 +65,15 @@ export function ArmAllControl({
         <div className="mt-2">
           <p
             role={state.ok ? "status" : "alert"}
-            className={`text-xs ${state.ok ? "text-acid" : "text-magenta"}`}
+            className={`text-xs ${
+              !state.ok
+                ? "text-magenta"
+                : state.results.some(
+                      (r) => r.ok && (r.warnings.length > 0 || (r.notes?.length ?? 0) > 0),
+                    )
+                  ? "text-amber"
+                  : "text-acid"
+            }`}
           >
             {state.message}
           </p>
@@ -76,7 +88,21 @@ export function ArmAllControl({
                         ? r.planId.slice(0, 8)
                         : `${shortAddress(plan.walletAddress)} ×${plan.quantity}`}
                     </span>{" "}
-                    <span className={r.ok ? "text-acid" : "text-magenta"}>{r.message}</span>
+                    {/* Warning role (DESIGN.md: amber = warning/stale) — an
+                        arm whose pre-flight checks could not RUN is never
+                        painted like one that ran and passed. */}
+                    <span
+                      className={
+                        !r.ok
+                          ? "text-magenta"
+                          : r.warnings.length > 0 || (r.notes?.length ?? 0) > 0
+                            ? "text-amber"
+                            : "text-acid"
+                      }
+                    >
+                      {r.warnings.length > 0 || (r.notes?.length ?? 0) > 0 ? "⚠ " : ""}
+                      {r.message}
+                    </span>
                   </li>
                 );
               })}

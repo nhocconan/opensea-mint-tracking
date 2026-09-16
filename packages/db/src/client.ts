@@ -85,7 +85,13 @@ export type RadarEventType =
   // awaiting_signature above (which means the OPPOSITE: still waiting on
   // the owner). Lets the admin execution page push a "fired" update
   // immediately rather than only on the next poll.
-  | "execution.broadcast";
+  | "execution.broadcast"
+  // A plan reached a TERMINAL failure (minted out, insufficient funds, an
+  // OpenSea refusal, a misconfigured signer) or its arm window expired. These
+  // used to be entirely silent — the row flipped to `failed` and nothing was
+  // published — so an operator watching for an alert learned about it after
+  // the drop had gone.
+  | "execution.failed";
 
 export interface RadarEvent {
   readonly type: RadarEventType;

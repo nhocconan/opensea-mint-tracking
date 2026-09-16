@@ -9,6 +9,7 @@ describe("canFireMintPlan", () => {
     signerCeilingWei: 1_000n,
     perPlanCeilingWei: 500n,
     spentWei: 0n,
+    txValueWei: 0n,
   };
 
   it("allows a well-formed armed plan inside its window and under both caps", () => {
@@ -132,5 +133,55 @@ describe("rankRpcEndpoints", () => {
       "https://rpc-a.example/",
       "https://rpc-b.example/",
     ]);
+  });
+});
+
+describe("per-plan ceiling caps the transaction value", () => {
+  const NOW = new Date("2026-08-21T12:00:00Z");
+  const base = {
+    status: "armed" as const,
+    armedUntil: new Date("2026-08-21T12:05:00Z"),
+    signerCeilingWei: 1_000n,
+    perPlanCeilingWei: 1_000n,
+    spentWei: 0n,
+    txValueWei: 0n,
+  };
+
+  // Found by an adversarial review, 2026-09-15: canFireMintPlan compared
+  // ceilings against each other and against a spentWei the worker hardcodes
+  // to 0n, but never against the value about to be broadcast — so the live
+  // fire path had no spend cap at all and would sign whatever value OpenSea
+  // returned at T-0. Delete the txValueWei branch and this fails.
+  it("refuses a transaction whose value exceeds the ceiling", () => {
+    const decision = canFireMintPlan(
+      { ...base, perPlanCeilingWei: 1_000n, signerCeilingWei: 1_000n, txValueWei: 1_001n },
+      NOW,
+    );
+    expect(decision.ok).toBe(false);
+    expect(decision.ok === false && decision.reason).toContain(
+      "exceeds the per-plan spend ceiling",
+    );
+  });
+
+  it("allows a transaction whose value exactly meets the ceiling", () => {
+    const decision = canFireMintPlan(
+      { ...base, perPlanCeilingWei: 1_000n, signerCeilingWei: 1_000n, txValueWei: 1_000n },
+      NOW,
+    );
+    expect(decision.ok).toBe(true);
+  });
+
+  it("counts value on top of what was already spent", () => {
+    const decision = canFireMintPlan(
+      {
+        ...base,
+        perPlanCeilingWei: 1_000n,
+        signerCeilingWei: 1_000n,
+        spentWei: 600n,
+        txValueWei: 500n,
+      },
+      NOW,
+    );
+    expect(decision.ok).toBe(false);
   });
 });

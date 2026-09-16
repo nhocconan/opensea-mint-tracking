@@ -127,7 +127,11 @@ export function AppShell({
             <>
               <Link
                 href="/admin"
-                aria-current={pathname.startsWith("/admin") && !pathname.startsWith("/admin/account") ? "page" : undefined}
+                aria-current={
+                  pathname.startsWith("/admin") && !pathname.startsWith("/admin/account")
+                    ? "page"
+                    : undefined
+                }
                 className={`flex min-h-9 items-center gap-2 rounded-sm px-2 py-1 text-[11px] transition-colors ${
                   pathname.startsWith("/admin") && !pathname.startsWith("/admin/account")
                     ? "border-l-2 border-acid bg-base-overlay text-acid font-medium"

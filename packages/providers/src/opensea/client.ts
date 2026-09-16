@@ -112,6 +112,33 @@ export class OpenSeaClient {
     };
   }
 
+  /**
+   * Hourly budget per Developer key.
+   *
+   * `this.quota` used to be the ONLY quota state: it was overwritten from
+   * whichever response came back last, no matter which key sent it. So one
+   * exhausted key's `x-ratelimit-remaining: 0` shut the gate for every key,
+   * and adding a second key to "get more quota" changed nothing — the
+   * operator's new key was blocked by the old key's headers. Budgets are
+   * per key at the provider, so they are per key here.
+   */
+  private readonly quotaByKey = new Map<string, QuotaState>();
+
+  private quotaFor(key: string | undefined): QuotaState {
+    if (key === undefined) {
+      return this.quota;
+    }
+    return this.quotaByKey.get(key) ?? this.quota;
+  }
+
+  /** Keys whose own budget still allows a call at this priority. */
+  private usableKeys(priority: boolean): string[] {
+    return this.apiKeys.filter((key) => {
+      const decision = allowedRequests(this.quotaFor(key));
+      return !decision.blocked || (priority && decision.reason === "reserve-reached");
+    });
+  }
+
   rateLimit(): RateLimitSnapshot {
     return {
       remaining: this.quota.remaining,
@@ -120,35 +147,76 @@ export class OpenSeaClient {
     };
   }
 
-  private updateQuota(headers: Record<string, string>): void {
+  private updateQuota(headers: Record<string, string>, key?: string): void {
     const parsed = parseRateLimitHeaders(headers);
     if (parsed.remaining !== null || parsed.limit !== null || parsed.resetAtEpochSeconds !== null) {
       if (parsed.limit !== null) {
         this.providerLimit = parsed.limit;
       }
-      this.quota = {
-        limitPerHour: parsed.limit ?? this.quota.limitPerHour,
-        remaining: parsed.remaining ?? this.quota.remaining,
-        resetAtEpochSeconds: parsed.resetAtEpochSeconds ?? this.quota.resetAtEpochSeconds,
-        reservePercent: this.quota.reservePercent,
+      const previous = this.quotaFor(key);
+      const next: QuotaState = {
+        limitPerHour: parsed.limit ?? previous.limitPerHour,
+        remaining: parsed.remaining ?? previous.remaining,
+        resetAtEpochSeconds: parsed.resetAtEpochSeconds ?? previous.resetAtEpochSeconds,
+        reservePercent: previous.reservePercent,
       };
+      // Attribute the headers to the key that actually made the call, so one
+      // key's exhaustion can never speak for another's budget.
+      if (key !== undefined) {
+        this.quotaByKey.set(key, next);
+      } else {
+        this.quota = next;
+      }
     }
   }
 
-  private assertQuota(): void {
-    const decision = allowedRequests(this.quota);
-    if (decision.blocked) {
-      throw new AppError("RateLimited", "opensea quota reserve reached; deferring requests", {
-        hint: "waits for window reset or key rotation",
-      });
+  /**
+   * @param priority mint-critical call (building mint calldata at the fire
+   * instant). The reserve is a voluntary floor held back so routine scanning
+   * cannot starve exactly this call — so a priority call is allowed to spend
+   * it. Without this the guard blocked the mint itself, and the reserve was
+   * being protected for nobody: discovery, supply sweeps and the mint all hit
+   * the same floor and all stopped together.
+   */
+  private assertQuota(priority = false): void {
+    // With several keys configured, the gate is "is there ANY key with
+    // budget", not "is the last response's key out".
+    if (this.apiKeys.length > 0) {
+      if (this.usableKeys(priority).length > 0) {
+        return;
+      }
+      throw new AppError(
+        "RateLimited",
+        "opensea quota exhausted on every configured key; waiting for window reset",
+        { hint: "waits for window reset or key rotation" },
+      );
     }
+    const decision = allowedRequests(this.quota);
+    if (!decision.blocked) {
+      return;
+    }
+    if (priority && decision.reason === "reserve-reached") {
+      return;
+    }
+    throw new AppError(
+      "RateLimited",
+      decision.reason === "exhausted"
+        ? "opensea quota exhausted for this key; waiting for window reset"
+        : "opensea quota reserve reached; deferring requests",
+      { hint: "waits for window reset or key rotation" },
+    );
   }
 
   private async call(
     path: string,
-    init: { method?: "GET" | "POST"; body?: string; authenticated?: string } = {},
+    init: {
+      method?: "GET" | "POST";
+      body?: string;
+      authenticated?: string;
+      priority?: boolean;
+    } = {},
   ): Promise<{ json: unknown; headers: Record<string, string> }> {
-    this.assertQuota();
+    this.assertQuota(init.priority ?? false);
     const headers: Record<string, string> = {};
     // Process-wide pacing: pick the Developer key with the most budget left
     // and wait for a token before touching the network (rate-limiter.ts).
@@ -156,9 +224,18 @@ export class OpenSeaClient {
     // instant-key bootstrap stay unpaced.
     let pacedKey: string | undefined;
     if (this.apiKeys.length > 0 && this.perMinuteLimit !== undefined) {
-      pacedKey = pickKey(this.apiKeys, this.perMinuteLimit);
+      // Only ever pace over keys that still have hourly budget, so a spent
+      // key cannot win the per-minute pick and waste the call.
+      const candidates = this.usableKeys(init.priority ?? false);
+      pacedKey = pickKey(candidates.length > 0 ? candidates : this.apiKeys, this.perMinuteLimit);
       await acquire(pacedKey, this.perMinuteLimit);
       headers["x-api-key"] = pacedKey;
+    } else if (this.apiKeys.length > 0) {
+      const candidates = this.usableKeys(init.priority ?? false);
+      pacedKey = candidates[0] ?? this.apiKeys[0];
+      if (pacedKey !== undefined) {
+        headers["x-api-key"] = pacedKey;
+      }
     } else if (this.apiKey !== undefined) {
       headers["x-api-key"] = this.apiKey;
     }
@@ -173,7 +250,7 @@ export class OpenSeaClient {
     };
     try {
       const result = await fetchJson(`${this.baseUrl}${path}`, options, this.etagCache);
-      this.updateQuota(result.headers);
+      this.updateQuota(result.headers, pacedKey);
       return { json: result.json, headers: result.headers };
     } catch (error) {
       // Upstream 429 despite pacing → drain that key's bucket for the
@@ -434,6 +511,9 @@ export class OpenSeaClient {
     const { json } = await this.call(`/api/v2/drops/${encodeURIComponent(slug)}/mint`, {
       method: "POST",
       body: JSON.stringify({ minter: params.minter, quantity: params.quantity }),
+      // The one call the reserve exists to protect. Routine scanning stops at
+      // the floor; the mint spends it.
+      priority: true,
     });
     const parsed = dropMintResponseSchema.parse(json);
     return { target: parsed.target, calldata: parsed.calldata, valueWei: parsed.value };

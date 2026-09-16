@@ -22,6 +22,7 @@ import { runAutoMintPlanner } from "./workers/auto-mint.ts";
 import { runChainSync } from "./workers/chain.ts";
 import { runClockCalibration } from "./workers/clock-calibration.ts";
 import {
+  refreshArmedPlanDetails,
   refreshLiveNextDetails,
   repairUnknownStages,
   runCollectionDiscovery,
@@ -66,7 +67,11 @@ function every(ms: number, name: string, fn: () => Promise<unknown>): void {
 
 async function main(): Promise<void> {
   log.info(
-    { chainId: config.ROBINHOOD_CHAIN_ID, discoveryInterval: config.DISCOVERY_INTERVAL_SECONDS },
+    {
+      chainId: config.ROBINHOOD_CHAIN_ID,
+      discoveryInterval: config.DISCOVERY_INTERVAL_SECONDS,
+      publicScanEnabled: config.PUBLIC_SCAN_ENABLED,
+    },
     "worker starting",
   );
 
@@ -145,9 +150,11 @@ async function main(): Promise<void> {
   // DISCOVERY_INTERVAL_SECONDS — see scheduleDiscovery's doc comment. Without
   // this, OpenSea is never polled automatically; only the admin "Scan now"
   // button (featured only) triggers discovery.
-  every(config.DISCOVERY_INTERVAL_SECONDS * 1000, "discovery-schedule", () =>
-    scheduleDiscovery(ctx),
-  );
+  if (config.PUBLIC_SCAN_ENABLED) {
+    every(config.DISCOVERY_INTERVAL_SECONDS * 1000, "discovery-schedule", () =>
+      scheduleDiscovery(ctx),
+    );
+  }
   // Chain-wide collection discovery: the curated /drops feed only lists
   // OpenSea-featured SeaDrop drops, so most Robinhood Chain collections never
   // appear there. This sweeps GET /api/v2/collections (newest first) to find
@@ -157,9 +164,11 @@ async function main(): Promise<void> {
   // quota-conscious cadence than
   // /drops discovery — it is a broad sweep, bounded per pass by
   // COLLECTION_DISCOVERY_MAX_PAGES/MAX_TOTAL.
-  every(config.COLLECTION_DISCOVERY_INTERVAL_SECONDS * 1000, "collection-discovery", () =>
-    runCollectionDiscovery(ctx),
-  );
+  if (config.PUBLIC_SCAN_ENABLED) {
+    every(config.COLLECTION_DISCOVERY_INTERVAL_SECONDS * 1000, "collection-discovery", () =>
+      runCollectionDiscovery(ctx),
+    );
+  }
   // Re-type "unknown" stages (unmapped OpenSea stage_type) so they become
   // eligibility-checkable; boot + every 6h. See repairUnknownStages.
   every(6 * 60 * 60 * 1000, "unknown-stage-repair", () => repairUnknownStages(ctx));
@@ -178,7 +187,12 @@ async function main(): Promise<void> {
   // Delisting/freshness re-check: re-fetch every LIVE/NEXT drop's detail every
   // 15 min so a drop OpenSea hid (drops endpoint → 404) leaves the feeds and
   // renamed/rescheduled drops update. Bounded + paced by the OpenSea limiter.
-  every(15 * 60 * 1000, "live-next-refresh", () => refreshLiveNextDetails(ctx));
+  if (config.PUBLIC_SCAN_ENABLED) {
+    every(15 * 60 * 1000, "live-next-refresh", () => refreshLiveNextDetails(ctx));
+  }
+  // ALWAYS on, even with public scanning off: a plan we are about to fire
+  // must never run on a stale schedule. See refreshArmedPlanDetails.
+  every(5 * 60 * 1000, "armed-plan-detail-refresh", () => refreshArmedPlanDetails(ctx));
   every(60_000, "eligibility", async () => {
     await ensureEligibilityRows(ctx);
     await runEligibilityPass(ctx);
@@ -232,11 +246,15 @@ async function main(): Promise<void> {
   );
   every(60_000, "freshness", () => refreshProviderFreshness(ctx));
   // Automated NVT eligibility scan & Discord alerts (configurable period, default hourly for next 24h)
-  every(60_000, "nvt-discord-scan", () => runNvtScheduledScanPass(ctx));
+  if (config.PUBLIC_SCAN_ENABLED) {
+    every(60_000, "nvt-discord-scan", () => runNvtScheduledScanPass(ctx));
+  }
   // ADR 0007: sentiment/risk scan of LIVE/NEXT drops' X mentions. Self-gates
   // to a no-op unless X_SIGNALS_ENABLED + a real bearer token are set; 5-min
   // cadence keeps the metered X API cost bounded even when enabled.
-  every(300_000, "sentiment", () => runSentimentScan(ctx));
+  if (config.PUBLIC_SCAN_ENABLED) {
+    every(300_000, "sentiment", () => runSentimentScan(ctx));
+  }
   // ADR 0009, item P4: registered right before mint-execution and shares
   // its interval, so a just-armed plan usually gets its calldata cached
   // before it's claimed a cycle or more later — both loops are independent,

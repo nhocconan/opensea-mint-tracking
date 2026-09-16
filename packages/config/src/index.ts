@@ -152,6 +152,51 @@ export const envSchema = z.object({
    *  not implemented (packages/signing throws), so this flag alone can
    *  never cause a server-held key to sign anything. */
   LIVE_EXECUTION_ENABLED: bool.default(false),
+  /**
+   * Public-radar background scanning: collection discovery, the per-feed
+   * discovery scheduler, the live/next detail refresh, sentiment and the NVT
+   * Discord scan. Set false to hand the ENTIRE OpenSea hourly budget to the
+   * special-mint path on a drop night — the mint's own calldata call, and the
+   * on-demand detail refresh the operator triggers by resolving a target,
+   * both keep working. Nothing about arming, pre-signing or firing depends on
+   * these jobs.
+   */
+  /**
+   * Speculative pre-signing (ADR 0009). OFF by default as of 2026-09-15.
+   *
+   * It cannot work for a signature-gated stage: OpenSea issues the mintSigned
+   * params only once ITS clock flips the stage active, so a blob signed at
+   * T-45s can only carry the PREVIOUS phase's calldata — which the fire path
+   * then broadcasts in preference to the fresh burst calldata. Worse, with no
+   * cache the pass re-asks OpenSea on every 200ms tick for the whole lead
+   * window, spending ~75 write calls per key in the 45 seconds before the
+   * open — the exact budget the signature burst needs at the open.
+   */
+  /**
+   * Premium RPC endpoints reserved for the MINT path (see
+   * apps/worker/src/mint-rpc.ts). Deliberately NOT in the rpc_endpoints
+   * registry: background jobs would otherwise spend their rate limit and
+   * 429 the fire path, which is exactly what happened at 22:00 on
+   * 2026-09-15. Two different providers so one outage is not total.
+   */
+  ALCHEMY_ROBINHOOD_RPC: z.string().url().optional(),
+  CHAINSTACK_ROBINHOOD_RPC: z.string().url().optional(),
+  MINT_PRESIGN_ENABLED: bool.default(false),
+  PUBLIC_SCAN_ENABLED: bool.default(true),
+  /**
+   * The wallet address the OpenSea PAT/JWT authenticates AS.
+   *
+   * `/api/v2/drops/{slug}/eligibility` takes no address — it answers for
+   * whichever wallet owns the JWT. The worker held ONE PAT and wrote that one
+   * answer against EVERY tracked wallet, so a wallet with no allowlist spot
+   * was shown "WL" because a different wallet had one. Unset, every verdict
+   * degrades to AUTH_REQUIRED: unknown is survivable, a false whitelist hit
+   * is not (AGENTS.md anti-pattern #1).
+   */
+  OPENSEA_PAT_WALLET_ADDRESS: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/, "must be a 0x-prefixed 40-hex address")
+    .optional(),
   MINT_WATCH_INTERVAL_SECONDS: positiveInt.default(30),
 
   /** Precision fire scheduling (ADR 0009 competitiveness — see
@@ -191,6 +236,22 @@ export const envSchema = z.object({
    *  time; SeaDrop mintPublic qty 1 is ~135k — 300k is safe headroom and the
    *  unused portion is refunded on an L2. */
   MINT_PRESIGN_GAS_LIMIT: positiveInt.default(300_000),
+  /** RPC budget (ms) for the fire path's chain calls. viem defaults to 10s
+   *  and the fire continue window is MINT_FIRE_CONTINUE_MS (4s), so one hung
+   *  endpoint would eat the whole mint window. packages/providers carries
+   *  the same 800ms as a module constant (DEFAULT_RPC_TIMEOUT_MS) and uses
+   *  it unless a caller passes this value through — see HANDOFF: the
+   *  execution worker must thread it for this env var to take effect. */
+  MINT_RPC_TIMEOUT_MS: positiveInt.default(800),
+  /** Integer fee bump applied inside fetchFeeContext (packages/providers) to
+   *  the raw estimateFeesPerGas snapshot, so a pre-signed blob survives a
+   *  base-fee rise between signing and the open. EIP-1559 charges base+tip,
+   *  so maxFee is a ceiling and a high one costs nothing when the base fee
+   *  does not move. Integer only — wei math is bigint, never float. The
+   *  provider defaults (3× / 2×) are already active; this env var applies
+   *  only once a caller threads it (see HANDOFF). */
+  MINT_FEE_MAX_MULTIPLIER: positiveInt.default(3),
+  MINT_FEE_PRIORITY_MULTIPLIER: positiveInt.default(2),
 
   /** ADR 0007: hard default OFF. X's free API tier was retired Feb 2026 —
    *  this is metered pay-per-use, so nothing may call it without both an

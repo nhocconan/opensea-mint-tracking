@@ -1,13 +1,13 @@
 import {
-  type MintPlan,
-  type ProviderRow,
-  type RpcEndpoint,
-  type ScanRun,
   listMintPlans,
   listProviders,
   listRpcEndpoints,
+  type MintPlan,
+  type ProviderRow,
   pendingOutboxDepth,
+  type RpcEndpoint,
   recentScanRuns,
+  type ScanRun,
 } from "@hoodmint/db";
 import { sql } from "drizzle-orm";
 import { container } from "@/lib/container.ts";
@@ -93,7 +93,9 @@ function StatTile({
   const body = (
     <div className="flex flex-col justify-between h-full">
       <dt className="font-mono text-[10px] tracking-wider text-ink-faint uppercase">{label}</dt>
-      <dd className={`mt-2 font-display text-2xl font-bold tracking-tight ${valueClass}`}>{value}</dd>
+      <dd className={`mt-2 font-display text-2xl font-bold tracking-tight ${valueClass}`}>
+        {value}
+      </dd>
     </div>
   );
   if (href !== undefined) {
@@ -106,7 +108,9 @@ function StatTile({
       </a>
     );
   }
-  return <div className={`rounded-lg border bg-base-raised p-3.5 shadow-xs ${borderTone}`}>{body}</div>;
+  return (
+    <div className={`rounded-lg border bg-base-raised p-3.5 shadow-xs ${borderTone}`}>{body}</div>
+  );
 }
 
 /** Admin → Overview (PRD §7.5): health, queues, scans, latency. */

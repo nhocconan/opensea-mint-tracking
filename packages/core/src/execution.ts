@@ -72,6 +72,14 @@ export interface MintPlanFireCheck {
   readonly perPlanCeilingWei: bigint;
   /** Sum already spent by prior attempts on this plan (wei); 0n if none. */
   readonly spentWei: bigint;
+  /**
+   * The value of the transaction about to be broadcast. Without this the
+   * ceiling was decorative on the live fire path: canFireMintPlan only ever
+   * compared ceilings against each other and against a `spentWei` the worker
+   * hardcoded to 0n, so whatever value OpenSea returned at T-0 was signed and
+   * broadcast unchecked. Only the pre-sign pass did the comparison.
+   */
+  readonly txValueWei: bigint;
 }
 
 export type MintPlanFireDecision =
@@ -107,6 +115,12 @@ export function canFireMintPlan(input: MintPlanFireCheck, now: Date): MintPlanFi
   }
   if (input.spentWei >= input.perPlanCeilingWei) {
     return { ok: false, reason: "per-plan spend ceiling already reached" };
+  }
+  if (input.spentWei + input.txValueWei > input.perPlanCeilingWei) {
+    return {
+      ok: false,
+      reason: "transaction value exceeds the per-plan spend ceiling",
+    };
   }
   return { ok: true };
 }

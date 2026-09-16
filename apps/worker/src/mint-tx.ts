@@ -28,10 +28,31 @@ export interface BuiltMintTx {
  * cached and claim-time builds can never diverge.
  */
 /** OpenSea `/mint` answers that mean "stop polling — this will never sign". */
+/**
+ * OpenSea `/mint` answers that are terminal for the WHOLE DROP — no quantity,
+ * no wallet, and no amount of waiting changes them.
+ */
 export function isTerminalMintBuildError(message: string): boolean {
-  return /minted out|sold out|insufficient balance|max.*per wallet|already minted|exceeds/i.test(
-    message,
-  );
+  return /minted out|sold out|insufficient balance/i.test(message);
+}
+
+/**
+ * OpenSea refusing THIS WALLET AT THIS QUANTITY — not the drop, and not the
+ * plan.
+ *
+ * max_per_wallet on SeaDrop is cumulative across every phase, so a wallet
+ * that already took 1 on a GTD phase gets "exceeds max per wallet" when it
+ * asks for 2 on the FCFS phase — while a request for 1 would have succeeded.
+ * Treating that as terminal threw away a mint the operator was entitled to.
+ * It is also what a still-active EARLIER phase answers about a plan aimed at
+ * a LATER one, before the phase the operator actually wants has opened.
+ *
+ * So this is never terminal on its own: inside the burst it must not stop the
+ * polling (the phase may yet flip), and at the caller it is the signal to
+ * rebuild at a smaller quantity.
+ */
+export function isPerWalletLimitError(message: string): boolean {
+  return /max(?:imum)?[^.]{0,40}per wallet|already minted|exceeds/i.test(message);
 }
 
 /**
@@ -123,7 +144,13 @@ export async function burstBuildOpenSeaMintTx(
           if (/429|rate limit/i.test(message)) {
             penalized.set(idx, Date.now() + 1_500);
           }
-          if (isTerminalMintBuildError(message)) {
+          // A per-wallet-limit answer must NOT stop the burst. Before the
+          // target phase opens, OpenSea answers about whichever phase is
+          // active now — so this is routinely a statement about a DIFFERENT
+          // phase, and aborting here permanently failed a plan whose phase
+          // had not opened yet. Keep polling; the caller decides what to do
+          // with it once the burst returns.
+          if (isTerminalMintBuildError(message) && !isPerWalletLimitError(message)) {
             finish(() => reject(error instanceof Error ? error : new Error(message)));
           }
         })

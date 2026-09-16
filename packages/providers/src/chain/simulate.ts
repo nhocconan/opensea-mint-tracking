@@ -7,12 +7,40 @@
  */
 import { type Address, createPublicClient, http } from "viem";
 
+/**
+ * RPC budget for the fire path (ADR 0009 competitiveness). viem's default is
+ * a 10s timeout, and with `retryCount: 1` a single hung endpoint can block
+ * for ~20s — the fire "continue window" is only MINT_FIRE_CONTINUE_MS (4s),
+ * so one unhealthy RPC would eat the entire mint window. 800ms, no retry:
+ * losing a slow endpoint fast is strictly better than waiting for it, and
+ * the broadcast path races several endpoints anyway.
+ *
+ * NOT read from @hoodmint/config here: packages/providers does not depend on
+ * @hoodmint/config (adding that dependency would mean editing package.json
+ * and would pull env parsing into a package imported by apps/web). The
+ * matching env var MINT_RPC_TIMEOUT_MS exists in packages/config with the
+ * same default, for a caller that wants to override via `timeoutMs`.
+ */
+/**
+ * Default read budget. Was 800ms; raised after the 2026-09-15 21:00 GTD,
+ * where `eth_getTransactionCount` exceeded 800ms TWICE at the open — the
+ * public Robinhood RPC is saturated at exactly the instant every bot on the
+ * chain is minting. A short budget does not make a slow endpoint fast; it
+ * converts a slow success into a hard failure and forfeits the attempt.
+ * The fire path no longer has a read on its critical path anyway (fees and
+ * nonce are prefetched during the signature burst), so a longer budget costs
+ * latency nowhere and buys resilience where it was losing races.
+ */
+export const DEFAULT_RPC_TIMEOUT_MS = 2_500;
+
 export interface SimulateTransactionInput {
   readonly rpcUrl: string;
   readonly from: string;
   readonly to: string;
   readonly data: string;
   readonly valueWei: string;
+  /** Override the RPC budget (ms). Defaults to DEFAULT_RPC_TIMEOUT_MS. */
+  readonly timeoutMs?: number;
 }
 
 export type SimulationResult =
@@ -37,7 +65,12 @@ export function extractRevertReason(error: unknown): string {
 export async function simulateTransaction(
   input: SimulateTransactionInput,
 ): Promise<SimulationResult> {
-  const client = createPublicClient({ transport: http(input.rpcUrl, { retryCount: 1 }) });
+  const client = createPublicClient({
+    transport: http(input.rpcUrl, {
+      retryCount: 0,
+      timeout: input.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS,
+    }),
+  });
   const call = {
     account: input.from as Address,
     to: input.to as Address,

@@ -1,7 +1,9 @@
+import { can } from "@hoodmint/auth";
 import { eligibilityForProject, getProjectDetail, recentMintEvents } from "@hoodmint/db";
 import type { NextRequest } from "next/server";
 import { envelope, problem, problemFromError } from "@/lib/api.ts";
 import { container } from "@/lib/container.ts";
+import { getSessionUser } from "@/lib/session.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -18,8 +20,17 @@ export async function GET(
     if (detail === undefined) {
       return problem(404, "not_found", `project ${id} not found`, correlationId);
     }
+    // `eligibility` carries tracked-wallet ADDRESSES, their labels and how
+    // many each may mint. This endpoint had no session check at all, and
+    // /api/v1/projects hands out project ids to anonymous callers — so a
+    // crawl of the list followed by one GET per id harvested every burner
+    // address, its label, and its mint intent ahead of each drop. The rest
+    // of the payload (public drop metadata) stays open; only the wallet half
+    // is gated, using the same guard as /api/v1/exports.
+    const user = await getSessionUser();
+    const mayReadWallets = can(user?.role, "exports:read");
     const [eligibility, mints] = await Promise.all([
-      eligibilityForProject(db, id),
+      mayReadWallets ? eligibilityForProject(db, id) : Promise.resolve([]),
       recentMintEvents(db, id, 25),
     ]);
     return envelope({

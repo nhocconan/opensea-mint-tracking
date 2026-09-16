@@ -475,3 +475,47 @@ async function refreshProjectSocials(
 }
 
 export const DISCOVERY_QUEUE = QUEUE_NAMES.discovery;
+
+/**
+ * Refresh the drop detail for every project that has an ARMED mint plan.
+ *
+ * Runs regardless of PUBLIC_SCAN_ENABLED, on purpose. On 2026-09-15 the
+ * public-scan switch was turned off to conserve OpenSea quota, which also
+ * silenced `live-next-refresh` — the only job that re-reads a live drop's
+ * phase schedule. Three hours later OpenSea moved the exit-founders phases
+ * back by an hour; the worker never learned, fired at the old time, and
+ * OpenSea answered "Wallet is not eligible for the active drop stage" for
+ * twelve seconds because the stage it considered active was still the
+ * previous one. Saving quota must never blind the system to the schedule of
+ * the very mint it is about to fire.
+ *
+ * Deliberately narrow: only projects with an armed plan, only when the fire
+ * target is near, so the cost is a handful of calls an hour rather than a
+ * sweep of the whole radar.
+ */
+export async function refreshArmedPlanDetails(
+  ctx: WorkerContext,
+  horizonMs = 6 * 60 * 60_000,
+): Promise<number> {
+  const { db, config, log } = ctx;
+  const rows = await db.execute(sql`
+    select distinct p.slug
+      from mint_plans mp
+      join projects p on p.id = mp.project_id
+      left join drop_stages s on s.id = mp.stage_id
+     where mp.status in ('armed', 'draft')
+       and p.slug is not null
+       and coalesce(mp.fire_at, s.starts_at, mp.armed_at)
+           <= now() + ${`${Math.round(horizonMs / 1000)} seconds`}::interval
+  `);
+  const slugs = unwrapRows<{ slug: string }>(rows)
+    .map((r) => r.slug)
+    .filter((s): s is string => typeof s === "string" && s !== "");
+  for (const slug of slugs) {
+    await enqueueDetail(config.VALKEY_URL, { slug, freshnessBucket: "hot" }).catch(() => undefined);
+  }
+  if (slugs.length > 0) {
+    log.info({ slugs: slugs.length }, "armed-plan detail refresh enqueued");
+  }
+  return slugs.length;
+}

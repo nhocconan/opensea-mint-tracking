@@ -106,3 +106,30 @@ describe("parseRateLimitHeaders", () => {
     });
   });
 });
+
+describe("reserve floor vs true exhaustion", () => {
+  // These must stay distinguishable: the mint path is allowed to spend the
+  // reserve floor (that is what the floor is for), but must not attempt a
+  // call when the key genuinely has nothing left.
+  it("reports the voluntary floor as reserve-reached", () => {
+    const decision = allowedRequests({
+      remaining: 5,
+      limitPerHour: 100,
+      reservePercent: 10,
+      resetAtEpochSeconds: null,
+    });
+    expect(decision.blocked).toBe(true);
+    expect(decision.reason).toBe("reserve-reached");
+  });
+
+  it("reports a genuinely empty key as exhausted, not reserve-reached", () => {
+    const decision = allowedRequests({
+      remaining: 0,
+      limitPerHour: 100,
+      reservePercent: 10,
+      resetAtEpochSeconds: null,
+    });
+    expect(decision.blocked).toBe(true);
+    expect(decision.reason).toBe("exhausted");
+  });
+});

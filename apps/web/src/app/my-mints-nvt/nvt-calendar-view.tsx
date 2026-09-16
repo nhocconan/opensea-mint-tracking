@@ -215,7 +215,9 @@ export function NvtCalendarView({
                       <div className="flex items-center gap-2">
                         {mint.links.opensea || mint.slug ? (
                           <a
-                            href={mint.links.opensea || `https://opensea.io/collection/${mint.slug}`}
+                            href={
+                              mint.links.opensea || `https://opensea.io/collection/${mint.slug}`
+                            }
                             target="_blank"
                             rel="noreferrer noopener"
                             className="rounded-sm border border-cyan/50 bg-cyan/15 px-3 py-1.5 text-xs font-semibold text-cyan hover:bg-cyan/25 inline-flex items-center gap-1"

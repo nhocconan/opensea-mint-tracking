@@ -50,9 +50,16 @@ export function stageTypeToKind(stageType: string): StageKind {
   if (mapped !== undefined) {
     return mapped;
   }
-  if (raw.includes("public") || raw.includes("open")) {
-    return "public";
-  }
+  // Order here is a safety property, not style. A restricted stage that
+  // lands on "public" makes isRestrictedStage() false, which skips the
+  // eligibility check outright and presents an FCFS/allowlist phase to the
+  // operator as an open public mint. The opposite error only costs a
+  // redundant check. So every restriction marker is tested BEFORE the public
+  // markers, and an ambiguous type falls through to "unknown" — which
+  // isRestrictedStage already treats as restricted — never to "public".
+  // Found live 2026-09-15: a stage_type containing "open" (fcfs_open,
+  // wl_open, open_edition) returned "public" because the public branch ran
+  // first, and "fcfs" was not a marker in any branch.
   if (raw.includes("gtd") || raw.includes("guarantee")) {
     return "gtd";
   }
@@ -62,11 +69,17 @@ export function stageTypeToKind(stageType: string): StageKind {
   if (
     raw.includes("presale") ||
     raw.includes("allowlist") ||
+    raw.includes("allow_list") ||
     raw.includes("signed") ||
     raw.includes("whitelist") ||
-    raw.includes("wl")
+    raw.includes("fcfs") ||
+    /(?:^|[^a-z])wl(?:[^a-z]|$)/.test(raw)
   ) {
     return "allowlist";
+  }
+  // Only with no restriction marker present may this be called public.
+  if (raw.includes("public") || raw.includes("open")) {
+    return "public";
   }
   return "unknown";
 }

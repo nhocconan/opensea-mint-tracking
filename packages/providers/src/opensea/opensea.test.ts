@@ -125,6 +125,37 @@ describe("schema parsing", () => {
     expect(stageTypeToKind("gtd")).toBe("gtd");
     expect(stageTypeToKind("weird-new-type")).toBe("unknown");
   });
+
+  // Regression, found live 2026-09-15 on rare-friends-genesis: an FCFS
+  // allowlist phase was presented as a public mint because the public/open
+  // substring branch ran before the restriction branch, so isRestrictedStage()
+  // was false and the eligibility check never ran.
+  it("never calls a restricted stage public — restriction markers win over open/public", () => {
+    expect(stageTypeToKind("fcfs_open")).toBe("allowlist");
+    expect(stageTypeToKind("wl_open")).toBe("allowlist");
+    expect(stageTypeToKind("allowlist_open_edition")).toBe("allowlist");
+    expect(stageTypeToKind("fcfs")).toBe("allowlist");
+    expect(stageTypeToKind("WL FCFS")).toBe("allowlist");
+    expect(stageTypeToKind("signed_presale_open")).toBe("allowlist");
+    expect(stageTypeToKind("holders_open")).toBe("community");
+    expect(stageTypeToKind("gtd_open")).toBe("gtd");
+  });
+
+  it("still recognises a genuinely public stage", () => {
+    expect(stageTypeToKind("signed_public")).toBe("public");
+    expect(stageTypeToKind("public")).toBe("public");
+    expect(stageTypeToKind("open")).toBe("public");
+    expect(stageTypeToKind("open_edition")).toBe("public");
+    expect(stageTypeToKind("public_open_sale")).toBe("public");
+  });
+
+  // "wl" must match as a token, not as any substring, or "bowl"/"growl"
+  // style labels would be forced restricted for no reason.
+  it("matches wl as a token rather than a bare substring", () => {
+    expect(stageTypeToKind("crawl")).toBe("unknown");
+    expect(stageTypeToKind("wl")).toBe("allowlist");
+    expect(stageTypeToKind("holders-wl")).toBe("community");
+  });
 });
 
 describe("OpenSeaClient", () => {

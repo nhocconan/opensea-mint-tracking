@@ -158,6 +158,13 @@ export async function runEligibilityPass(
       }
       const verdict = classifyEligibility({ checks: results, authAvailable: true });
 
+      // The JWT speaks for exactly ONE wallet. Attribute its answer to that
+      // wallet only; anyone else gets AUTH_REQUIRED, never a copied verdict.
+      const patAddress = ctx.config.OPENSEA_PAT_WALLET_ADDRESS?.toLowerCase();
+      const thisWallet = walletById.get(first.walletId);
+      const speaksForThisWallet =
+        patAddress !== undefined && thisWallet?.address.toLowerCase() === patAddress;
+
       const stageById = new Map(stageRows.map((s) => [normalizeStageId(s.providerStageId), s]));
       for (const stage of parsed.stages) {
         const stageRow = stageById.get(normalizeStageId(stage.stage_uuid));
@@ -167,9 +174,14 @@ export async function runEligibilityPass(
         const stageVerdict =
           stageRow.type === "public"
             ? "PUBLIC_ONLY"
-            : stage.is_eligible
-              ? "ELIGIBLE_RESTRICTED"
-              : "INELIGIBLE_RESTRICTED";
+            : !speaksForThisWallet
+              ? // We asked OpenSea as a DIFFERENT wallet. We genuinely do not
+                // know this one's allowlist status, and saying so is the only
+                // honest answer.
+                "AUTH_REQUIRED"
+              : stage.is_eligible
+                ? "ELIGIBLE_RESTRICTED"
+                : "INELIGIBLE_RESTRICTED";
         await upsertEligibilityCheck(db, {
           walletId: first.walletId,
           projectId: first.projectId,
@@ -183,7 +195,7 @@ export async function runEligibilityPass(
         metrics().inc("hoodmint_eligibility_verdicts_total", { status: stageVerdict });
 
         // Restricted hit → deduped alert through the outbox (PRD §7.4).
-        if (stageRow.type !== "public" && stage.is_eligible) {
+        if (stageRow.type !== "public" && stage.is_eligible && speaksForThisWallet) {
           eligibleCount += 1;
           const wallet = walletById.get(first.walletId);
           const dedupeKey = alertDedupeKey({

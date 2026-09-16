@@ -1,10 +1,12 @@
 "use client";
 
 import { mintSpendCeilingWei } from "@hoodmint/core";
+import { EligibilityChip } from "@hoodmint/ui";
 import { useActionState, useMemo, useState } from "react";
 import { type ActionState, createSpecialMintAction } from "@/app/actions.ts";
 import { Countdown } from "@/components/feed-parts.tsx";
 import { formatBalance, formatDateTimeGmt7, formatPrice } from "@/lib/format.ts";
+import { type RemainingAllowance, remainingAllowance } from "@/lib/mint-allowance.ts";
 import { gmt7LocalToUtc, utcToGmt7LocalInput } from "@/lib/mint-target.ts";
 
 export interface StageOption {
@@ -15,6 +17,12 @@ export interface StageOption {
   readonly startsAt: string;
   readonly endsAt: string | null;
   readonly maxPerWallet: number | null;
+  /** OpenSea re-issued this phase under a new id — its times are stale. */
+  readonly paused: boolean;
+  /** When this phase row was last written by the worker (provenance). */
+  readonly observedAt: string;
+  /** Computed server-side so the label cannot drift on hydration. */
+  readonly stale: boolean;
 }
 
 export interface ManagedWalletOption {
@@ -24,6 +32,12 @@ export interface ManagedWalletOption {
   /** Worker-owned native balance snapshot (wei string) + when it was read. */
   readonly nativeBalanceWei: string | null;
   readonly balanceCheckedAt: string | null;
+  /** max(confirmed, broadcast) — what counts against the cumulative cap. */
+  readonly alreadyMinted: number;
+  /** Indexed on-chain mints (mint_events) for this drop. */
+  readonly confirmedMinted: number;
+  /** Plans already fired for this drop; may not be indexed on-chain yet. */
+  readonly broadcastMinted: number;
 }
 
 const initial: ActionState = { ok: false, message: "" };
@@ -56,15 +70,19 @@ export function SpecialMintForm({
   stages,
   wallets,
   initialStageId,
+  eligibilityByStage,
 }: {
   projectId: string;
   stages: StageOption[];
   wallets: ManagedWalletOption[];
   initialStageId: string | null;
+  /** stageId → walletId → EligibilityState, resolved per exact phase. */
+  eligibilityByStage: Record<string, Record<string, string>>;
 }) {
-  const selectedInitialStage = stages.some((stage) => stage.id === initialStageId)
+  const selectable = stages.filter((s) => !s.paused);
+  const selectedInitialStage = selectable.some((stage) => stage.id === initialStageId)
     ? (initialStageId ?? "")
-    : (stages[0]?.id ?? "");
+    : (selectable[0]?.id ?? "");
   const [stageId, setStageId] = useState<string>(selectedInitialStage);
   const [manualFire, setManualFire] = useState(false);
   const [fireAtGmt7, setFireAtGmt7] = useState<string>("");
@@ -74,7 +92,36 @@ export function SpecialMintForm({
   const [ceilingWei, setCeilingWei] = useState<string>("");
 
   const stage = stages.find((s) => s.id === stageId);
-  const maxQuantity = selected.reduce((max, id) => Math.max(max, quantities[id] ?? 1), 1);
+  // `max_per_wallet` is CUMULATIVE across the whole drop, so what matters per
+  // wallet is cap − already minted. The server re-derives all of this and is
+  // the real gate; this is the preview that stops the operator typing a
+  // quantity that will only be clamped.
+  const allowances = useMemo(() => {
+    const byWallet: Record<string, RemainingAllowance> = {};
+    for (const w of wallets) {
+      byWallet[w.id] = remainingAllowance({
+        maxPerWallet: stage?.maxPerWallet ?? null,
+        alreadyMinted: w.alreadyMinted,
+        requested: quantities[w.id] ?? 1,
+      });
+    }
+    return byWallet;
+  }, [wallets, stage, quantities]);
+  const effectiveQuantity = (id: string): number => {
+    const allowance = allowances[id];
+    return allowance === undefined ? (quantities[id] ?? 1) : Math.max(0, allowance.effective);
+  };
+  const capFor = (id: string): number =>
+    Math.min(MAX_QUANTITY, allowances[id]?.remaining ?? MAX_QUANTITY);
+  const selectableWallets = wallets.filter((w) => allowances[w.id]?.exhausted !== true);
+  // A wallet can become exhausted after it was ticked (the operator switched
+  // phase); it is dropped from the submit rather than sent to be refused.
+  const activeSelection = selected.filter((id) => allowances[id]?.exhausted !== true);
+  const clamped = activeSelection.filter((id) => allowances[id]?.clamped === true);
+  const noRoom = wallets.filter((w) => allowances[w.id]?.exhausted === true);
+  const stageEligibility = stage === undefined ? undefined : eligibilityByStage[stage.id];
+  const restrictedStage = stage !== undefined && stage.kind !== "public";
+  const maxQuantity = activeSelection.reduce((max, id) => Math.max(max, effectiveQuantity(id)), 1);
   const suggestedCeiling = defaultCeilingWei(stage?.priceWei ?? null, maxQuantity);
   const effectiveCeiling = ceilingTouched ? ceilingWei : suggestedCeiling;
 
@@ -94,7 +141,12 @@ export function SpecialMintForm({
         projectId,
         stageId: String(formData.get("stageId") ?? ""),
         fireAtGmt7: manualFire ? fireAtGmt7 : "",
-        wallets: selected.map((walletId) => ({ walletId, quantity: quantities[walletId] ?? 1 })),
+        // Already clamped to each wallet's remainder for clarity; the server
+        // clamps again — a client-side number is never the gate.
+        wallets: activeSelection.map((walletId) => ({
+          walletId,
+          quantity: Math.max(1, effectiveQuantity(walletId)),
+        })),
         perPlanCeilingWei: String(formData.get("perPlanCeilingWei") ?? ""),
       }),
     initial,
@@ -112,7 +164,8 @@ export function SpecialMintForm({
     }
   };
 
-  const allSelected = wallets.length > 0 && selected.length === wallets.length;
+  // "Select all" means every wallet that still has room on this drop.
+  const allSelected = selectableWallets.length > 0 && selected.length === selectableWallets.length;
 
   return (
     <form action={formAction} className="space-y-3">
@@ -130,13 +183,16 @@ export function SpecialMintForm({
           {stages.map((s) => (
             <label
               key={s.id}
-              className="flex flex-wrap items-center gap-2 rounded-sm border border-line bg-base px-2 py-1.5 text-xs"
+              className={`flex flex-wrap items-center gap-2 rounded-sm border border-line bg-base px-2 py-1.5 text-xs ${
+                s.paused ? "opacity-60" : ""
+              }`}
             >
               <input
                 type="radio"
                 name="stageId"
                 value={s.id}
                 checked={stageId === s.id}
+                disabled={s.paused}
                 onChange={() => pickStage(s.id)}
               />
               <span className="font-mono text-ink">{s.label}</span>
@@ -151,7 +207,24 @@ export function SpecialMintForm({
                 </span>
               ) : null}
               {s.maxPerWallet !== null ? (
-                <span className="font-mono text-ink-faint">max {s.maxPerWallet}/wallet</span>
+                <span
+                  className="font-mono text-ink-faint"
+                  title="Cumulative across every phase of this drop — a wallet that already minted has less than this left."
+                >
+                  max {s.maxPerWallet}/wallet (cumulative)
+                </span>
+              ) : null}
+              {/* Provenance: these are stored phase rows, not a live read. */}
+              <span
+                className={`font-mono text-[10px] ${s.stale ? "text-amber" : "text-ink-faint"}`}
+                title="When this phase row was last refreshed from OpenSea"
+              >
+                {s.stale ? "⚠ STALE · " : ""}as of {formatDateTimeGmt7(s.observedAt)}
+              </span>
+              {s.paused ? (
+                <span className="font-mono text-[10px] text-amber uppercase">
+                  ⚠ Superseded — re-resolve the target
+                </span>
               ) : null}
             </label>
           ))}
@@ -227,60 +300,112 @@ export function SpecialMintForm({
         </h2>
         <div className="mt-2 mb-1 flex items-center justify-between">
           <span className="text-[11px] text-ink-muted">
-            Managed wallets only — {selected.length} selected
+            Managed wallets only — {activeSelection.length} selected
           </span>
           <button
             type="button"
-            onClick={() => setSelected(allSelected ? [] : wallets.map((w) => w.id))}
-            disabled={wallets.length === 0}
+            onClick={() => setSelected(allSelected ? [] : selectableWallets.map((w) => w.id))}
+            disabled={selectableWallets.length === 0}
             className="font-mono text-[11px] text-cyan hover:underline disabled:opacity-50"
           >
             {allSelected ? "Deselect all" : "Select all"}
           </button>
         </div>
         <div className="max-h-64 space-y-1 overflow-y-auto rounded-sm border border-line bg-base p-2">
-          {wallets.map((w) => (
-            <div key={w.id} className="flex items-center gap-2 text-sm">
-              <label className="flex flex-1 items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(w.id)}
-                  onChange={() => toggleWallet(w.id)}
-                />
-                <span className="font-mono text-xs">{w.label ?? w.address}</span>
-                {w.label !== null ? (
-                  <span className="font-mono text-[10px] text-ink-faint">{w.address}</span>
-                ) : null}
-                <span
-                  className={`ml-auto font-mono text-[10px] ${
-                    underfunded(w, stage?.priceWei ?? null, quantities[w.id] ?? 1)
-                      ? "text-magenta"
-                      : "text-ink-faint"
-                  }`}
-                  title="Native balance (worker snapshot). Arming refuses a wallet that cannot cover price × qty + OpenSea fee + gas."
-                >
-                  {formatBalance(w.nativeBalanceWei, w.balanceCheckedAt)}
-                </span>
-              </label>
-              <label className="flex items-center gap-1">
-                <span className="text-[10px] text-ink-faint uppercase">Qty</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={MAX_QUANTITY}
-                  value={quantities[w.id] ?? 1}
-                  aria-label={`Quantity for ${w.label ?? w.address}`}
-                  onChange={(e) =>
-                    setQuantities((prev) => ({
-                      ...prev,
-                      [w.id]: Number.parseInt(e.target.value, 10) || 1,
-                    }))
-                  }
-                  className="w-16 rounded-xs border border-line bg-base px-1.5 py-0.5 font-mono text-xs"
-                />
-              </label>
-            </div>
-          ))}
+          {wallets.map((w) => {
+            const allowance = allowances[w.id];
+            const noRoomLeft = allowance?.exhausted === true;
+            const walletCap = capFor(w.id);
+            // Broadcast but not yet indexed: the chain worker writes
+            // mint_events on its own cadence, so a mint fired seconds ago
+            // shows up here before it shows up on-chain. Label it as such
+            // rather than presenting it as confirmed.
+            const pendingIndex = Math.max(0, w.broadcastMinted - w.confirmedMinted);
+            return (
+              <div
+                key={w.id}
+                className={`flex items-center gap-2 text-sm ${noRoomLeft ? "opacity-70" : ""}`}
+              >
+                <label className="flex flex-1 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(w.id)}
+                    disabled={noRoomLeft}
+                    onChange={() => toggleWallet(w.id)}
+                  />
+                  <span className="font-mono text-xs">{w.label ?? w.address}</span>
+                  {w.label !== null ? (
+                    <span className="font-mono text-[10px] text-ink-faint">{w.address}</span>
+                  ) : null}
+                  {/* Eligibility for the SELECTED phase only — a hit on
+                    another phase is not a hit here. A public phase is open
+                    to everyone and is never shown as a whitelist hit. */}
+                  {stage === undefined ? null : restrictedStage ? (
+                    <EligibilityChip state={stageEligibility?.[w.id] ?? "UNKNOWN"} />
+                  ) : (
+                    <span
+                      className="rounded-xs border border-cyan/40 px-1 font-mono text-[10px] text-cyan uppercase"
+                      title="Public phase — open to everyone, not a whitelist hit"
+                    >
+                      Public — everyone eligible
+                    </span>
+                  )}
+                  {/* Remaining allowance on the DROP, not on this phase:
+                    max_per_wallet is cumulative, so a wallet that already
+                    minted earlier has less room here. Server re-derives and
+                    enforces this; the chip only makes it visible. */}
+                  {allowance?.capKnown === true ? (
+                    <span
+                      className={`rounded-xs border px-1 font-mono text-[10px] ${
+                        noRoomLeft
+                          ? "border-magenta/40 text-magenta"
+                          : allowance.clamped
+                            ? "border-amber/40 text-amber"
+                            : "border-line text-ink-faint"
+                      }`}
+                      title="max_per_wallet is cumulative across every phase of this drop. Minted = on-chain mint_events for this collection (plus plans already broadcast but not yet indexed)."
+                    >
+                      {noRoomLeft
+                        ? `NO ROOM — ${allowance.alreadyMinted}/${allowance.maxPerWallet} minted`
+                        : `minted ${allowance.alreadyMinted} · left ${allowance.remaining} · using ${allowance.effective}`}
+                      {pendingIndex > 0 ? ` · ${pendingIndex} broadcast, not indexed yet` : ""}
+                    </span>
+                  ) : null}
+                  <span
+                    className={`ml-auto font-mono text-[10px] ${
+                      underfunded(w, stage?.priceWei ?? null, effectiveQuantity(w.id))
+                        ? "text-magenta"
+                        : "text-ink-faint"
+                    }`}
+                    title="Native balance (worker snapshot). Arming refuses a wallet that cannot cover price × qty + OpenSea fee + gas."
+                  >
+                    {formatBalance(w.nativeBalanceWei, w.balanceCheckedAt)}
+                  </span>
+                </label>
+                <label className="flex items-center gap-1">
+                  <span className="text-[10px] text-ink-faint uppercase">Qty</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={Math.max(1, walletCap)}
+                    disabled={noRoomLeft}
+                    value={quantities[w.id] ?? 1}
+                    aria-label={`Quantity for ${w.label ?? w.address}`}
+                    aria-invalid={allowance?.clamped === true}
+                    onChange={(e) =>
+                      setQuantities((prev) => ({
+                        ...prev,
+                        [w.id]: Math.max(1, Number.parseInt(e.target.value, 10) || 1),
+                      }))
+                    }
+                    className={`w-16 rounded-xs border bg-base px-1.5 py-0.5 font-mono text-xs ${
+                      allowance?.clamped === true ? "border-amber" : "border-line"
+                    }`}
+                  />
+                </label>
+              </div>
+            );
+          })}
           {wallets.length === 0 ? (
             <p className="text-xs text-ink-faint">
               No managed wallets — import a minting key on Admin → Wallets first.
@@ -303,12 +428,25 @@ export function SpecialMintForm({
             className="w-full rounded-sm border border-line bg-base px-3 py-2 font-mono text-sm"
           />
         </label>
+        {clamped.length > 0 && stage !== undefined ? (
+          <p role="status" className="mt-2 text-xs text-amber">
+            Phase “{stage.label}” caps {stage.maxPerWallet} per wallet CUMULATIVELY across this drop
+            — {clamped.length} selected wallet(s) already minted some of that, so their plans are
+            created for what is left, not for the number typed.
+          </p>
+        ) : null}
+        {noRoom.length > 0 && stage !== undefined ? (
+          <p role="status" className="mt-2 text-xs text-ink-muted">
+            {noRoom.length} wallet(s) have already used the full {stage.maxPerWallet} per-wallet
+            allowance on this drop and cannot be selected — every quantity would revert on-chain.
+          </p>
+        ) : null}
         <button
           type="submit"
-          disabled={pending || selected.length === 0}
+          disabled={pending || activeSelection.length === 0}
           className="mt-3 rounded-sm border border-acid/50 bg-acid/15 px-3 py-1.5 font-mono text-xs text-acid hover:bg-acid/25 disabled:opacity-50"
         >
-          {pending ? "Creating…" : `Create ${selected.length} draft plan(s)`}
+          {pending ? "Creating…" : `Create ${activeSelection.length} draft plan(s)`}
         </button>
         {state.message !== "" ? (
           <p

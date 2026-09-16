@@ -55,9 +55,28 @@ describe("decidePresign", () => {
     expect(d).toEqual({ action: "sign", reason: "stale" });
   });
 
-  it("applies the clock offset (chain ahead of local → earlier local window)", () => {
-    // chain-now = local-now + 10s, so local start is 10s earlier than chain start.
-    const d = decidePresign({ ...base, clockOffsetMs: 10_000, localNowMs: 1_000_000 - 50_000 });
+  // clock-offset.ts convention: offset = local − chain ⇒ local = chain + offset
+  // (identical to fire-schedule.ts's chainTimeToLocalMs). Each case below is
+  // chosen to land on the opposite side of the window from the old, inverted
+  // `stageStartChainMs - clockOffsetMs` implementation.
+  it("local clock ahead of chain (+10s) pushes the local window later", () => {
+    // local start = 1_000_000 + 10_000 = 1_010_000; window opens at 965_000.
+    // Old inverted impl put the window at 945_000 and would have said "sign".
+    const d = decidePresign({ ...base, clockOffsetMs: 10_000, localNowMs: 950_000 });
+    expect(d).toEqual({ action: "wait", msUntilWindow: 15_000 });
+  });
+
+  it("local clock behind chain (−10s) pulls the local window earlier", () => {
+    // local start = 1_000_000 − 10_000 = 990_000; window opens at 945_000.
+    // Old inverted impl put the window at 965_000 and would have said "wait".
+    const d = decidePresign({ ...base, clockOffsetMs: -10_000, localNowMs: 950_000 });
+    expect(d).toEqual({ action: "sign", reason: "none" });
+  });
+
+  it("does not expire before the clock-corrected open (+10s offset)", () => {
+    // local start 1_010_000, continue window to 1_014_000 — still signable.
+    // Old inverted impl expired at 994_000, i.e. before the fire window opened.
+    const d = decidePresign({ ...base, clockOffsetMs: 10_000, localNowMs: 1_012_000 });
     expect(d).toEqual({ action: "sign", reason: "none" });
   });
 
@@ -74,6 +93,16 @@ describe("isStalePresignError", () => {
       "replacement transaction underpriced",
       "already known",
       "invalid nonce; got 8, expected 9",
+    ]) {
+      expect(isStalePresignError(m)).toBe(true);
+    }
+  });
+  it("classifies fee-too-low rejections as stale (re-sign, not hard fail)", () => {
+    for (const m of [
+      "max fee per gas less than block base fee: address 0xabc, maxFeePerGas: 1000000, baseFee: 2500000",
+      "err: fee cap less than block base fee",
+      "The fee cap (`maxFeePerGas` = 0.001 gwei) cannot be lower than the block base fee.",
+      "transaction underpriced",
     ]) {
       expect(isStalePresignError(m)).toBe(true);
     }

@@ -40,7 +40,8 @@ export const ADMIN_SECTIONS: readonly AdminNavSection[] = [
     href: "/admin/opensea",
     label: "OpenSea",
     category: "Data & Feeds",
-    description: "OpenSea API keys, wallet Personal Access Tokens (PAT), and allowlist verification",
+    description:
+      "OpenSea API keys, wallet Personal Access Tokens (PAT), and allowlist verification",
     icon: "Flame",
   },
   {
@@ -104,14 +105,16 @@ export const ADMIN_SECTIONS: readonly AdminNavSection[] = [
     href: "/admin/audit",
     label: "Audit log",
     category: "Management",
-    description: "Immutable record of administrative actions, credential changes, and system events",
+    description:
+      "Immutable record of administrative actions, credential changes, and system events",
     icon: "ScrollText",
   },
   {
     href: "/admin/system",
     label: "System",
     category: "Management",
-    description: "System timezone (GMT+7), demo mode toggle, durable notification outbox, and manual scans",
+    description:
+      "System timezone (GMT+7), demo mode toggle, durable notification outbox, and manual scans",
     icon: "Sliders",
   },
   {

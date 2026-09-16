@@ -2,8 +2,11 @@
 
 import {
   AUTO_MINT_POLICY_SETTING_KEY,
+  type EligibilityState,
+  formatDateTimeGmt7,
   isAppError,
   isNotADropMarkerFresh,
+  isRestrictedStage,
   notADropSettingKey,
   parseAutoMintPolicy,
 } from "@hoodmint/core";
@@ -26,6 +29,7 @@ import {
   deleteRpcEndpoint,
   deleteWallet,
   disarmMintPlan,
+  eligibilityStageScopeKey,
   ensureProvider,
   findCredentialByType,
   findCredentialsByType,
@@ -46,13 +50,17 @@ import {
   revokeSigner as revokeSignerRepo,
   scrubKeyTracesForAddress,
   setAlertChannelEnabled,
+  setDraftMintPlanQuantity,
   setRpcEndpointEnabled,
   setSetting,
   setSignerDelegateContract,
   setSignerOnchainCeiling,
   setWalletSigningKey,
   sql,
+  stageWalletCaps,
+  type TrackedWalletEligibility,
   toggleWatch,
+  trackedWalletEligibilityForStages,
   unwrapRows,
   updateCredentialMetadata,
   updateCredentialSecret,
@@ -60,6 +68,8 @@ import {
   updateWallet,
   user as userTable,
   vacuumKeyTables,
+  type WalletDropMintTotals,
+  walletMintTotalsForProject,
   wallets as walletsTable,
 } from "@hoodmint/db";
 import {
@@ -95,7 +105,9 @@ import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { isUuid } from "@/lib/admin-validation.ts";
 import { container } from "@/lib/container.ts";
+import { shortAddress } from "@/lib/format.ts";
 import { checkArmFunding } from "@/lib/funding.ts";
+import { describeAllowance, remainingAllowance } from "@/lib/mint-allowance.ts";
 import { gmt7LocalToUtc, parseMintTarget } from "@/lib/mint-target.ts";
 import { getSessionUser, requireApi, requireFreshStepUp } from "@/lib/session.ts";
 
@@ -2142,10 +2154,19 @@ export async function armMintPlanAction(id: string, windowMinutes: number): Prom
     targetType: "mint_plan",
     targetId: id,
     result: "success",
-    metadata: { windowMinutes },
+    metadata: { windowMinutes, fundingChecked: funding.checked },
   });
   revalidatePath("/admin/execution");
-  return { ok: true, message: `Armed for ${windowMinutes} minute(s).` };
+  // `ok: true` is not the same as "we verified the wallet can pay". When the
+  // RPC is unreachable the gate deliberately does not block the operator —
+  // but presenting that as a clean arm is how a plan reaches the fire instant
+  // over an empty wallet with nothing having warned anyone.
+  return {
+    ok: true,
+    message: funding.checked
+      ? `Armed for ${windowMinutes} minute(s).`
+      : `Armed for ${windowMinutes} minute(s) — FUNDING NOT VERIFIED (${funding.notCheckedReason}). Check the wallet balance yourself before the open.`,
+  };
 }
 
 /** Disarm does not need step-up — it can only ever make things safer, never fire a mint. */
@@ -2268,19 +2289,30 @@ export async function resolveSpecialMintTargetAction(input: {
       result: "success",
       metadata: { kind: target.kind },
     });
-    // Known project but no schedule stored: it was swept before its SeaDrop
-    // stages existed (yolkies-nft, 2026-09-02). Re-ask OpenSea right now
-    // rather than handing the operator an empty phase picker.
-    if (project.lifecycleStatus === "UNKNOWN" && project.slug !== null) {
+    // ALWAYS re-ask OpenSea, not only when zero phases are stored.
+    //
+    // This used to re-fetch only for an UNKNOWN project with no stages at
+    // all, so a project that already held stages returned whatever the DB
+    // had — which, with background discovery now at 30-minute intervals and
+    // the OpenSea quota under pressure, is routinely hours stale. The
+    // operator pasting a URL here is an explicit "tell me the CURRENT
+    // schedule" and it is the highest-value use of the quota we have; a
+    // stale phase time silently arms a plan against a window that has moved.
+    if (project.slug !== null) {
+      await enqueueDetail(config.VALKEY_URL, { slug: project.slug, freshnessBucket: "hot" });
       const known = await projectBySlugWithStageCount(db, project.slug);
       if (known !== undefined && known.stages === 0) {
-        await enqueueDetail(config.VALKEY_URL, { slug: project.slug, freshnessBucket: "hot" });
         return {
           ok: true,
           message: `Resolved "${project.name}", but no mint phases are stored yet — re-fetching the schedule from OpenSea now. Reload this page in ~30s; if phases still do not appear, OpenSea has no drop published for it (yet).`,
           projectId: project.id,
         };
       }
+      return {
+        ok: true,
+        message: `Resolved "${project.name}". The phases below are what is CURRENTLY STORED — a fresh fetch from OpenSea was just queued, so reload in ~30s before arming and check the "as of" age on each phase. If OpenSea publishes no schedule for this drop, set the open time yourself with "No phase — manual fire time only".`,
+        projectId: project.id,
+      };
     }
     return { ok: true, message: `Resolved "${project.name}".`, projectId: project.id };
   }
@@ -2362,11 +2394,12 @@ export async function createSpecialMintAction(input: {
   // Stage (optional): must belong to the chosen project.
   const stageIdRaw = input.stageId?.trim() ?? "";
   let stageId: string | undefined;
+  let stage: Awaited<ReturnType<typeof getDropStage>>;
   if (stageIdRaw !== "") {
     if (!isUuid(stageIdRaw)) {
       return { ok: false, message: "Invalid stage selection." };
     }
-    const stage = await getDropStage(db, stageIdRaw);
+    stage = await getDropStage(db, stageIdRaw);
     if (stage === undefined || stage.projectId !== input.projectId) {
       return { ok: false, message: "Selected stage does not belong to the chosen collection." };
     }
@@ -2380,6 +2413,15 @@ export async function createSpecialMintAction(input: {
     const converted = gmt7LocalToUtc(fireAtRaw);
     if (converted === null) {
       return { ok: false, message: "Manual fire time must be a real date/time (GMT+7)." };
+    }
+    // A fire instant already in the past would arm and fire on the very next
+    // hot-loop tick against a phase that is not open — exactly what a
+    // mistyped 08:30 instead of 20:30 produces. Refuse at creation.
+    if (converted.getTime() <= Date.now()) {
+      return {
+        ok: false,
+        message: `Manual fire time is in the past (${formatDateTimeGmt7(converted)}). Type the open instant in GMT+7 — a plan can only be created for a future fire time.`,
+      };
     }
     fireAt = converted;
   }
@@ -2438,8 +2480,70 @@ export async function createSpecialMintAction(input: {
     };
   }
 
+  // `drop_stages.max_per_wallet` is a CUMULATIVE cap across the whole drop
+  // (SeaDrop checks minterNumMinted + quantity), not a per-phase allowance:
+  // a wallet that already took 1 on the GTD phase has 1 left on a "max 2"
+  // FCFS phase. Measure the request against what is LEFT and CLAMP to it —
+  // refusing a plan the operator is still entitled to costs them the mint.
+  // One query for the whole batch; a read failure clamps nothing (the arm
+  // path re-checks with real money still on the table).
+  // The cap SeaDrop enforces is OpenSea's max_total_mintable_by_wallet, kept
+  // on eligibility_checks. drop_stages.max_per_wallet is a different field
+  // from the /drops feed and reads 1 for every stage of every drop, which
+  // made this clamp refuse mints the operator was entitled to. Fall back to
+  // it only when eligibility has nothing for this wallet.
+  const stageCaps =
+    stage === undefined ? new Map<string, number>() : await stageWalletCaps(db, stage.id);
+  const capFor = (walletId: string): number | null =>
+    stageCaps.get(walletId) ?? stage?.maxPerWallet ?? null;
+  const phaseCap = stage?.maxPerWallet ?? null;
+  const notices: string[] = [];
+  let planned = selections.map((s) => ({ ...s, requested: s.quantity, alreadyMinted: 0 }));
+  if (phaseCap !== null || stageCaps.size > 0) {
+    const totals = await walletMintTotalsForProject(db, input.projectId).catch(
+      () => new Map<string, WalletDropMintTotals>(),
+    );
+    const usable: typeof planned = [];
+    const exhausted: string[] = [];
+    for (const selection of selections) {
+      const totalsForWallet = totals.get(selection.walletId);
+      const allowance = remainingAllowance({
+        maxPerWallet: capFor(selection.walletId),
+        alreadyMinted: totalsForWallet?.alreadyMinted ?? 0,
+        requested: selection.quantity,
+      });
+      const label =
+        totalsForWallet === undefined ? "wallet" : shortAddress(totalsForWallet.address);
+      if (allowance.exhausted) {
+        exhausted.push(`${label}: ${describeAllowance(allowance, "created for")}`);
+        continue;
+      }
+      if (allowance.clamped) {
+        notices.push(`${label}: ${describeAllowance(allowance, "created for")}`);
+      }
+      usable.push({
+        walletId: selection.walletId,
+        quantity: allowance.effective,
+        requested: allowance.requested,
+        alreadyMinted: allowance.alreadyMinted,
+      });
+    }
+    if (usable.length === 0) {
+      return {
+        ok: false,
+        message: `No plan created — every selected wallet has already used its allowance on this drop. ${exhausted.join(" · ")}`,
+      };
+    }
+    if (exhausted.length > 0) {
+      notices.push(
+        `${exhausted.length} wallet(s) skipped with nothing left on this drop — ${exhausted.join(" · ")}`,
+      );
+    }
+    planned = usable;
+  }
+
   const createdIds: string[] = [];
-  for (const selection of selections) {
+  for (const selection of planned) {
     const created = await createMintPlanRepo(db, {
       projectId: input.projectId,
       walletId: selection.walletId,
@@ -2460,6 +2564,9 @@ export async function createSpecialMintAction(input: {
         walletId: selection.walletId,
         stageId: stageId ?? null,
         quantity: selection.quantity,
+        requestedQuantity: selection.requested,
+        alreadyMintedOnDrop: selection.alreadyMinted,
+        maxPerWallet: phaseCap,
         fireAt: fireAt?.toISOString() ?? null,
         perPlanCeilingWei: input.perPlanCeilingWei,
       },
@@ -2473,45 +2580,165 @@ export async function createSpecialMintAction(input: {
       fireAt === undefined
         ? " (fire time auto-detected from the phase)"
         : " with a manual fire time"
-    }. Not armed yet.`,
+    }. Not armed yet.${notices.length === 0 ? "" : ` ${notices.join(" · ")}`}`,
   };
 }
+
+type SpecialMintArmWindow =
+  | { readonly ok: true; readonly minutes: number }
+  | {
+      readonly ok: false;
+      readonly reason: "no_fire_instant" | "fire_time_passed" | "fire_beyond_arm_window";
+      readonly message: string;
+    };
 
 /**
  * Compute a plan's arm window from the plan's OWN timing, never from a
  * client-supplied number: until the stage ends (capped at 24h) for an
- * auto-detected phase, or the manual fire instant plus a 4h tail. Returns
- * null when the plan has no future fire instant left at all.
+ * auto-detected phase, or the manual fire instant plus a 4h tail.
+ *
+ * Refuses rather than returning a window that cannot work:
+ *  - the fire target is further away than the 24h cap, so the plan would
+ *    EXPIRE before it could ever fire (the window is capped, the fire
+ *    instant is not);
+ *  - the fire target has already passed and the linked phase is not open,
+ *    so arming would fire on the next tick against a closed phase. A live
+ *    phase the operator is deliberately joining late still arms.
  */
-function specialMintArmMinutes(
+function specialMintArmWindow(
   now: number,
   plan: { fireAt: Date | string | null },
   stage: { startsAt: Date | string; endsAt: Date | string | null } | undefined,
-): number | null {
+): SpecialMintArmWindow {
   const ms = (value: Date | string): number =>
     (value instanceof Date ? value : new Date(value)).getTime();
+  const stageOpen =
+    stage !== undefined &&
+    ms(stage.startsAt) <= now &&
+    (stage.endsAt === null || ms(stage.endsAt) > now);
+  // Same precedence as the worker's hot loop: fire_at ?? stage start.
+  const fireTargetMs =
+    plan.fireAt !== null ? ms(plan.fireAt) : stage === undefined ? null : ms(stage.startsAt);
+  if (fireTargetMs === null || !Number.isFinite(fireTargetMs)) {
+    return {
+      ok: false,
+      reason: "no_fire_instant",
+      message: "No fire instant on this plan — pick a phase or type a manual fire time.",
+    };
+  }
+  const maxWindowMs = SPECIAL_MINT_MAX_ARM_MINUTES * 60_000;
+  if (fireTargetMs - now > maxWindowMs) {
+    const hoursAway = Math.round((fireTargetMs - now) / 3_600_000);
+    return {
+      ok: false,
+      reason: "fire_beyond_arm_window",
+      message: `Not armed — fire time is ~${hoursAway}h away (${formatDateTimeGmt7(new Date(fireTargetMs))}) but an arm window is capped at ${SPECIAL_MINT_MAX_ARM_MINUTES / 60}h, so the plan would expire ~${hoursAway - SPECIAL_MINT_MAX_ARM_MINUTES / 60}h before it could fire. Arm again within ${SPECIAL_MINT_MAX_ARM_MINUTES / 60}h of the open.`,
+    };
+  }
+  if (fireTargetMs <= now && !stageOpen) {
+    return {
+      ok: false,
+      reason: "fire_time_passed",
+      message: `Not armed — fire time ${formatDateTimeGmt7(new Date(fireTargetMs))} has already passed and the linked phase is not open. Create a fresh plan with the correct GMT+7 instant.`,
+    };
+  }
   let untilMs: number;
   if (plan.fireAt !== null) {
     // An override wins over the stage everywhere, including here.
     untilMs = ms(plan.fireAt) + MANUAL_FIRE_ARM_TAIL_MS;
   } else if (stage === undefined) {
-    return null;
+    return {
+      ok: false,
+      reason: "no_fire_instant",
+      message: "No fire instant on this plan — pick a phase or type a manual fire time.",
+    };
   } else if (stage.endsAt !== null) {
     untilMs = ms(stage.endsAt);
   } else {
     untilMs = ms(stage.startsAt) + MANUAL_FIRE_ARM_TAIL_MS;
   }
+  if (untilMs - now < 60_000 && stageOpen && stage !== undefined) {
+    // Late join to a live phase: the manual tail has run out but the phase
+    // itself is still open, so arm until it closes.
+    untilMs = stage.endsAt === null ? now + MANUAL_FIRE_ARM_TAIL_MS : ms(stage.endsAt);
+  }
   const minutes = Math.ceil((untilMs - now) / 60_000);
   if (!Number.isFinite(minutes) || minutes < 1) {
-    return null;
+    return {
+      ok: false,
+      reason: "fire_time_passed",
+      message: "Not armed — this plan's window has already closed. Create a fresh plan.",
+    };
   }
-  return Math.min(minutes, SPECIAL_MINT_MAX_ARM_MINUTES);
+  return { ok: true, minutes: Math.min(minutes, SPECIAL_MINT_MAX_ARM_MINUTES) };
+}
+
+/**
+ * Per-wallet eligibility for ONE exact `{ projectId, stageId }` pair
+ * (AGENTS.md anti-pattern #1: a hit from an ended phase is not a hit for
+ * this phase). Memoised per arm batch so a 50-plan batch on one phase stays
+ * a single lookup.
+ */
+async function specialMintEligibilityForStage(
+  db: Db,
+  cache: Map<string, Map<string, EligibilityState>>,
+  projectId: string,
+  stageId: string,
+): Promise<Map<string, EligibilityState>> {
+  const scopeKey = eligibilityStageScopeKey(projectId, stageId);
+  const cached = cache.get(scopeKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const byScope = await trackedWalletEligibilityForStages(db, [{ projectId, stageId }]).catch(
+    () => new Map<string, TrackedWalletEligibility[]>(),
+  );
+  const statuses = new Map<string, EligibilityState>(
+    (byScope.get(scopeKey) ?? []).map((w) => [w.walletId, w.status]),
+  );
+  cache.set(scopeKey, statuses);
+  return statuses;
+}
+
+/**
+ * Already-minted totals for ONE project, memoised per arm batch so a 50-plan
+ * batch on one collection stays a single DB round-trip. A failed read yields
+ * an empty map: an unknown already-minted count must never silently clamp a
+ * plan to zero.
+ */
+async function specialMintMintedTotals(
+  db: Db,
+  cache: Map<string, Map<string, WalletDropMintTotals>>,
+  projectId: string,
+): Promise<Map<string, WalletDropMintTotals>> {
+  const cached = cache.get(projectId);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const totals = await walletMintTotalsForProject(db, projectId).catch(
+    () => new Map<string, WalletDropMintTotals>(),
+  );
+  cache.set(projectId, totals);
+  return totals;
 }
 
 export interface SpecialMintArmResult {
   readonly planId: string;
   readonly ok: boolean;
   readonly message: string;
+  /**
+   * Armed, but something could NOT be verified (balance never read, phase
+   * eligibility unknown). Rendered in the warning color — "not checked" must
+   * never look like "checked and fine".
+   */
+  readonly warnings: readonly string[];
+  /**
+   * Armed, but NOT with what the operator asked for — today only a quantity
+   * clamped down to the wallet's remaining allowance on the drop. A checked
+   * and adjusted plan is not the same thing as an unverified one, so it is
+   * reported separately from `warnings`.
+   */
+  readonly notes?: readonly string[];
 }
 
 export interface SpecialMintArmState extends ActionState {
@@ -2555,23 +2782,43 @@ export async function armSpecialMintPlansAction(planIds: string[]): Promise<Spec
   }
   const now = Date.now();
   const results: SpecialMintArmResult[] = [];
+  const eligibilityCache = new Map<string, Map<string, EligibilityState>>();
+  const mintedCache = new Map<string, Map<string, WalletDropMintTotals>>();
   for (const planId of ids) {
     if (!isUuid(planId)) {
-      results.push({ planId, ok: false, message: "Invalid plan id." });
+      results.push({ planId, ok: false, message: "Invalid plan id.", warnings: [] });
       continue;
     }
     const plan = await getMintPlan(db, planId);
     if (plan === undefined) {
-      results.push({ planId, ok: false, message: "Plan not found." });
+      results.push({ planId, ok: false, message: "Plan not found.", warnings: [] });
       continue;
     }
     const stage = plan.stageId === null ? undefined : await getDropStage(db, plan.stageId);
-    const windowMinutes = specialMintArmMinutes(now, plan, stage);
-    if (windowMinutes === null) {
+    const armWindow = specialMintArmWindow(now, plan, stage);
+    if (!armWindow.ok) {
+      results.push({ planId, ok: false, message: armWindow.message, warnings: [] });
+      await recordAudit(db, {
+        actorUserId: actor,
+        action: "execution.special_mint.arm",
+        targetType: "mint_plan",
+        targetId: planId,
+        result: "failure",
+        metadata: { reason: armWindow.reason },
+      });
+      continue;
+    }
+    const windowMinutes = armWindow.minutes;
+    // Superseded phase: OpenSea re-issues a phase under a new id and pauses
+    // the old row, whose `starts_at` is now stale. A plan still pointing at
+    // it would fire at the wrong instant — unless the operator typed their
+    // own fire_at, which overrides the stage anyway.
+    if (stage?.paused === true && plan.fireAt === null) {
       results.push({
         planId,
         ok: false,
-        message: "Fire time has already passed — create a fresh plan.",
+        message: `Not armed — OpenSea superseded phase "${stage.label}" (paused), so its start time is stale. Re-resolve the target and pick the current phase.`,
+        warnings: [],
       });
       await recordAudit(db, {
         actorUserId: actor,
@@ -2579,16 +2826,122 @@ export async function armSpecialMintPlansAction(planIds: string[]): Promise<Spec
         targetType: "mint_plan",
         targetId: planId,
         result: "failure",
-        metadata: { reason: "fire_time_passed" },
+        metadata: { reason: "stage_paused" },
       });
       continue;
+    }
+    const warnings: string[] = [];
+    const notes: string[] = [];
+    // Eligibility gate — only for a restricted (non-public) phase, and only
+    // on the EXACT {projectId, stageId} pair (anti-pattern #1). A public
+    // phase is open to everyone and is never reported as a whitelist hit.
+    if (stage !== undefined && isRestrictedStage(stage.type)) {
+      const statuses = await specialMintEligibilityForStage(
+        db,
+        eligibilityCache,
+        plan.projectId,
+        stage.id,
+      );
+      const status = statuses.get(plan.walletId) ?? "UNKNOWN";
+      if (status === "INELIGIBLE_RESTRICTED" || status === "PUBLIC_ONLY") {
+        results.push({
+          planId,
+          ok: false,
+          message:
+            status === "PUBLIC_ONLY"
+              ? `Not armed — this wallet is NOT on the allowlist for "${stage.label}" (last check for this exact phase: PUBLIC ONLY — it qualifies for the public phase only, which is not a whitelist hit).`
+              : `Not armed — this wallet is NOT WL for "${stage.label}" (last check for this exact phase: INELIGIBLE).`,
+          warnings: [],
+        });
+        await recordAudit(db, {
+          actorUserId: actor,
+          action: "execution.special_mint.arm",
+          targetType: "mint_plan",
+          targetId: planId,
+          result: "failure",
+          metadata: { reason: "ineligible", stageId: stage.id, status },
+        });
+        continue;
+      }
+      if (status !== "ELIGIBLE_RESTRICTED") {
+        warnings.push(
+          `ELIGIBILITY NOT VERIFIED (${status} for "${stage.label}" — no confirmed allowlist hit for this phase)`,
+        );
+      }
+    }
+    // Remaining per-wallet allowance (2026-09-15). `max_per_wallet` is
+    // CUMULATIVE across the drop, so the cap must be measured against what
+    // is LEFT (cap − already minted). A plan over the remainder is CLAMPED
+    // to the remainder (the draft row is rewritten before it is armed, so
+    // the worker fires the smaller quantity) instead of going out to be
+    // rejected by OpenSea as "exceeds max per wallet". Only a wallet with 0
+    // remaining is refused, and then in exactly those terms.
+    let effectivePlan = plan;
+    const armStageCaps =
+      stage === undefined ? new Map<string, number>() : await stageWalletCaps(db, stage.id);
+    const armCap = armStageCaps.get(plan.walletId) ?? stage?.maxPerWallet ?? null;
+    if (stage !== undefined && armCap !== null) {
+      const totals = await specialMintMintedTotals(db, mintedCache, plan.projectId);
+      const allowance = remainingAllowance({
+        maxPerWallet: armCap,
+        alreadyMinted: totals.get(plan.walletId)?.alreadyMinted ?? 0,
+        requested: plan.quantity,
+      });
+      if (allowance.exhausted) {
+        results.push({
+          planId,
+          ok: false,
+          message: `Not armed — this wallet has no allowance left on this drop. ${describeAllowance(allowance, "armed")}`,
+          warnings: [],
+        });
+        await recordAudit(db, {
+          actorUserId: actor,
+          action: "execution.special_mint.arm",
+          targetType: "mint_plan",
+          targetId: planId,
+          result: "failure",
+          metadata: {
+            reason: "allowance_exhausted",
+            maxPerWallet: stage.maxPerWallet,
+            alreadyMinted: allowance.alreadyMinted,
+          },
+        });
+        continue;
+      }
+      if (allowance.clamped) {
+        const stored = await setDraftMintPlanQuantity(db, planId, allowance.effective);
+        if (stored === undefined) {
+          results.push({
+            planId,
+            ok: false,
+            message: "Not in draft status — nothing to arm.",
+            warnings: [],
+          });
+          continue;
+        }
+        effectivePlan = { ...plan, quantity: stored };
+        notes.push(`QUANTITY CLAMPED — ${describeAllowance(allowance, "armed for")}`);
+        await recordAudit(db, {
+          actorUserId: actor,
+          action: "execution.special_mint.clamp_quantity",
+          targetType: "mint_plan",
+          targetId: planId,
+          result: "success",
+          metadata: {
+            maxPerWallet: stage.maxPerWallet,
+            alreadyMinted: allowance.alreadyMinted,
+            requested: allowance.requested,
+            quantity: stored,
+          },
+        });
+      }
     }
     // Funding gate (2026-09-02): live balance vs price × qty + fee + gas.
     // Refuse with the top-up amount now, while there is still time to fund
     // the wallet, rather than an EXPIRED row after the drop.
-    const funding = await checkArmFunding(db, config, plan, stage);
+    const funding = await checkArmFunding(db, config, effectivePlan, stage);
     if (!funding.ok) {
-      results.push({ planId, ok: false, message: funding.message });
+      results.push({ planId, ok: false, message: funding.message, warnings: [] });
       await recordAudit(db, {
         actorUserId: actor,
         action: "execution.special_mint.arm",
@@ -2599,9 +2952,19 @@ export async function armSpecialMintPlansAction(planIds: string[]): Promise<Spec
       });
       continue;
     }
+    if (!funding.checked) {
+      // The balance was never read. Arming is still allowed, but this must
+      // NOT be presented as a passed funding check.
+      warnings.push(`FUNDING NOT VERIFIED (${funding.notCheckedReason})`);
+    }
     const armed = await armMintPlan(db, planId, actor, windowMinutes);
     if (armed === undefined) {
-      results.push({ planId, ok: false, message: "Not in draft status — nothing to arm." });
+      results.push({
+        planId,
+        ok: false,
+        message: "Not in draft status — nothing to arm.",
+        warnings: [],
+      });
       continue;
     }
     await recordAudit(db, {
@@ -2610,16 +2973,34 @@ export async function armSpecialMintPlansAction(planIds: string[]): Promise<Spec
       targetType: "mint_plan",
       targetId: planId,
       result: "success",
-      metadata: { windowMinutes },
+      metadata: { windowMinutes, warnings, notes, quantity: effectivePlan.quantity },
     });
-    results.push({ planId, ok: true, message: `Armed for ${windowMinutes} min.` });
+    results.push({
+      planId,
+      ok: true,
+      message: `${
+        warnings.length === 0
+          ? `Armed ×${effectivePlan.quantity} for ${windowMinutes} min.`
+          : `ARMED ×${effectivePlan.quantity} for ${windowMinutes} min — ${warnings.join(" · ")}`
+      }${notes.length === 0 ? "" : ` ${notes.join(" · ")}`}`,
+      warnings,
+      notes,
+    });
   }
   const armedCount = results.filter((r) => r.ok).length;
+  const unverifiedCount = results.filter((r) => r.ok && r.warnings.length > 0).length;
+  const clampedCount = results.filter((r) => r.ok && (r.notes?.length ?? 0) > 0).length;
   revalidatePath("/admin/special-mints");
   revalidatePath("/admin/execution");
   return {
     ok: armedCount > 0,
-    message: `${armedCount} of ${results.length} plan(s) armed.`,
+    message: `${armedCount} of ${results.length} plan(s) armed${
+      unverifiedCount > 0 ? ` — ${unverifiedCount} with UNVERIFIED pre-flight checks` : ""
+    }${
+      clampedCount > 0
+        ? ` — ${clampedCount} clamped to the wallet's remaining allowance on this drop`
+        : ""
+    }.`,
     results,
   };
 }
@@ -2704,7 +3085,13 @@ export async function saveNvtApiKeyAction(input: { value: string }): Promise<Act
 }
 
 /** Resolves active NVT key: stored credential first, then config. */
-export async function resolveNvtApiKey(): Promise<string | undefined> {
+/**
+ * NOT EXPORTED, deliberately. This file is "use server", so an exported
+ * function here is a network-callable endpoint — and this one takes no
+ * arguments and returns a DECRYPTED credential, which made it an anonymous
+ * key-dispensing URL. It was only ever meant to be a same-file helper.
+ */
+async function resolveNvtApiKey(): Promise<string | undefined> {
   const { db, config } = container();
   const stored = await findCredentialByType(db, "nvt_api_key");
   if (stored !== undefined) {
@@ -2813,6 +3200,9 @@ export interface NvtMintsActionResult {
 
 /** Get full mint detail information and accounts from NeverFuckingTrade. */
 export async function getNvtMintsAction(filters?: NvtMintsFilter): Promise<NvtMintsActionResult> {
+  // "use server" makes this a public endpoint and a client component imports
+  // it, so its id is in the shipped bundle. Require a real session.
+  await requireApi("projects:read");
   const { db, config } = container();
   const key = await resolveNvtApiKey();
 
@@ -2927,6 +3317,9 @@ export async function scanNvtWlAction(
   slugs?: string[],
   openSeaPass?: string,
 ): Promise<NvtScanActionResult> {
+  // Unauthenticated callers could burn the NVT quota and probe which
+  // addresses have a stored OpenSea pass.
+  await requireApi("scans:run");
   const { db, config } = container();
   const key = await resolveNvtApiKey();
 
@@ -2995,6 +3388,8 @@ export interface NvtDiscordAdminData {
 
 /** Get NVT Discord webhook status, scan settings, and OpenSea passes for Admin. */
 export async function getNvtDiscordAdminDataAction(): Promise<NvtDiscordAdminData> {
+  // Admin surface: webhook credential state and stored OpenSea passes.
+  await requireApi("credentials:manage");
   const { db } = container();
   const webhookCred = await findCredentialByType(db, "nvt_discord_webhook");
   const storedSettings = await getSetting<NvtDiscordScanSettings>(db, "nvt_scan_settings");

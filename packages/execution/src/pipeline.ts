@@ -79,6 +79,7 @@ export async function runExecutionPipeline(
       signerCeilingWei: input.signerCeilingWei,
       perPlanCeilingWei: input.perPlanCeilingWei,
       spentWei: input.spentWei,
+      txValueWei: BigInt(input.tx.valueWei),
     },
     deps.now(),
   );

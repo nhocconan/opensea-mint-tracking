@@ -13,7 +13,7 @@
  */
 import { coerceDate } from "@hoodmint/core";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
-import { type Db, unwrapRows } from "../client.ts";
+import { type Db, publishEvent, unwrapRows } from "../client.ts";
 import {
   type DropStage,
   dropStages,
@@ -253,13 +253,35 @@ export async function cacheMintPlanTx(
  * `limit`; callers should treat this as "at most N speculative builds per
  * pass," not "build everything armed."
  */
+/**
+ * Armed plans worth speculatively pre-building calldata for.
+ *
+ * `leadMs` is the whole point. Without it this selected every armed plan
+ * regardless of when it fires, so a plan armed for a drop hours away had
+ * OpenSea's `/mint` called for it every 30 seconds — each one answering
+ * `409 Drop is not currently active for minting`. Three armed plans burned
+ * ~360 wasted write-quota calls an hour, against a 30/hour budget the
+ * signature burst needs at the fire instant. OpenSea cannot issue calldata
+ * (and, for a signed_presale stage, cannot issue the signature) before the
+ * stage is active, so asking early is guaranteed waste.
+ *
+ * Ordering is by the fire target, not `armed_until`: when several plans
+ * compete for the limited pre-build slots, the one opening soonest wins.
+ */
 export async function plansNeedingPreBuild(
   db: Db,
   now: Date,
   ttlMs: number,
   limit = 5,
+  leadMs = 10 * 60_000,
 ): Promise<MintPlan[]> {
   const staleCutoff = new Date(now.getTime() - ttlMs);
+  const horizon = new Date(now.getTime() + leadMs);
+  const fireTarget = sql`coalesce(
+    ${mintPlans.fireAt},
+    (select s.starts_at from drop_stages s where s.id = ${mintPlans.stageId}),
+    ${mintPlans.armedAt}
+  )`;
   return db
     .select()
     .from(mintPlans)
@@ -268,9 +290,10 @@ export async function plansNeedingPreBuild(
         eq(mintPlans.status, "armed"),
         sql`${mintPlans.armedUntil} > ${now.toISOString()}`,
         sql`(${mintPlans.cachedTxAt} is null or ${mintPlans.cachedTxAt} < ${staleCutoff.toISOString()})`,
+        sql`${fireTarget} <= ${horizon.toISOString()}`,
       ),
     )
-    .orderBy(mintPlans.armedUntil)
+    .orderBy(fireTarget)
     .limit(limit);
 }
 
@@ -316,30 +339,39 @@ export async function listMintPlansForProject(
   projectId: string,
   limit = 200,
 ): Promise<MintPlanBoardRow[]> {
-  return db
-    .select({
-      id: mintPlans.id,
-      walletId: wallets.id,
-      walletAddress: wallets.address,
-      walletLabel: wallets.label,
-      hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
-      quantity: mintPlans.quantity,
-      status: mintPlans.status,
-      stageId: mintPlans.stageId,
-      stageLabel: dropStages.label,
-      fireAt: mintPlans.fireAt,
-      stageStartsAt: dropStages.startsAt,
-      armedUntil: mintPlans.armedUntil,
-      presigned: sql<boolean>`${mintPlans.presignedRawTx} is not null`,
-      perPlanCeilingWei: mintPlans.perPlanCeilingWei,
-      createdAt: mintPlans.createdAt,
-    })
-    .from(mintPlans)
-    .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
-    .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
-    .where(eq(mintPlans.projectId, projectId))
-    .orderBy(desc(mintPlans.createdAt))
-    .limit(limit);
+  return (
+    db
+      .select({
+        id: mintPlans.id,
+        walletId: wallets.id,
+        walletAddress: wallets.address,
+        walletLabel: wallets.label,
+        hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
+        quantity: mintPlans.quantity,
+        status: mintPlans.status,
+        stageId: mintPlans.stageId,
+        stageLabel: dropStages.label,
+        fireAt: mintPlans.fireAt,
+        stageStartsAt: dropStages.startsAt,
+        armedUntil: mintPlans.armedUntil,
+        presigned: sql<boolean>`${mintPlans.presignedRawTx} is not null`,
+        perPlanCeilingWei: mintPlans.perPlanCeilingWei,
+        createdAt: mintPlans.createdAt,
+      })
+      .from(mintPlans)
+      .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
+      .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
+      .where(eq(mintPlans.projectId, projectId))
+      // Ordered by when each plan FIRES, not when the row was typed. Across an
+      // evening of queued special mints the only order that matters is the
+      // order they go off; creation order is an accident of what got pasted
+      // first. fire_at overrides the stage start; a plan with neither keeps its
+      // creation time so it still has a stable place.
+      .orderBy(
+        desc(sql`coalesce(${mintPlans.fireAt}, ${dropStages.startsAt}, ${mintPlans.createdAt})`),
+      )
+      .limit(limit)
+  );
 }
 
 export interface MintPlanHistoryRow extends MintPlanBoardRow {
@@ -356,34 +388,43 @@ export interface MintPlanHistoryRow extends MintPlanBoardRow {
  * is the durable record; pair with `latestAttemptPerPlan` for the outcome.
  */
 export async function listMintPlanHistory(db: Db, limit = 200): Promise<MintPlanHistoryRow[]> {
-  return db
-    .select({
-      id: mintPlans.id,
-      projectId: mintPlans.projectId,
-      projectName: projectsTable.name,
-      projectSlug: projectsTable.slug,
-      walletId: wallets.id,
-      walletAddress: wallets.address,
-      walletLabel: wallets.label,
-      hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
-      quantity: mintPlans.quantity,
-      status: mintPlans.status,
-      stageId: mintPlans.stageId,
-      stageLabel: dropStages.label,
-      fireAt: mintPlans.fireAt,
-      stageStartsAt: dropStages.startsAt,
-      armedUntil: mintPlans.armedUntil,
-      presigned: sql<boolean>`${mintPlans.presignedRawTx} is not null`,
-      perPlanCeilingWei: mintPlans.perPlanCeilingWei,
-      createdAt: mintPlans.createdAt,
-      updatedAt: mintPlans.updatedAt,
-    })
-    .from(mintPlans)
-    .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
-    .innerJoin(projectsTable, eq(mintPlans.projectId, projectsTable.id))
-    .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
-    .orderBy(desc(mintPlans.createdAt))
-    .limit(limit);
+  return (
+    db
+      .select({
+        id: mintPlans.id,
+        projectId: mintPlans.projectId,
+        projectName: projectsTable.name,
+        projectSlug: projectsTable.slug,
+        walletId: wallets.id,
+        walletAddress: wallets.address,
+        walletLabel: wallets.label,
+        hasSigningKey: sql<boolean>`${wallets.encryptedSigningKey} is not null`,
+        quantity: mintPlans.quantity,
+        status: mintPlans.status,
+        stageId: mintPlans.stageId,
+        stageLabel: dropStages.label,
+        fireAt: mintPlans.fireAt,
+        stageStartsAt: dropStages.startsAt,
+        armedUntil: mintPlans.armedUntil,
+        presigned: sql<boolean>`${mintPlans.presignedRawTx} is not null`,
+        perPlanCeilingWei: mintPlans.perPlanCeilingWei,
+        createdAt: mintPlans.createdAt,
+        updatedAt: mintPlans.updatedAt,
+      })
+      .from(mintPlans)
+      .innerJoin(wallets, eq(mintPlans.walletId, wallets.id))
+      .innerJoin(projectsTable, eq(mintPlans.projectId, projectsTable.id))
+      .leftJoin(dropStages, eq(mintPlans.stageId, dropStages.id))
+      // Ordered by when each plan FIRES, not when the row was typed. Across an
+      // evening of queued special mints the only order that matters is the
+      // order they go off; creation order is an accident of what got pasted
+      // first. fire_at overrides the stage start; a plan with neither keeps its
+      // creation time so it still has a stable place.
+      .orderBy(
+        desc(sql`coalesce(${mintPlans.fireAt}, ${dropStages.startsAt}, ${mintPlans.createdAt})`),
+      )
+      .limit(limit)
+  );
 }
 
 /**
@@ -601,12 +642,27 @@ export async function armedPlansWithStageStart(
  *  cover the hot loop's lead + clock-offset correction (a few hundred ms)
  *  and no more, or the coarse 30s pass fires plans early (seen live: 2s
  *  tolerance → 1.5s early). */
+/**
+ * How early the claim will hand over a plan, relative to its fire target.
+ *
+ * This is a CEILING on MINT_FIRE_LEAD_MS: the hot loop can decide to fire at
+ * T-700ms, but if the claim refuses anything more than this far ahead the
+ * loop just spins claiming nothing, and the effective lead is silently this
+ * constant with no log line saying so. Callers pass their configured lead.
+ */
 const CLAIM_FIRE_TOLERANCE_MS = 500;
 
 export async function claimArmedMintPlan(
   db: Db,
   now: Date,
-  leaseMs = 15_000,
+  // Must EXCEED the worst-case duration of one pass. A pass that enters
+  // burstBuildOpenSeaMintTx can sit there for MINT_SIGNATURE_BURST_MS (12s
+  // by default) before it even reaches the pipeline, so a 15s lease let the
+  // independently-scheduled coarse pass re-claim a plan that was still
+  // in flight and broadcast a SECOND transaction from the same wallet.
+  leaseMs = 30_000,
+  /** The caller's MINT_FIRE_LEAD_MS, so the claim does not cap it. */
+  leadMs = 0,
 ): Promise<MintPlan | undefined> {
   // Reclaim a plan that is `armed`, OR one stuck in `executing` whose lease
   // has expired (a worker crashed between claim and the terminal/reset
@@ -624,7 +680,9 @@ export async function claimArmedMintPlan(
   // precision hot loop fires a hair early on purpose, hence the small
   // tolerance. Found live 2026-08-28: the coarse 30s pass claimed an armed
   // plan on an already-open stage 90s before its fire_at.
-  const fireTolerance = new Date(now.getTime() + CLAIM_FIRE_TOLERANCE_MS);
+  const fireTolerance = new Date(
+    now.getTime() + Math.max(CLAIM_FIRE_TOLERANCE_MS, leadMs ?? 0) + 50,
+  );
   const rows = await db.execute(sql`
     with due as (
       select id from mint_plans
@@ -634,11 +692,34 @@ export async function claimArmedMintPlan(
                (select s.starts_at from drop_stages s where s.id = mint_plans.stage_id),
                armed_at
              ) <= ${fireTolerance.toISOString()}
+         -- A phase OpenSea re-issued under a new uuid leaves the old row
+         -- paused (projects.ts step 4b) with its stale starts_at intact. An
+         -- already-armed plan still points at that dead row, so without this
+         -- it fires on a schedule that no longer exists. Arm-time gates
+         -- cannot cover it: the supersede happens in the hours BETWEEN arm
+         -- and fire. A plan carrying its own fire_at override is the
+         -- operator's explicit instant and stays honoured.
+         and (
+           fire_at is not null
+           or not exists (
+             select 1 from drop_stages s
+              where s.id = mint_plans.stage_id and s.paused
+           )
+         )
          and (
            status = 'armed'
            or (status = 'executing' and updated_at < ${leaseCutoff.toISOString()})
          )
-       order by armed_until asc
+       -- Racing several drops at once, the claim order decides who gets the
+       -- next slot. armed_until is unrelated to urgency: a plan armed for 24h
+       -- on a drop opening tomorrow sorted ahead of one opening THIS second.
+       -- Order by the fire target so the most imminent mint is always served
+       -- first when passes are contending.
+       order by coalesce(
+                  fire_at,
+                  (select s.starts_at from drop_stages s where s.id = mint_plans.stage_id),
+                  armed_at
+                ) asc, armed_until asc
        limit 1
        for update skip locked
     )
@@ -707,7 +788,18 @@ export async function expireStaleMintPlans(db: Db, now: Date): Promise<number> {
         sql`${mintPlans.armedUntil} <= ${now.toISOString()}`,
       ),
     )
-    .returning({ id: mintPlans.id });
+    .returning({ id: mintPlans.id, projectId: mintPlans.projectId });
+  // An expiring plan is the commonest silent death on this path: the arm
+  // window closed with the mint never fired, and until now the sweep wrote a
+  // status and returned a count, so nobody was told. Hand the rows back so
+  // the caller can publish one event each.
+  for (const row of updated) {
+    await publishEvent(db, {
+      type: "execution.failed",
+      projectId: row.projectId,
+      at: now.toISOString(),
+    });
+  }
   return updated.length;
 }
 
@@ -782,6 +874,56 @@ export async function recordExecutionAttempt(
     throw new Error("recordExecutionAttempt: insert returned no row");
   }
   return row;
+}
+
+/**
+ * The most recent transaction hash this plan actually put on the wire.
+ *
+ * This is the fire path's idempotency key. Without it, a worker that is
+ * killed between `sendRawTransaction` returning and the plan's status being
+ * written leaves the row `executing`; the lease expires, the plan is
+ * re-claimed, and the worker has no way to answer "did I already send one?"
+ * — so it signs a second transaction at the next nonce and the wallet mints
+ * and pays twice. The hash is already recorded on every broadcast attempt;
+ * it was simply never read back.
+ */
+export async function latestBroadcastAttempt(
+  db: Db,
+  planId: string,
+): Promise<{ txHash: string; attemptAt: Date } | undefined> {
+  const [row] = await db
+    .select({ txHash: executionAttempts.txHash, attemptAt: executionAttempts.attemptAt })
+    .from(executionAttempts)
+    .where(and(eq(executionAttempts.planId, planId), eq(executionAttempts.status, "broadcast")))
+    .orderBy(desc(executionAttempts.attemptAt))
+    .limit(1);
+  if (row === undefined || row.txHash === null) {
+    return undefined;
+  }
+  return { txHash: row.txHash, attemptAt: row.attemptAt };
+}
+
+/**
+ * How many times this plan has already been mined and REVERTED.
+ *
+ * A revert releases the plan so the burst keeps competing, which is right
+ * while supply lasts and wrong once it does not: every retry is a real
+ * transaction and real gas. When a drop is minted out, or the wallet's
+ * allowance is spent, the revert repeats until the arm window closes and the
+ * operator pays for every attempt. This is the counter that bounds it.
+ */
+export async function countRevertedAttempts(db: Db, planId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(executionAttempts)
+    .where(
+      and(
+        eq(executionAttempts.planId, planId),
+        eq(executionAttempts.status, "failed"),
+        sql`${executionAttempts.errorCode} like 'reverted_onchain%'`,
+      ),
+    );
+  return row?.n ?? 0;
 }
 
 export async function listExecutionAttempts(db: Db, limit = 100): Promise<ExecutionAttempt[]> {

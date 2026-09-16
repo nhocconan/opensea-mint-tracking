@@ -13,6 +13,8 @@
  *   or when the wallet's pending nonce advanced past what was signed.
  */
 
+import { chainTimeToLocalMs } from "./fire-schedule.ts";
+
 export interface PresignDecisionInput {
   /** Stage open instant on chain-corrected time, ms epoch. */
   readonly stageStartChainMs: number;
@@ -40,7 +42,11 @@ export type PresignDecision =
   | { readonly action: "expired" };
 
 export function decidePresign(input: PresignDecisionInput): PresignDecision {
-  const localStartMs = input.stageStartChainMs - input.clockOffsetMs;
+  // offset = local − chain (clock-offset.ts) ⇒ local = chain + offset. Must
+  // be the SAME conversion fire-schedule.ts uses, or the presign window and
+  // the fire window sit 2× the offset apart and a blob can be judged
+  // "expired" before the fire window has even opened.
+  const localStartMs = chainTimeToLocalMs(input.stageStartChainMs, input.clockOffsetMs);
   const windowOpensAt = localStartMs - input.leadMs;
   const now = input.localNowMs;
 
@@ -56,7 +62,11 @@ export function decidePresign(input: PresignDecisionInput): PresignDecision {
   if (
     input.currentNonce !== undefined &&
     input.currentNonce !== null &&
-    input.currentNonce !== input.presignedNonce
+    // Only the CHAIN moving past our nonce makes the blob dead. A currentNonce
+    // BELOW ours is the normal case when a sibling plan on this wallet holds an
+    // earlier reservation that has not broadcast yet — re-signing on that would
+    // rewrite a perfectly good blob on every tick.
+    input.currentNonce > input.presignedNonce
   ) {
     return { action: "sign", reason: "nonce_advanced" };
   }
@@ -70,9 +80,18 @@ export function decidePresign(input: PresignDecisionInput): PresignDecision {
  * Classify an RPC rejection of a pre-signed broadcast. A nonce/replacement
  * error means the blob is dead (wallet sent something else) — fall back to
  * the full build+sign path immediately. Anything else is a real failure.
+ *
+ * A fee-too-low rejection is stale for the same reason: the blob carries a
+ * fee snapshot taken up to `ttlMs` before the open, and a base-fee rise at
+ * the open makes that exact blob unincludable forever — re-signing with a
+ * fresh (bumped) fee is the only recovery, so it must not hard-fail. The
+ * phrasings are geth's (`max fee per gas less than block base fee`,
+ * `fee cap less than block base fee`, `transaction underpriced`) plus
+ * viem's own wrapper text for FeeCapTooLowError ("The fee cap (`maxFeePerGas`
+ * = N gwei) cannot be lower than the block base fee.", viem 2.55 errors/node).
  */
 export function isStalePresignError(message: string): boolean {
-  return /nonce too low|nonce is too low|already known|replacement transaction underpriced|invalid nonce|nonce.*expected/i.test(
+  return /nonce too low|nonce is too low|already known|replacement transaction underpriced|invalid nonce|nonce.*expected|max fee per gas less than block base fee|fee cap less than block base fee|cannot be lower than the block base fee|transaction underpriced/i.test(
     message,
   );
 }

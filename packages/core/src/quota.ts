@@ -18,6 +18,11 @@ export interface QuotaDecision {
     | "ok"
     | "unknown-remaining-assume-budget"
     | "reserve-reached"
+    /** The key has NOTHING left. Distinct from "reserve-reached", which only
+     *  means the voluntary floor was hit — that floor exists to be spent by
+     *  mint-critical calls, and telling them apart is what lets a mint spend
+     *  it while routine scanning stays out. */
+    | "exhausted"
     | "window-reset-in-past";
 }
 
@@ -43,7 +48,7 @@ export function allowedRequests(
     };
   }
   if (quota.remaining <= 0) {
-    return { allowed: 0, blocked: true, reason: "reserve-reached" };
+    return { allowed: 0, blocked: true, reason: "exhausted" };
   }
   if (quota.remaining <= Math.floor(quota.limitPerHour * reserveFraction)) {
     return { allowed: 0, blocked: true, reason: "reserve-reached" };

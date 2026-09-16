@@ -61,8 +61,12 @@ export function currentStage(stages: readonly StageView[], isoNow: string): Stag
 
 /** Earliest future stage; ties broken by label for determinism. */
 export function nextStage(stages: readonly StageView[], isoNow: string): StageView | undefined {
+  // currentStage() excludes paused stages; nextStage() must too, or a phase
+  // OpenSea has superseded (re-issued under a new uuid, old row paused by the
+  // detail scan) keeps being announced as the upcoming mint on its stale
+  // starts_at.
   const candidates = windowedStages(stages, isoNow)
-    .filter((w) => w.msUntilStart > 0)
+    .filter((w) => w.msUntilStart > 0 && !w.stage.paused)
     .map((w) => w.stage);
   return candidates[0];
 }

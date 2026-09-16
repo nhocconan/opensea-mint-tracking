@@ -1,5 +1,5 @@
-import type { Metadata } from "next";
 import { Shield } from "lucide-react";
+import type { Metadata } from "next";
 import { AdminNav } from "@/components/admin-nav.tsx";
 import { SignOutButton } from "@/components/sign-out-button.tsx";
 import { getSessionUser, requirePage } from "@/lib/session.ts";
@@ -55,4 +55,3 @@ export default async function AdminLayout({ children }: { children: React.ReactN
     </div>
   );
 }
-

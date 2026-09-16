@@ -112,10 +112,7 @@ export function AdminNav() {
       </div>
 
       {/* Navigation items grid / rail */}
-      <nav
-        aria-label="Admin sections"
-        className="flex flex-wrap gap-1.5 sm:gap-2"
-      >
+      <nav aria-label="Admin sections" className="flex flex-wrap gap-1.5 sm:gap-2">
         {filteredSections.map((section) => {
           const isSectionActive = activeSection.href === section.href;
           const Icon = ICON_MAP[section.icon] ?? LayoutDashboard;
@@ -132,7 +129,10 @@ export function AdminNav() {
               }`}
             >
               {isSectionActive ? (
-                <span className="size-1.5 rounded-full bg-acid animate-pulse shrink-0" aria-hidden />
+                <span
+                  className="size-1.5 rounded-full bg-acid animate-pulse shrink-0"
+                  aria-hidden
+                />
               ) : (
                 <Icon
                   className="size-3.5 text-ink-faint group-hover:text-ink-muted transition-colors shrink-0"

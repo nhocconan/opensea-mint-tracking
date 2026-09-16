@@ -22,11 +22,19 @@ import {
   wallets as walletsTable,
 } from "@hoodmint/db";
 import { fetchErc20Funding, fetchFeeContext, fetchNativeBalance } from "@hoodmint/providers";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
+/**
+ * Three outcomes, never two: the check RAN and passed (`ok`, `checked`), the
+ * check RAN and failed (`!ok`), or the check DID NOT RUN (`ok` but
+ * `!checked` — no RPC, unreadable ERC-20, browser-signed wallet). The caller
+ * must never render "not checked" as "checked and fine": arming is still
+ * allowed, but the operator has to see that nothing was verified.
+ */
 export type ArmFundingResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly message: string };
+  | { readonly ok: true; readonly checked: true }
+  | { readonly ok: true; readonly checked: false; readonly notCheckedReason: string }
+  | { readonly ok: false; readonly checked: true; readonly message: string };
 
 /** Same precedence as the worker's resolveBestRpcUrl: ranked registry
  *  endpoint that is not known-down, else the env RPC_URL. */
@@ -40,8 +48,10 @@ async function resolveRpcUrl(db: Db, config: AppConfig): Promise<string | undefi
 
 /**
  * Funding verdict for one plan about to be armed. Fails CLOSED only on a
- * proven shortfall; an RPC that cannot be reached yields `ok` with the
- * reason logged by the caller (the presign pass re-checks 45s before fire).
+ * proven shortfall; an RPC that cannot be reached still yields `ok` (the
+ * operator may knowingly arm, and the presign pass re-checks 45s before
+ * fire) but reports `checked: false` so the arm result can say the balance
+ * was never read instead of implying it was read and was fine.
  */
 export async function checkArmFunding(
   db: Db,
@@ -50,17 +60,30 @@ export async function checkArmFunding(
   stage: { priceWei: string | null; currency: string | null } | undefined,
 ): Promise<ArmFundingResult & { readonly verdict?: FundingVerdict }> {
   const [wallet] = await db
-    .select({ address: walletsTable.address, hasKey: walletsTable.encryptedSigningKey })
+    .select({
+      address: walletsTable.address,
+      // A boolean, never the sealed blob: this runs in the internet-facing
+      // web process, which has no business holding wallet ciphertext in
+      // request memory just to null-test it.
+      hasKey: sql<boolean>`${walletsTable.encryptedSigningKey} is not null`,
+    })
     .from(walletsTable)
     .where(eq(walletsTable.id, plan.walletId))
     .limit(1);
-  if (wallet === undefined || wallet.hasKey === null) {
+  if (wallet === undefined) {
+    return { ok: true, checked: false, notCheckedReason: "wallet row not found" };
+  }
+  if (!wallet.hasKey) {
     // Browser-wallet plans are signed by a human who sees their own balance.
-    return { ok: true };
+    return {
+      ok: true,
+      checked: false,
+      notCheckedReason: "browser-signed wallet — balance not read server-side",
+    };
   }
   const rpcUrl = await resolveRpcUrl(db, config);
   if (rpcUrl === undefined) {
-    return { ok: true };
+    return { ok: true, checked: false, notCheckedReason: "no RPC endpoint configured" };
   }
   const quantity = Math.max(1, Math.floor(plan.quantity));
   const nativePriced = stage === undefined || isNativeCurrency(stage.currency);
@@ -77,6 +100,7 @@ export async function checkArmFunding(
       fetchFeeContext(rpcUrl, wallet.address),
     ]);
     await recordWalletBalance(db, plan.walletId, nativeBalanceWei).catch(() => undefined);
+    let erc20Unreadable = false;
     const erc20 =
       !nativePriced &&
       stage?.currency !== null &&
@@ -90,7 +114,13 @@ export async function checkArmFunding(
               symbol: f.symbol,
               decimals: f.decimals,
             }),
-            () => undefined,
+            () => {
+              // The stage is priced in a token and we could not read that
+              // token's balance: the native verdict alone proves nothing
+              // about whether this mint can be paid for.
+              erc20Unreadable = true;
+              return undefined;
+            },
           )
         : undefined;
     const verdict = assessMintFunding({
@@ -101,12 +131,20 @@ export async function checkArmFunding(
       ...(erc20 !== undefined ? { erc20 } : {}),
     });
     if (verdict.ok) {
-      return { ok: true, verdict };
+      return erc20Unreadable
+        ? {
+            ok: true,
+            checked: false,
+            notCheckedReason: "ERC-20 balance unreadable on a token-priced phase",
+            verdict,
+          }
+        : { ok: true, checked: true, verdict };
     }
-    return { ok: false, message: `Not armed — ${verdict.message}.`, verdict };
+    return { ok: false, checked: true, message: `Not armed — ${verdict.message}.`, verdict };
   } catch {
     // RPC unreachable: do not block the operator on a read failure; the
     // worker's presign gate re-checks with a fresh read before the open.
-    return { ok: true };
+    // But the caller MUST surface that nothing was verified.
+    return { ok: true, checked: false, notCheckedReason: "RPC unreachable" };
   }
 }

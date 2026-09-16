@@ -120,15 +120,17 @@ export default async function AdminNvtPage() {
             <div className="text-[11px] text-ink-faint">Quota &amp; Rate Limit</div>
             <div className="mt-1 font-medium text-ink">
               {usage !== undefined ? `${usage} / ${limit}` : `${limit}`} req/min
-              {tier ? <span className="text-acid ml-1 font-mono text-[11px]">[{tier.toUpperCase()}]</span> : ""}
+              {tier ? (
+                <span className="text-acid ml-1 font-mono text-[11px]">[{tier.toUpperCase()}]</span>
+              ) : (
+                ""
+              )}
             </div>
           </div>
 
           <div className="rounded-md border border-line/60 bg-base/50 p-3">
             <div className="text-[11px] text-ink-faint">API Endpoint</div>
-            <div className="mt-1 truncate font-medium text-ink-muted">
-              {config.NVT_BASE_URL}
-            </div>
+            <div className="mt-1 truncate font-medium text-ink-muted">{config.NVT_BASE_URL}</div>
           </div>
 
           {profileAddress ? (
@@ -149,7 +151,9 @@ export default async function AdminNvtPage() {
         </div>
 
         <p className="mt-4 text-xs text-ink-faint border-t border-line/50 pt-3">
-          NeverFuckingTrade powers real-time drop discovery, SIWE OpenSea allowlist validation (GTD / FCFS / WL), and cross-chain tracking across Robinhood Chain, Ethereum, Ink, and HyperEVM.
+          NeverFuckingTrade powers real-time drop discovery, SIWE OpenSea allowlist validation (GTD
+          / FCFS / WL), and cross-chain tracking across Robinhood Chain, Ethereum, Ink, and
+          HyperEVM.
         </p>
       </section>
 
