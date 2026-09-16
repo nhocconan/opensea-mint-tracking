@@ -43,3 +43,4 @@ infra/ingress/.env
 # Host-specific hardening script — contains admin source IPs.
 infra/host/
 infra/ingress/
+logs/
