@@ -28,7 +28,7 @@
  * This module is read-only apart from `setDraftMintPlanQuantity`, the
  * draft-only clamp the arm path applies before a plan is armed.
  */
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import { eligibilityChecks, mintEvents, mintPlans, wallets } from "../schema.ts";
 
@@ -182,4 +182,34 @@ export async function stageCapsForProject(
     }
   }
   return [...best].map(([stageId, cap]) => ({ stageId, cap }));
+}
+
+/**
+ * Wallets that ALREADY have a live plan for this exact phase.
+ *
+ * Creating a second plan for the same {project, stage, wallet} is always a
+ * mistake: `max_total_mintable_by_wallet` is cumulative, so once the first
+ * plan mints its allowance the duplicate can only ever be refused on chain —
+ * after burning a signature-burst window, OpenSea write quota, and possibly
+ * gas on a reverted transaction. The console used to accept the duplicate
+ * silently and leave the operator to spot and delete it.
+ *
+ * `stageId` null matches manual-fire plans that carry no phase.
+ */
+export async function walletsWithLivePlanForStage(
+  db: Db,
+  projectId: string,
+  stageId: string | null,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({ walletId: mintPlans.walletId })
+    .from(mintPlans)
+    .where(
+      and(
+        eq(mintPlans.projectId, projectId),
+        stageId === null ? isNull(mintPlans.stageId) : eq(mintPlans.stageId, stageId),
+        inArray(mintPlans.status, ["draft", "armed", "executing"]),
+      ),
+    );
+  return new Set(rows.map((r) => r.walletId));
 }

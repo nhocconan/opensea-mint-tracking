@@ -71,6 +71,7 @@ import {
   type WalletDropMintTotals,
   walletMintTotalsForProject,
   wallets as walletsTable,
+  walletsWithLivePlanForStage,
 } from "@hoodmint/db";
 import {
   createDiscordAdapter,
@@ -2500,17 +2501,23 @@ export async function createSpecialMintAction(input: {
   // whatever the stage says at T is what gets spent. A generous ceiling on a
   // "free" mint is a blank cheque, and 0.005 ETH (~$12) was sitting on three
   // such plans before this existed.
+  // CLAMPED, never refused. The first version rejected anything above the cap
+  // and deadlocked the operator: the form pre-fills 0.0001 ETH per token, so a
+  // quantity of 3 suggests 0.0003 — above a 0.0002 cap — and no plan could be
+  // created at all. A safety limit that blocks the safe path is not a safety
+  // limit, it is a bug. Cap the number and say so.
   const freeStageCap = BigInt(config.MINT_FREE_STAGE_CEILING_WEI);
   const stagePrice =
     stage?.priceWei !== undefined && stage.priceWei !== null && /^[0-9]+$/.test(stage.priceWei)
       ? BigInt(stage.priceWei)
       : 0n;
-  if (stagePrice === 0n && BigInt(input.perPlanCeilingWei) > freeStageCap) {
-    return {
-      ok: false,
-      message: `This phase is free (or has no published price), so the per-plan ceiling is capped at ${freeStageCap.toString(10)} wei. You asked for ${input.perPlanCeilingWei}. The ceiling is what stops a drop that flips from free to paid from spending whatever it likes — keep it tight.`,
-    };
-  }
+  const requestedCeiling = BigInt(input.perPlanCeilingWei);
+  const isFreeStage = stagePrice === 0n;
+  const effectiveCeilingWei =
+    isFreeStage && requestedCeiling > freeStageCap
+      ? freeStageCap.toString(10)
+      : input.perPlanCeilingWei;
+  const ceilingWasClamped = effectiveCeilingWei !== input.perPlanCeilingWei;
 
   const stageCaps =
     stage === undefined ? new Map<string, number>() : await stageWalletCaps(db, stage.id);
@@ -2518,14 +2525,50 @@ export async function createSpecialMintAction(input: {
     stageCaps.get(walletId) ?? stage?.maxPerWallet ?? null;
   const phaseCap = stage?.maxPerWallet ?? null;
   const notices: string[] = [];
-  let planned = selections.map((s) => ({ ...s, requested: s.quantity, alreadyMinted: 0 }));
+  if (ceilingWasClamped) {
+    notices.push(
+      `Ceiling clamped to ${effectiveCeilingWei} wei (you asked for ${input.perPlanCeilingWei}): this phase is free, and the ceiling is the only thing that stops a drop which flips to paid from spending whatever it likes.`,
+    );
+  }
+  // Refuse a second plan for the SAME {phase, wallet}. The per-wallet cap is
+  // cumulative, so once the first plan takes its allowance the duplicate can
+  // only be refused on chain — after burning a burst window, write quota and
+  // possibly gas on a revert. This used to be accepted silently and left for
+  // the operator to notice and delete.
+  const alreadyPlanned = await walletsWithLivePlanForStage(
+    db,
+    input.projectId,
+    stageId ?? null,
+  ).catch(() => new Set<string>());
+  const duplicateLabels: string[] = [];
+  const freshSelections = selections.filter((sel) => {
+    if (!alreadyPlanned.has(sel.walletId)) {
+      return true;
+    }
+    duplicateLabels.push(sel.walletId);
+    return false;
+  });
+  if (freshSelections.length === 0) {
+    return {
+      ok: false,
+      message:
+        "Every wallet you picked already has a plan for this phase. The per-wallet cap is cumulative across the whole drop, so a second plan on the same phase can only ever be refused on chain — delete or edit the existing one instead.",
+    };
+  }
+  if (duplicateLabels.length > 0) {
+    notices.push(
+      `${duplicateLabels.length} wallet(s) skipped — they already have a plan for this phase.`,
+    );
+  }
+
+  let planned = freshSelections.map((s) => ({ ...s, requested: s.quantity, alreadyMinted: 0 }));
   if (phaseCap !== null || stageCaps.size > 0) {
     const totals = await walletMintTotalsForProject(db, input.projectId).catch(
       () => new Map<string, WalletDropMintTotals>(),
     );
     const usable: typeof planned = [];
     const exhausted: string[] = [];
-    for (const selection of selections) {
+    for (const selection of freshSelections) {
       const totalsForWallet = totals.get(selection.walletId);
       const allowance = remainingAllowance({
         maxPerWallet: capFor(selection.walletId),
@@ -2570,7 +2613,7 @@ export async function createSpecialMintAction(input: {
       ...(stageId !== undefined ? { stageId } : {}),
       ...(fireAt !== undefined ? { fireAt } : {}),
       quantity: selection.quantity,
-      perPlanCeilingWei: input.perPlanCeilingWei,
+      perPlanCeilingWei: effectiveCeilingWei,
     });
     createdIds.push(created.id);
     await recordAudit(db, {
@@ -2588,7 +2631,7 @@ export async function createSpecialMintAction(input: {
         alreadyMintedOnDrop: selection.alreadyMinted,
         maxPerWallet: phaseCap,
         fireAt: fireAt?.toISOString() ?? null,
-        perPlanCeilingWei: input.perPlanCeilingWei,
+        perPlanCeilingWei: effectiveCeilingWei,
       },
     });
   }

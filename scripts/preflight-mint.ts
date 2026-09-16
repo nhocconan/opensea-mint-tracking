@@ -23,6 +23,7 @@
 
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { mintRpcUrls } from "../apps/worker/src/mint-rpc.ts";
 import { CHAIN_CLOCK_OFFSET_MEASURED_AT_SETTING_KEY } from "../apps/worker/src/workers/clock-calibration.ts";
 import {
   resolveBestRpcUrl,
@@ -109,6 +110,7 @@ function weiWithRaw(value: bigint, symbol = "ETH", decimals = 18): string {
 
 interface PlanRow {
   readonly plan_id: string;
+  readonly project_id: string;
   readonly status: string;
   readonly quantity: number;
   readonly per_plan_ceiling_wei: string;
@@ -147,6 +149,9 @@ interface SiblingPlan {
   readonly planId: string;
   readonly walletId: string;
   readonly fireTargetMs: number | null;
+  /** Needed to reason about the CUMULATIVE per-wallet cap across plans. */
+  readonly quantity: number;
+  readonly projectId: string;
 }
 
 interface WalletFacts {
@@ -614,18 +619,28 @@ function checkNonce(
   }
   if (collidingIds.length > 0) {
     lines.push({
-      level: "BLOCKER",
+      level: "WARN",
       label: "wallet share",
       detail:
         `plan(s) ${collidingIds.join(", ")} fire from the SAME wallet within 60s — ` +
-        "there is no nonce allocator, so they will collide; move one to another wallet",
+        "they will be given consecutive nonces, so the second lands one slot behind the first",
     });
   }
   if (otherIds.length > 0) {
+    const cap = row.max_per_wallet === null ? null : Number(row.max_per_wallet);
+    const combined = Number(row.quantity) + others.reduce((sum, o) => sum + (o.quantity ?? 0), 0);
+    // max_total_mintable_by_wallet is cumulative across every stage of the
+    // drop, so two plans on one wallet are not additive: whichever fires
+    // first consumes the allowance and the rest can only be refused. Saying
+    // "also use this wallet" without saying that is useless to the operator.
+    const cumulative =
+      cap !== null && combined > cap
+        ? ` — combined quantity ${combined} exceeds the cumulative per-wallet cap ${cap}, so only the EARLIEST plan can succeed; the rest are backups that will be refused if it does`
+        : "";
     lines.push({
       level: "WARN",
       label: "wallet share",
-      detail: `plan(s) ${otherIds.join(", ")} also use this wallet (fire instants > 60s apart)`,
+      detail: `plan(s) ${otherIds.join(", ")} also use this wallet${cumulative}`,
     });
   }
   return lines;
@@ -725,7 +740,7 @@ async function run(
         w.id as wallet_id, w.address as wallet_address, w.label as wallet_label,
         w.enabled as wallet_enabled,
         (w.encrypted_signing_key is not null) as has_signing_key,
-        pr.slug as project_slug, pr.name as project_name, pr.chain_id,
+        p.project_id, pr.slug as project_slug, pr.name as project_name, pr.chain_id,
         s.id as stage_id, s.label as stage_label, s.type as stage_kind, s.paused as stage_paused,
         s.starts_at as stage_starts_at, s.ends_at as stage_ends_at, s.max_per_wallet,
         s.price_wei as stage_price_wei, s.currency as stage_currency
@@ -748,8 +763,16 @@ async function run(
   console.log("");
 
   /* Shared: RPC health for every endpoint the broadcast path would use. */
-  const broadcastUrls = await resolveBroadcastRpcUrls(db, chainId, config.RPC_URL, 8);
-  const bestUrl = await resolveBestRpcUrl(db, chainId, config.RPC_URL);
+  // Use the SAME endpoint list the fire path uses, not the registry alone.
+  // Premium endpoints are deliberately kept out of `rpc_endpoints` so that
+  // background jobs cannot spend their rate limit (see apps/worker/src/
+  // mint-rpc.ts), which meant this tool was reading only the public RPC and
+  // reporting every plan BLOCKED on "no reachable RPC" while the real fire
+  // path had two healthy premium endpoints. A readiness check that does not
+  // check what actually runs is worse than no check.
+  const registryUrls = await resolveBroadcastRpcUrls(db, chainId, config.RPC_URL, 8);
+  const broadcastUrls = mintRpcUrls(config, registryUrls);
+  const bestUrl = broadcastUrls[0] ?? (await resolveBestRpcUrl(db, chainId, config.RPC_URL));
   const probes = await Promise.all(broadcastUrls.map((url) => probeRpc(url)));
   const reachable = probes.filter((p) => p.error === null);
   const rpcUrl = reachable.find((p) => p.url === bestUrl)?.url ?? reachable[0]?.url ?? null;
@@ -821,10 +844,13 @@ async function run(
   const siblings = unwrapRows<{
     plan_id: string;
     wallet_id: string;
+    project_id: string;
+    quantity: number;
     fire_target: string | Date | null;
   }>(
     await db.execute(sql`
-      select p.id as plan_id, p.wallet_id, coalesce(p.fire_at, s.starts_at) as fire_target
+      select p.id as plan_id, p.wallet_id, p.project_id, p.quantity,
+             coalesce(p.fire_at, s.starts_at) as fire_target
       from mint_plans p
         left join drop_stages s on s.id = p.stage_id
       where p.status in ('armed', 'draft')
@@ -833,6 +859,8 @@ async function run(
     (r): SiblingPlan => ({
       planId: r.plan_id,
       walletId: r.wallet_id,
+      projectId: r.project_id,
+      quantity: Number(r.quantity),
       fireTargetMs: r.fire_target === null ? null : coerceDate(r.fire_target).getTime(),
     }),
   );
@@ -909,7 +937,14 @@ async function run(
     }
   }
 
-  const globalBlocked = globalLines.some((l) => l.level === "BLOCKER");
+  // A dead endpoint among several healthy ones is not fatal — the fire path
+  // races them and needs only one. Only treat the shared checks as blocking
+  // when NOTHING is reachable.
+  const rpcLines = globalLines.filter((l) => l.label.startsWith("rpc"));
+  const anyRpcOk = rpcLines.some((l) => l.level === "OK");
+  const globalBlocked = globalLines.some(
+    (l) => l.level === "BLOCKER" && !(l.label.startsWith("rpc") && anyRpcOk),
+  );
   console.log(`SUMMARY  ${ready} plans ready, ${blocked} blocked`);
   if (warned > 0) {
     console.log(`         ${warned} of the ready plans carry a WARN — read the rows above`);

@@ -12,6 +12,7 @@ import {
   getSetting,
   liveNextSlugs,
   markProjectDelisted,
+  markProjectDropChecked,
   markProviderHealth,
   projectBySlugWithStageCount,
   projectSocialsFetchedAt,
@@ -423,6 +424,13 @@ export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promis
   let payload: unknown;
   try {
     payload = await client.getDrop(slug);
+    // Stamp EVERY consulted slug, whatever the answer. `markProjectDropChecked`
+    // existed but was called from nowhere, so `projects.drop_checked_at` was
+    // permanently NULL — which silently disabled both freshness filters built
+    // on it (`liveNextSlugs`, `refreshArmedPlanDetails`): their `is null`
+    // branch always matched, nothing was ever skipped, and the dedupe saved
+    // exactly nothing.
+    await markProjectDropChecked(db, slug, new Date()).catch(() => undefined);
   } catch (error) {
     // A collection discovered via the chain-wide sweep may not be a SeaDrop
     // drop at all — `/drops/{slug}` then 404s. That is expected, not a
@@ -436,6 +444,7 @@ export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promis
       const known = await projectBySlugWithStageCount(db, slug);
       if (known !== undefined && known.stages > 0 && known.lifecycle !== "ENDED") {
         await markProjectDelisted(db, known.id);
+        await markProjectDropChecked(db, slug, new Date()).catch(() => undefined);
         log.info({ slug }, "detail refresh: drop no longer on OpenSea (404) — marked delisted");
         return;
       }
@@ -517,7 +526,15 @@ export const DISCOVERY_QUEUE = QUEUE_NAMES.discovery;
  */
 export async function refreshArmedPlanDetails(
   ctx: WorkerContext,
-  horizonMs = 6 * 60 * 60_000,
+  // Two days, not six hours. The first version used a 6h horizon and silently
+  // skipped every plan set up further ahead — which is when an operator
+  // actually sets them up. projectcpu was staged 11h before its mint and its
+  // schedule was never fetched at all. The horizon exists to bound cost, and
+  // `staleMs` already does that far better.
+  horizonMs = 48 * 60 * 60_000,
+  // Never re-ask about a project we read recently. Without this, widening the
+  // horizon would just re-fetch the same drops every five minutes.
+  staleMs = 15 * 60_000,
 ): Promise<number> {
   const { db, config, log } = ctx;
   const rows = await db.execute(sql`
@@ -527,8 +544,13 @@ export async function refreshArmedPlanDetails(
       left join drop_stages s on s.id = mp.stage_id
      where mp.status in ('armed', 'draft')
        and p.slug is not null
+       and coalesce(mp.fire_at, s.starts_at, mp.armed_at) > now() - interval '1 hour'
        and coalesce(mp.fire_at, s.starts_at, mp.armed_at)
            <= now() + ${`${Math.round(horizonMs / 1000)} seconds`}::interval
+       and (
+         p.drop_checked_at is null
+         or p.drop_checked_at < now() - ${`${Math.round(staleMs / 1000)} seconds`}::interval
+       )
   `);
   const slugs = unwrapRows<{ slug: string }>(rows)
     .map((r) => r.slug)

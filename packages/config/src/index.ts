@@ -181,6 +181,7 @@ export const envSchema = z.object({
    */
   ALCHEMY_ROBINHOOD_RPC: z.string().url().optional(),
   CHAINSTACK_ROBINHOOD_RPC: z.string().url().optional(),
+  DRPC_ROBINHOOD_RPC: z.string().url().optional(),
   /**
    * How many OpenSea keys the radar SCAN may use. The remainder are reserved
    * for minting and the scan can never touch them. Ignored when only one key

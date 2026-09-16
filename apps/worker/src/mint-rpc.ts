@@ -1,3 +1,4 @@
+import { deriveRpcUrl, rpcUrlServesChain } from "@hoodmint/core";
 /**
  * RPC routing for the mint fire path only.
  *
@@ -18,8 +19,23 @@
 export interface MintRpcConfig {
   readonly ALCHEMY_ROBINHOOD_RPC?: string | undefined;
   readonly CHAINSTACK_ROBINHOOD_RPC?: string | undefined;
+  readonly DRPC_ROBINHOOD_RPC?: string | undefined;
   readonly RPC_URL?: string | undefined;
 }
+
+/**
+ * Preference order for the fire path, fastest first.
+ *
+ * Measured 2026-09-16, three `eth_chainId` calls each from this host:
+ * dRPC 66 ms, Chainstack 68 ms, Alchemy 133 ms. Reads fail over in this
+ * order, so the first entry sets the latency the mint actually pays; the
+ * broadcast races all of them and does not care about order.
+ */
+const PROVIDER_ORDER = [
+  "DRPC_ROBINHOOD_RPC",
+  "CHAINSTACK_ROBINHOOD_RPC",
+  "ALCHEMY_ROBINHOOD_RPC",
+] as const;
 
 /**
  * Ordered, de-duplicated endpoints for the fire path: premium providers
@@ -33,8 +49,9 @@ export function mintRpcUrls(config: MintRpcConfig, registryUrls: readonly string
       out.push(url);
     }
   };
-  push(config.ALCHEMY_ROBINHOOD_RPC);
-  push(config.CHAINSTACK_ROBINHOOD_RPC);
+  for (const key of PROVIDER_ORDER) {
+    push(config[key]);
+  }
   for (const url of registryUrls) {
     push(url);
   }
@@ -114,4 +131,42 @@ export async function warmRpcConnections(
       }
     }),
   );
+}
+
+/**
+ * The same list, for a network other than the one the operator configured.
+ *
+ * Alchemy and dRPC encode the network as a replaceable token, so a single
+ * configured endpoint per provider covers every chain they serve — the
+ * operator enters each provider once, not once per network. Chainstack's path
+ * is a per-node token and is silently dropped for other chains rather than
+ * guessed, because a fabricated endpoint would only fail at the fire instant.
+ *
+ * Unlike `mintRpcUrls` this does NOT append `config.RPC_URL`: that env value
+ * names one specific chain's public node, so it is meaningless for any other.
+ * The caller's `registryUrls` already carries the right per-chain fallback,
+ * because `resolveBroadcastRpcUrls` appends it for the chain it was asked about.
+ */
+export function mintRpcUrlsForChain(
+  config: MintRpcConfig,
+  chainId: number,
+  registryUrls: readonly string[] = [],
+): string[] {
+  const out: string[] = [];
+  const push = (url: string | undefined) => {
+    if (url !== undefined && url.trim() !== "" && !out.includes(url)) {
+      out.push(url);
+    }
+  };
+  for (const key of PROVIDER_ORDER) {
+    const template = config[key];
+    if (template === undefined || template.trim() === "") {
+      continue;
+    }
+    push(rpcUrlServesChain(template, chainId) ? template : deriveRpcUrl(template, chainId));
+  }
+  for (const url of registryUrls) {
+    push(url);
+  }
+  return out;
 }

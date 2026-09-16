@@ -1,0 +1,9 @@
+[Unit]
+Description=CARV verifier stall watchdog
+Documentation=file:///home/web/opensea-tools/infra/systemd/carvnode-watchdog.sh
+Requires=docker.service
+After=docker.service carvnode.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/web/opensea-tools/infra/systemd/carvnode-watchdog.sh

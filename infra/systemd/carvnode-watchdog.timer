@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the CARV verifier stall watchdog every 5 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=carvnode-watchdog.service
+
+[Install]
+WantedBy=timers.target

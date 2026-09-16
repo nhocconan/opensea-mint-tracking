@@ -1,0 +1,17 @@
+[Unit]
+Description=HoodMint shared ingress (Traefik + socket-proxy)
+Documentation=file:///home/web/opensea-tools/infra/ingress/docker-compose.yml
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/web/opensea-tools/infra/ingress
+TimeoutStartSec=300
+ExecStart=/usr/bin/docker compose -p balancer -f docker-compose.yml up -d --no-build --remove-orphans
+ExecStop=/usr/bin/docker compose -p balancer -f docker-compose.yml stop -t 30
+
+[Install]
+WantedBy=multi-user.target

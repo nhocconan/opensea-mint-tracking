@@ -16,6 +16,7 @@ export * from "./not-a-drop.ts";
 export * from "./presign.ts";
 export * from "./quota.ts";
 export * from "./rarity.ts";
+export * from "./rpc-derive.ts";
 export * from "./schedule.ts";
 export * from "./stage-alerts.ts";
 export * from "./stage-id.ts";

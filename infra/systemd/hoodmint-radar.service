@@ -1,0 +1,21 @@
+[Unit]
+Description=HoodMint Radar production stack (postgres, valkey, migrate, web, worker)
+Documentation=file:///home/web/opensea-tools/docker-compose.prod.yml
+Requires=docker.service
+After=docker.service network-online.target hoodmint-ingress.service
+Wants=network-online.target hoodmint-ingress.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/web/opensea-tools
+TimeoutStartSec=600
+# --no-build: boot must never wait on an image build. A missing image fails
+# loudly here instead of silently serving nothing.
+ExecStart=/usr/bin/docker compose -p hoodmint-radar-prod -f docker-compose.prod.yml up -d --no-build --remove-orphans
+# Prove the app actually answers before systemd calls the unit started.
+ExecStartPost=/bin/bash -c 'cid=""; for i in $(seq 1 90); do cid=$(/usr/bin/docker compose -p hoodmint-radar-prod -f docker-compose.prod.yml ps -q web); if [ -n "$cid" ] && [ "$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" "$cid")" = healthy ]; then echo "web healthy after ${i}s"; exit 0; fi; sleep 1; done; echo "web never became healthy" >&2; /usr/bin/docker compose -p hoodmint-radar-prod -f docker-compose.prod.yml logs --tail=50 web >&2; exit 1'
+ExecStop=/usr/bin/docker compose -p hoodmint-radar-prod -f docker-compose.prod.yml stop -t 30
+
+[Install]
+WantedBy=multi-user.target
