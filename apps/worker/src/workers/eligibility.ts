@@ -59,7 +59,13 @@ export async function runEligibilityPass(
   // OPENSEA_PER_MINUTE_LIMIT independently, so N keys ≈ N× budget. One
   // request per wallet×drop pair; leave ~half of each key's minute for the
   // other loops (discovery, detail refresh, pre-build).
-  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+  const key = await resolveOpenSeaKey(
+    db,
+    config.APP_ENCRYPTION_KEY,
+    config.OPENSEA_API_KEY,
+    "scan",
+    config.OPENSEA_SCAN_KEY_COUNT,
+  );
   const perPass =
     limit ??
     Math.min(

@@ -68,10 +68,38 @@ export async function invalidateInstantKeyOnAuthFailure(
   return true;
 }
 
+/**
+ * Which half of the key pool a caller is allowed to spend.
+ *
+ * The mint path and the radar scan compete for the same hourly budget, and
+ * the scan always wins by sheer volume — on 2026-09-15 background discovery
+ * exhausted the quota and the signature burst had nothing left at the open.
+ * Splitting the pool makes that impossible by construction rather than by
+ * good behaviour: `scan` gets the first OPENSEA_SCAN_KEY_COUNT keys, `mint`
+ * gets the rest, and neither can touch the other's.
+ */
+export type KeyPurpose = "scan" | "mint";
+
+export function partitionKeys(
+  keys: readonly string[],
+  purpose: KeyPurpose,
+  scanCount: number,
+): string[] {
+  // One key can never be split; both purposes share it rather than one going
+  // dark. The split only exists once there are at least two.
+  if (keys.length < 2) {
+    return [...keys];
+  }
+  const n = Math.min(Math.max(1, scanCount), keys.length - 1);
+  return purpose === "scan" ? [...keys.slice(0, n)] : [...keys.slice(n)];
+}
+
 export async function resolveOpenSeaKey(
   db: Db,
   masterKey: string,
   envKey?: string,
+  purpose: KeyPurpose = "mint",
+  scanKeyCount = 1,
 ): Promise<ResolvedKey> {
   // Every saved Developer key, decrypted — the client spreads load across
   // all of them. The operator can add more keys in Admin → OpenSea to scale
@@ -88,9 +116,10 @@ export async function resolveOpenSeaKey(
     portalKeys.push(envKey);
   }
   if (portalKeys.length > 0) {
+    const allowed = partitionKeys(portalKeys, purpose, scanKeyCount);
     return {
-      apiKey: portalKeys[0] as string,
-      apiKeys: portalKeys,
+      apiKey: allowed[0] as string,
+      apiKeys: allowed,
       instant: false,
       expiresAt: portals[0]?.expiresAt ?? null,
     };

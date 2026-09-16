@@ -65,9 +65,13 @@ async function invalidateRejectedInstantKey(ctx: WorkerContext): Promise<boolean
   // Credential resolution can itself fail while instant-key issuance is
   // parked. Keep cleanup best-effort so an AuthRequired outcome does not
   // escape the provider catch and trigger BullMQ's short generic retries.
-  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY).catch(
-    () => null,
-  );
+  const key = await resolveOpenSeaKey(
+    db,
+    config.APP_ENCRYPTION_KEY,
+    config.OPENSEA_API_KEY,
+    "scan",
+    config.OPENSEA_SCAN_KEY_COUNT,
+  ).catch(() => null);
   return key === null ? false : invalidateInstantKeyOnAuthFailure(db, key).catch(() => false);
 }
 
@@ -90,7 +94,13 @@ export async function runDiscoveryCycle(
       return { feedType, found: 0, created: 0, malformed: 0, ok: true, errorCode: "disabled" };
     }
 
-    const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+    const key = await resolveOpenSeaKey(
+      db,
+      config.APP_ENCRYPTION_KEY,
+      config.OPENSEA_API_KEY,
+      "scan",
+      config.OPENSEA_SCAN_KEY_COUNT,
+    );
     const client = new OpenSeaClient({
       apiKey: key.apiKey,
       apiKeys: key.apiKeys,
@@ -240,7 +250,13 @@ export async function runCollectionDiscovery(ctx: WorkerContext): Promise<Discov
       return { feedType, found: 0, created: 0, malformed: 0, ok: true, errorCode: "disabled" };
     }
 
-    const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+    const key = await resolveOpenSeaKey(
+      db,
+      config.APP_ENCRYPTION_KEY,
+      config.OPENSEA_API_KEY,
+      "scan",
+      config.OPENSEA_SCAN_KEY_COUNT,
+    );
     const client = new OpenSeaClient({
       apiKey: key.apiKey,
       apiKeys: key.apiKeys,
@@ -392,7 +408,13 @@ export async function refreshLiveNextDetails(ctx: WorkerContext, limit = 300): P
 
 export async function runDetailRefresh(ctx: WorkerContext, slug: string): Promise<void> {
   const { db, config, log } = ctx;
-  const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+  const key = await resolveOpenSeaKey(
+    db,
+    config.APP_ENCRYPTION_KEY,
+    config.OPENSEA_API_KEY,
+    "scan",
+    config.OPENSEA_SCAN_KEY_COUNT,
+  );
   const client = new OpenSeaClient({
     apiKey: key.apiKey,
     apiKeys: key.apiKeys,

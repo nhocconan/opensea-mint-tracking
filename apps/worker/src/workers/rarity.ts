@@ -59,7 +59,13 @@ export async function runRarityRefresh(
       return { ok: false, totalTokens: 0, truncated: false, errorCode: "no_opensea_slug" };
     }
 
-    const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+    const key = await resolveOpenSeaKey(
+      db,
+      config.APP_ENCRYPTION_KEY,
+      config.OPENSEA_API_KEY,
+      "scan",
+      config.OPENSEA_SCAN_KEY_COUNT,
+    );
     const client = new OpenSeaClient({
       apiKey: key.apiKey,
       apiKeys: key.apiKeys,

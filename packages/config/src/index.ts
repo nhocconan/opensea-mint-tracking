@@ -181,6 +181,28 @@ export const envSchema = z.object({
    */
   ALCHEMY_ROBINHOOD_RPC: z.string().url().optional(),
   CHAINSTACK_ROBINHOOD_RPC: z.string().url().optional(),
+  /**
+   * How many OpenSea keys the radar SCAN may use. The remainder are reserved
+   * for minting and the scan can never touch them. Ignored when only one key
+   * is configured — a single key is shared rather than leaving one side dark.
+   */
+  /**
+   * Hard ceiling, in wei, for a plan whose stage is FREE or whose price is
+   * unknown.
+   *
+   * The per-plan ceiling is the only thing standing between the operator and
+   * a drop that flips from free to paid between arming and firing — nothing
+   * re-reads the price at the fire instant, and SeaDrop demands exact
+   * payment, so whatever the stage says at T is what gets spent. A loose
+   * ceiling on a "free" mint is therefore a blank cheque. 0.0002 ETH is
+   * roughly $0.50: enough for any legitimate fee component, far too little to
+   * be worth stealing.
+   */
+  MINT_FREE_STAGE_CEILING_WEI: z
+    .string()
+    .regex(/^[0-9]+$/, "must be a wei amount in decimal digits")
+    .default("200000000000000"),
+  OPENSEA_SCAN_KEY_COUNT: positiveInt.default(1),
   MINT_PRESIGN_ENABLED: bool.default(false),
   PUBLIC_SCAN_ENABLED: bool.default(true),
   /**

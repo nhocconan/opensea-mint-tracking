@@ -43,12 +43,45 @@ export async function projectBySlugWithStageCount(
 }
 
 /** Slugs of LIVE/NEXT drops, for the periodic delisting/freshness re-check. */
-export async function liveNextSlugs(db: Db, limit = 300): Promise<string[]> {
+/**
+ * Live/next collections whose drop detail is actually STALE.
+ *
+ * This used to return every LIVE or NEXT project up to the limit, on every
+ * run, with no regard for when each was last read — so a 15-minute sweep
+ * re-fetched the same 300 collections four times an hour whether or not
+ * anything could possibly have changed. `projects.drop_checked_at` is already
+ * stamped by `markProjectDropChecked` on every `/drops/{slug}` call; honouring
+ * it is the difference between paying for new information and paying for the
+ * same answer again.
+ *
+ * The staleness threshold follows the project's own urgency, matching
+ * FRESHNESS_INTERVALS in packages/core: a LIVE drop can move at any moment,
+ * a NEXT one cannot move faster than its own schedule.
+ */
+export async function liveNextSlugs(
+  db: Db,
+  limit = 300,
+  opts: { liveStaleMs?: number; nextStaleMs?: number } = {},
+): Promise<string[]> {
+  const liveSec = Math.round((opts.liveStaleMs ?? 5 * 60_000) / 1000);
+  const nextSec = Math.round((opts.nextStaleMs ?? 30 * 60_000) / 1000);
   const rows = await db
     .select({ slug: projects.slug })
     .from(projects)
     .where(
-      and(sql`${projects.lifecycleStatus} in ('LIVE', 'NEXT')`, sql`${projects.slug} is not null`),
+      and(
+        sql`${projects.lifecycleStatus} in ('LIVE', 'NEXT')`,
+        sql`${projects.slug} is not null`,
+        sql`(
+          ${projects.dropCheckedAt} is null
+          or ${projects.dropCheckedAt} < now() - (
+            case when ${projects.lifecycleStatus} = 'LIVE'
+                 then ${`${liveSec} seconds`}::interval
+                 else ${`${nextSec} seconds`}::interval
+            end
+          )
+        )`,
+      ),
     )
     .orderBy(projects.nextStageStart)
     .limit(limit);

@@ -189,3 +189,24 @@ export async function buildOpenSeaMintTx(
   });
   return { to: tx.to, data: tx.data, valueWei: tx.valueWei, chainId: tx.chainId };
 }
+
+/**
+ * Is a provider "minted out" answer terminal for THIS plan?
+ *
+ * OpenSea's /mint takes no stage argument — it answers about whichever stage
+ * it currently considers active. The fire path deliberately starts polling
+ * before our own stage opens, so an early "minted out" is usually about the
+ * PREVIOUS phase, whose allocation is spent by then. Both FCFS phases on
+ * 2026-09-16 were lost to this: each plan was killed 757ms after its
+ * published start, before any calldata had been obtained, while supply
+ * remained (hoodminers 4173/5000 five minutes earlier).
+ *
+ * Terminal only once our own stage is genuinely open.
+ */
+export function mintedOutIsTerminal(input: {
+  nowMs: number;
+  fireTargetMs: number | null;
+}): boolean {
+  // No known target: we cannot argue it is early, so trust the provider.
+  return input.fireTargetMs === null || input.nowMs >= input.fireTargetMs;
+}

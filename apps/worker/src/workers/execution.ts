@@ -17,6 +17,7 @@
 import {
   assessMintFunding,
   CHAIN_CLOCK_OFFSET_SETTING_KEY,
+  chainTimeToLocalMs,
   coerceDate,
   computeFirePhase,
   decidePresign,
@@ -71,8 +72,10 @@ import {
   burstBuildOpenSeaMintTx,
   isPerWalletLimitError,
   isTerminalMintBuildError,
+  mintedOutIsTerminal,
 } from "../mint-tx.ts";
 import { releaseNonce, reserveNonce } from "../nonce-allocator.ts";
+import { buildSelfServedPublicMint, type SelfServedTx } from "../seadrop-public-mint.ts";
 import { CACHE_TTL_MS } from "./pre-build.ts";
 import { resolveBestRpcUrl, resolveBroadcastRpcUrls } from "./rpc-health.ts";
 
@@ -127,6 +130,13 @@ const PRIOR_BROADCAST_GRACE_MS = 3_000;
 const MAX_ONCHAIN_REVERTS = 3;
 
 /**
+ * How long a claimed self-served plan may sit waiting for the contract's own
+ * open. Bounded well under the 30s claim lease: past this the plan is handed
+ * back and the 200ms hot loop brings it round again.
+ */
+const SELF_SERVED_MAX_HOLD_MS = 15_000;
+
+/**
  * Precision fire hot-loop (ADR 0009 competitiveness — the piece that turns
  * the tested `computeFirePhase` core into real timing). Runs on a fast
  * interval (MINT_HOT_LOOP_INTERVAL_MS, ~200ms) alongside the coarse 30s
@@ -157,20 +167,31 @@ const underfundedRecheckAt = new Map<string, number>();
  * True when now is within ±window of the plan's fire target —
  * coalesce(fire_at, stage start). A plan with neither is never "near".
  */
+/** The instant this plan is aiming at: operator override, else stage start. */
+async function fireTargetMs(
+  db: WorkerContext["db"],
+  plan: { fireAt: Date | string | null; stageId: string | null },
+): Promise<number | null> {
+  if (plan.fireAt !== null) {
+    return coerceDate(plan.fireAt).getTime();
+  }
+  if (plan.stageId === null) {
+    return null;
+  }
+  const [stage] = await db
+    .select({ startsAt: dropStagesTable.startsAt })
+    .from(dropStagesTable)
+    .where(eq(dropStagesTable.id, plan.stageId))
+    .limit(1);
+  return stage === undefined ? null : coerceDate(stage.startsAt).getTime();
+}
+
 async function isNearFireInstant(
   db: WorkerContext["db"],
   plan: { fireAt: Date | string | null; stageId: string | null },
   windowMs: number,
 ): Promise<boolean> {
-  let targetMs: number | null = plan.fireAt === null ? null : coerceDate(plan.fireAt).getTime();
-  if (targetMs === null && plan.stageId !== null) {
-    const [stage] = await db
-      .select({ startsAt: dropStagesTable.startsAt })
-      .from(dropStagesTable)
-      .where(eq(dropStagesTable.id, plan.stageId))
-      .limit(1);
-    targetMs = stage === undefined ? null : coerceDate(stage.startsAt).getTime();
-  }
+  const targetMs = await fireTargetMs(db, plan);
   return targetMs !== null && Math.abs(Date.now() - targetMs) <= windowMs;
 }
 
@@ -667,6 +688,116 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       );
       feesPrefetch.catch(() => undefined);
     }
+    // ── SELF-SERVED PUBLIC MINT ──────────────────────────────────────────
+    // A `public` stage is `mintPublic` on SeaDrop: no signature, no allowlist
+    // proof, nothing OpenSea has to grant us. Verified on chain 4663 —
+    // `eth_call` of mintPublic from an unrelated address succeeds on live
+    // public drops, and `getPublicDrop().startTime` matched OpenSea's
+    // published schedule to the second on every collection sampled.
+    //
+    // That matters because OpenSea's /mint does not answer until OPENSEA's
+    // clock flips (measured T+343ms and T+405ms), and two FCFS drops sold out
+    // inside that window. Building the calldata ourselves removes OpenSea —
+    // and OpenSea's clock — from the public path entirely.
+    //
+    // `allowlist` stages are NOT SeaDrop merkle allowlists here (merkle root
+    // is zero chain-wide); OpenSea implements them with `mintSigned`, whose
+    // signature only its own signer can produce. Those must keep using the
+    // burst.
+    const selfServed = await buildSelfServedPublicMint({
+      rpcUrls: fireUrls,
+      stageId: plan.stageId,
+      db,
+      contractAddress: project.contractAddress,
+      minter: wallet.address,
+      quantity: plan.quantity,
+      chainId: project.chainId,
+      // SeaDrop credits msg.sender. Under custom_executor the payer is the
+      // Executor contract, so the NFT would land there instead of the wallet.
+      ...(signerScheme === "custom_executor" ? { minterIfNotPayer: wallet.address } : {}),
+    });
+
+    if (selfServed.kind === "sold_out") {
+      log.warn({ planId: plan.id }, "public drop is sold out on-chain — plan failed (terminal)");
+      await record("failed", { errorCode: "minted_out: on-chain supply exhausted" });
+      await failPlanAndNotify(db, plan);
+      return { expired, claimed: true, outcome: "minted_out", planId: plan.id };
+    }
+    if (selfServed.kind === "allowance_exhausted") {
+      log.warn(
+        { planId: plan.id },
+        "wallet has no per-wallet allowance left on this drop — plan failed (terminal)",
+      );
+      await record("failed", { errorCode: "allowance_exhausted: on-chain getMintStats" });
+      await failPlanAndNotify(db, plan);
+      return { expired, claimed: true, outcome: "allowance_exhausted", planId: plan.id };
+    }
+    if (selfServed.kind === "read_failed") {
+      // Do not hide it: falling through to OpenSea still works, but a silent
+      // RPC failure here is a misconfiguration the operator should see.
+      log.warn(
+        { planId: plan.id, err: selfServed.message },
+        "self-served public read failed on every endpoint — falling back to OpenSea",
+      );
+      await record("failed", {
+        errorCode: `self_served_read_failed: ${selfServed.message}`.slice(0, 200),
+      });
+    }
+
+    let selfServedTx: SelfServedTx | undefined;
+    let selfServedHoldUntilMs: number | null = null;
+    let selfServedOnChainStartMs: number | null = null;
+    if (selfServed.kind === "built") {
+      if (selfServed.quantity < selfServed.requestedQuantity) {
+        log.warn(
+          {
+            planId: plan.id,
+            requested: selfServed.requestedQuantity,
+            using: selfServed.quantity,
+          },
+          "public mint quantity clamped by the on-chain per-wallet cap / remaining supply",
+        );
+        await record("failed", {
+          errorCode: `quantity_clamped: requested=${selfServed.requestedQuantity} using=${selfServed.quantity}`,
+        });
+      }
+      // THE CONTRACT'S clock, not OpenSea's. `_checkActive` runs first and
+      // reverts NotActive before anything else, so firing against a stale
+      // published time burns gas and — with the revert cap — can terminally
+      // fail a plan at its own open. updatePublicDrop can move this window at
+      // any time, so the on-chain value always wins.
+      const clockOffsetMs = (await getSetting<number>(db, CHAIN_CLOCK_OFFSET_SETTING_KEY)) ?? 0;
+      const openLocalMs = chainTimeToLocalMs(selfServed.onChainStartMs, clockOffsetMs);
+      const closeLocalMs = chainTimeToLocalMs(selfServed.onChainEndMs, clockOffsetMs);
+      const publishedMs = await fireTargetMs(db, plan);
+      if (publishedMs !== null && Math.abs(openLocalMs - publishedMs) > 1_000) {
+        log.warn(
+          {
+            planId: plan.id,
+            onChain: new Date(openLocalMs).toISOString(),
+            openSea: new Date(publishedMs).toISOString(),
+          },
+          "on-chain public start disagrees with OpenSea's published time — trusting the chain",
+        );
+      }
+      if (Date.now() > closeLocalMs) {
+        await record("failed", { errorCode: "public_window_closed" });
+        await failPlanAndNotify(db, plan);
+        return { expired, claimed: true, outcome: "public_window_closed", planId: plan.id };
+      }
+      const sendAtMs = openLocalMs - config.MINT_FIRE_LEAD_MS;
+      const waitMs = sendAtMs - Date.now();
+      if (waitMs > SELF_SERVED_MAX_HOLD_MS) {
+        // Too early to hold inside the claim lease — give the plan back and
+        // let the 200ms hot loop bring us round again.
+        await releaseMintPlanToArmed(db, plan.id, new Date());
+        return { expired, claimed: true, outcome: "self_served_not_open", planId: plan.id };
+      }
+      selfServedTx = selfServed.tx;
+      selfServedHoldUntilMs = waitMs > 0 ? sendAtMs : null;
+      selfServedOnChainStartMs = selfServed.onChainStartMs;
+    }
+
     const cachedAt = plan.cachedTxAt === null ? null : coerceDate(plan.cachedTxAt);
     // A cached blob is only safe OUTSIDE the fire instant. runSpeculativePreBuild
     // has no stage-timing filter, so while an EARLIER phase is live (an FCFS
@@ -680,68 +811,70 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     const cacheIsFresh =
       !nearFire && cachedAt !== null && Date.now() - cachedAt.getTime() < CACHE_TTL_MS;
     const tx =
-      cacheIsFresh && plan.cachedTx !== null
-        ? {
-            to: plan.cachedTx.to,
-            data: plan.cachedTx.data,
-            valueWei: plan.cachedTx.valueWei,
-            chainId: plan.cachedTx.chainId,
-            expectedFrom: wallet.address,
-          }
-        : await (async () => {
-            const target = {
-              slug: project.slug as string,
-              chainId: project.chainId,
-              minter: wallet.address,
-              quantity: plan.quantity,
-            };
-            // Shared build helper (finding #8) — identical to what the
-            // pre-build pass caches, so cache-hit and cache-miss can't drift.
-            //
-            // Descend on a per-wallet-limit refusal. max_per_wallet is
-            // CUMULATIVE across phases, so a wallet holding 1 from a GTD
-            // phase is refused at 2 on the FCFS phase but would be allowed
-            // at 1. The arm-time clamp already sizes most of this from
-            // mint_events, but a mint made in another tool seconds earlier is
-            // not indexed yet — this is the backstop that still gets the
-            // operator the tokens they are entitled to instead of failing
-            // the plan outright.
-            let built: Awaited<ReturnType<typeof buildOpenSeaMintTx>> | undefined;
-            let lastLimitError: unknown;
-            for (let qty = plan.quantity; qty >= 1; qty -= 1) {
-              try {
-                built = nearFire
-                  ? await burstBuildOpenSeaMintTx(
-                      ctx,
-                      { ...target, quantity: qty },
-                      {
-                        maxMs: config.MINT_SIGNATURE_BURST_MS,
-                        cadenceMs: config.MINT_SIGNATURE_BURST_CADENCE_MS,
-                      },
-                    )
-                  : await buildOpenSeaMintTx(ctx, { ...target, quantity: qty });
-                if (qty !== plan.quantity) {
-                  log.warn(
-                    { planId: plan.id, requested: plan.quantity, using: qty },
-                    "OpenSea refused the requested quantity for this wallet — rebuilt at the remaining allowance",
-                  );
+      selfServedTx !== undefined
+        ? selfServedTx
+        : cacheIsFresh && plan.cachedTx !== null
+          ? {
+              to: plan.cachedTx.to,
+              data: plan.cachedTx.data,
+              valueWei: plan.cachedTx.valueWei,
+              chainId: plan.cachedTx.chainId,
+              expectedFrom: wallet.address,
+            }
+          : await (async () => {
+              const target = {
+                slug: project.slug as string,
+                chainId: project.chainId,
+                minter: wallet.address,
+                quantity: plan.quantity,
+              };
+              // Shared build helper (finding #8) — identical to what the
+              // pre-build pass caches, so cache-hit and cache-miss can't drift.
+              //
+              // Descend on a per-wallet-limit refusal. max_per_wallet is
+              // CUMULATIVE across phases, so a wallet holding 1 from a GTD
+              // phase is refused at 2 on the FCFS phase but would be allowed
+              // at 1. The arm-time clamp already sizes most of this from
+              // mint_events, but a mint made in another tool seconds earlier is
+              // not indexed yet — this is the backstop that still gets the
+              // operator the tokens they are entitled to instead of failing
+              // the plan outright.
+              let built: Awaited<ReturnType<typeof buildOpenSeaMintTx>> | undefined;
+              let lastLimitError: unknown;
+              for (let qty = plan.quantity; qty >= 1; qty -= 1) {
+                try {
+                  built = nearFire
+                    ? await burstBuildOpenSeaMintTx(
+                        ctx,
+                        { ...target, quantity: qty },
+                        {
+                          maxMs: config.MINT_SIGNATURE_BURST_MS,
+                          cadenceMs: config.MINT_SIGNATURE_BURST_CADENCE_MS,
+                        },
+                      )
+                    : await buildOpenSeaMintTx(ctx, { ...target, quantity: qty });
+                  if (qty !== plan.quantity) {
+                    log.warn(
+                      { planId: plan.id, requested: plan.quantity, using: qty },
+                      "OpenSea refused the requested quantity for this wallet — rebuilt at the remaining allowance",
+                    );
+                  }
+                  break;
+                } catch (error: unknown) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  if (!isPerWalletLimitError(message) || qty === 1) {
+                    throw error;
+                  }
+                  lastLimitError = error;
                 }
-                break;
-              } catch (error: unknown) {
-                const message = error instanceof Error ? error.message : String(error);
-                if (!isPerWalletLimitError(message) || qty === 1) {
-                  throw error;
-                }
-                lastLimitError = error;
               }
-            }
-            if (built === undefined) {
-              throw lastLimitError instanceof Error
-                ? lastLimitError
-                : new Error("mint build failed at every quantity");
-            }
-            return { ...built, expectedFrom: wallet.address };
-          })();
+              if (built === undefined) {
+                throw lastLimitError instanceof Error
+                  ? lastLimitError
+                  : new Error("mint build failed at every quantity");
+              }
+              return { ...built, expectedFrom: wallet.address };
+            })();
 
     mark("calldata_ready");
     const outcome = await runExecutionPipeline(
@@ -857,6 +990,8 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
           nearFire,
           feesPrefetch,
           fireUrls,
+          holdUntilMs: selfServedHoldUntilMs,
+          onChainStartMs: selfServedOnChainStartMs,
         });
       } else {
         await runDelegatedFire(ctx, plan, outcome, delegatedSignerRow, rpcUrl, record);
@@ -867,12 +1002,39 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown_error";
     if (isMintedOutError(message)) {
-      // Nothing left to mint — OpenSea says the drop is fully minted out
-      // (Goat Street 2026-08-28: supply went in an earlier phase, the
-      // "next" phase never had any). Terminal: stop hammering the API every
-      // tick and tell the operator plainly.
-      log.warn({ planId: plan.id }, "drop fully minted out — plan failed (terminal)");
-      await record("failed", { errorCode: "minted_out: drop is fully minted out" });
+      // OpenSea's /mint takes no stage argument: it answers about whichever
+      // stage IT considers active. We deliberately start polling BEFORE our
+      // own stage opens, so a "minted out" arriving early is very often a
+      // statement about the PREVIOUS phase, whose allocation is naturally
+      // spent by then — not about ours, which has not started.
+      //
+      // Killing the plan on that answer is how both FCFS phases were lost on
+      // 2026-09-16: each died 757ms after its published start, before a
+      // single piece of calldata had been obtained. Exactly the same mistake
+      // as treating "exceeds max per wallet" as terminal, which this file
+      // already fixed — the reasoning was simply never carried across.
+      //
+      // So: terminal only once OUR stage is genuinely open. Before that,
+      // release and keep competing.
+      const targetMs = await fireTargetMs(db, plan);
+      const stageOpen = mintedOutIsTerminal({ nowMs: Date.now(), fireTargetMs: targetMs });
+      // Keep OpenSea's own words. Overwriting them with a fixed string made
+      // this failure undiagnosable after the fact.
+      const rawErr = `minted_out: ${message}`.slice(0, 200);
+      if (!stageOpen) {
+        log.warn(
+          { planId: plan.id, msUntilStage: targetMs === null ? null : targetMs - Date.now() },
+          "provider reported minted-out BEFORE our stage opened — about another phase, releasing to keep competing",
+        );
+        await record("failed", { errorCode: `minted_out_pre_open: ${message}`.slice(0, 200) });
+        await releaseMintPlanToArmed(db, plan.id, new Date());
+        return { expired, claimed: true, outcome: "minted_out_pre_open", planId: plan.id };
+      }
+      log.warn(
+        { planId: plan.id, providerMessage: message },
+        "drop fully minted out — plan failed (terminal)",
+      );
+      await record("failed", { errorCode: rawErr });
       await failPlanAndNotify(db, plan);
       return { expired, claimed: true, outcome: "minted_out", planId: plan.id };
     }
@@ -1125,6 +1287,15 @@ async function runManagedFire(
     feesPrefetch?: Promise<Awaited<ReturnType<typeof fetchFeeContext>>> | null;
     /** Mint-only endpoint list, premium first (see mint-rpc.ts). */
     fireUrls?: readonly string[];
+    /**
+     * Local instant to hold the SIGNED transaction until, for a self-served
+     * public mint. SeaDrop's `_checkActive` runs before every other check, so
+     * arriving one second early is a guaranteed revert; signing first and
+     * waking to a single sendRawTransaction is the fastest legal arrival.
+     */
+    holdUntilMs?: number | null;
+    /** The contract's own start, for classifying an early revert. */
+    onChainStartMs?: number | null;
   } = { nearFire: false },
 ): Promise<void> {
   const { db, log } = ctx;
@@ -1373,6 +1544,15 @@ async function runManagedFire(
     // all, the next tick's idempotency gate found nothing to check, and the
     // wallet signed again at the next nonce and paid twice.
     fireMark("signed");
+    if (mode.holdUntilMs !== null && mode.holdUntilMs !== undefined) {
+      const waitMs = mode.holdUntilMs - Date.now();
+      if (waitMs > 0) {
+        // Everything is done: fees, nonce, key, calldata, signature. The only
+        // work left after this sleep is one sendRawTransaction.
+        await new Promise((resolve) => setTimeout(resolve, Math.min(waitMs, 15_000)));
+        fireMark("held_for_open");
+      }
+    }
     liveSignedTxHash = signed.txHash;
     await record("broadcast", { txHash: signed.txHash });
 
@@ -1394,7 +1574,14 @@ async function runManagedFire(
     // this was a mint.
     const confirmedLive = await waitForMintReceipt(rpcUrl, broadcast.txHash);
     if (confirmedLive === "reverted") {
-      await record("failed", { errorCode: "reverted_onchain" });
+      // A revert BEFORE the contract's own start is NotActive — a timing
+      // artefact, not evidence that the drop is dead. Record it under a
+      // different code so the sold-out cap never counts it.
+      const early =
+        mode.onChainStartMs !== null &&
+        mode.onChainStartMs !== undefined &&
+        Date.now() < mode.onChainStartMs + 1_000;
+      await record("failed", { errorCode: early ? "reverted_early" : "reverted_onchain" });
       const reverts = await countRevertedAttempts(db, plan.id);
       if (reverts >= MAX_ONCHAIN_REVERTS) {
         log.warn(

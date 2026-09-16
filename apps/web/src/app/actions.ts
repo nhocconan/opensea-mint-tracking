@@ -2376,7 +2376,7 @@ export async function createSpecialMintAction(input: {
   wallets: SpecialMintWalletInput[];
   perPlanCeilingWei: string;
 }): Promise<ActionState> {
-  const { db } = container();
+  const { db, config } = container();
   let actor: string;
   try {
     const user = await requireApi("execution:configure");
@@ -2492,6 +2492,26 @@ export async function createSpecialMintAction(input: {
   // from the /drops feed and reads 1 for every stage of every drop, which
   // made this clamp refuse mints the operator was entitled to. Fall back to
   // it only when eligibility has nothing for this wallet.
+  // A FREE (or unpriced) stage gets a hard ceiling cap.
+  //
+  // The per-plan ceiling is the only thing between the operator and a drop
+  // that flips from free to paid between arming and firing: nothing re-reads
+  // the price at the fire instant, and SeaDrop demands EXACT payment, so
+  // whatever the stage says at T is what gets spent. A generous ceiling on a
+  // "free" mint is a blank cheque, and 0.005 ETH (~$12) was sitting on three
+  // such plans before this existed.
+  const freeStageCap = BigInt(config.MINT_FREE_STAGE_CEILING_WEI);
+  const stagePrice =
+    stage?.priceWei !== undefined && stage.priceWei !== null && /^[0-9]+$/.test(stage.priceWei)
+      ? BigInt(stage.priceWei)
+      : 0n;
+  if (stagePrice === 0n && BigInt(input.perPlanCeilingWei) > freeStageCap) {
+    return {
+      ok: false,
+      message: `This phase is free (or has no published price), so the per-plan ceiling is capped at ${freeStageCap.toString(10)} wei. You asked for ${input.perPlanCeilingWei}. The ceiling is what stops a drop that flips from free to paid from spending whatever it likes — keep it tight.`,
+    };
+  }
+
   const stageCaps =
     stage === undefined ? new Map<string, number>() : await stageWalletCaps(db, stage.id);
   const capFor = (walletId: string): number | null =>

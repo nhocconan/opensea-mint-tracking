@@ -5,6 +5,7 @@ export * from "./chain/mint-executor-artifact.ts";
 export * from "./chain/rpc.ts";
 export * from "./chain/rpc-url.ts";
 export * from "./chain/seadrop.ts";
+export * from "./chain/seadrop-public.ts";
 export * from "./chain/simulate.ts";
 export * from "./http.ts";
 export * from "./nvt/client.ts";

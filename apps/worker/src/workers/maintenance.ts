@@ -96,7 +96,13 @@ export async function runMaintenance(ctx: WorkerContext): Promise<MaintenanceSum
   // Instant key rotation: resolveOpenSeaKey rotates when <24h remain.
   let rotated = false;
   try {
-    const key = await resolveOpenSeaKey(db, config.APP_ENCRYPTION_KEY, config.OPENSEA_API_KEY);
+    const key = await resolveOpenSeaKey(
+      db,
+      config.APP_ENCRYPTION_KEY,
+      config.OPENSEA_API_KEY,
+      "scan",
+      config.OPENSEA_SCAN_KEY_COUNT,
+    );
     rotated = key.instant;
   } catch {
     log.warn("instant key rotation check failed (non-fatal)");
