@@ -26,15 +26,24 @@ export interface MintRpcConfig {
 /**
  * Preference order for the fire path, fastest first.
  *
- * Measured 2026-09-16, three `eth_chainId` calls each from this host:
- * dRPC 66 ms, Chainstack 68 ms, Alchemy 133 ms. Reads fail over in this
- * order, so the first entry sets the latency the mint actually pays; the
- * broadcast races all of them and does not care about order.
+ * Ordered by the call the fire path actually depends on —
+ * `eth_getTransactionCount(…, "pending")` — NOT by `eth_chainId`.
+ *
+ * Measured 2026-09-16 from this host, five calls each:
+ *   method                    dRPC     Chainstack   Alchemy
+ *   eth_chainId                66 ms      68 ms      133 ms
+ *   eth_getTransactionCount   528 ms     195 ms      130 ms
+ *
+ * The ranking REVERSES. `eth_chainId` is answered from memory and measures
+ * nothing but the network hop; the pending nonce requires a real state
+ * lookup. Ordering by the cheap call put the slowest provider first and cost
+ * 265 ms on the 21:00 GTD, where the prefetch was still in flight when the
+ * signature was ready. Benchmark the method you depend on.
  */
 const PROVIDER_ORDER = [
-  "DRPC_ROBINHOOD_RPC",
-  "CHAINSTACK_ROBINHOOD_RPC",
   "ALCHEMY_ROBINHOOD_RPC",
+  "CHAINSTACK_ROBINHOOD_RPC",
+  "DRPC_ROBINHOOD_RPC",
 ] as const;
 
 /**

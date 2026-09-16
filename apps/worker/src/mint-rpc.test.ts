@@ -9,13 +9,14 @@ const cfg = {
 };
 
 describe("mintRpcUrls ordering", () => {
-  // Measured 2026-09-16: dRPC 66ms, Chainstack 68ms, Alchemy 133ms. Reads fail
-  // over in order, so the first entry is the latency the mint pays.
-  it("puts the fastest provider first", () => {
+  // Ordered by eth_getTransactionCount (the call the fire path depends on),
+  // not eth_chainId: 130ms / 195ms / 528ms respectively. Ordering by the cheap
+  // call put the slowest provider first and cost 265ms on a live mint.
+  it("puts the provider that is fastest at the NONCE call first", () => {
     const urls = mintRpcUrls(cfg);
-    expect(urls[0]).toContain("drpc");
+    expect(urls[0]).toContain("alchemy");
     expect(urls[1]).toContain("chainstack");
-    expect(urls[2]).toContain("alchemy");
+    expect(urls[2]).toContain("drpc");
   });
 
   it("appends registry endpoints behind the premium ones and de-duplicates", () => {
@@ -31,14 +32,14 @@ describe("mintRpcUrlsForChain", () => {
     // single-chain helper) appends it; the chain-aware form leaves the
     // per-chain fallback to the caller's registry list.
     expect(mintRpcUrlsForChain(cfg, 4663)).toEqual([
-      cfg.DRPC_ROBINHOOD_RPC,
-      cfg.CHAINSTACK_ROBINHOOD_RPC,
       cfg.ALCHEMY_ROBINHOOD_RPC,
+      cfg.CHAINSTACK_ROBINHOOD_RPC,
+      cfg.DRPC_ROBINHOOD_RPC,
     ]);
     expect(mintRpcUrls(cfg)).toEqual([
-      cfg.DRPC_ROBINHOOD_RPC,
-      cfg.CHAINSTACK_ROBINHOOD_RPC,
       cfg.ALCHEMY_ROBINHOOD_RPC,
+      cfg.CHAINSTACK_ROBINHOOD_RPC,
+      cfg.DRPC_ROBINHOOD_RPC,
       cfg.RPC_URL,
     ]);
   });

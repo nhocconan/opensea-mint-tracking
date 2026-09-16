@@ -551,6 +551,65 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     };
     mark("claimed");
 
+    // The wallet read is hoisted here for its address; its guards stay at
+    // their original position below so a missing row cannot pre-empt the
+    // idempotency gate.
+    const [project] = await db
+      .select()
+      .from(projectsTable)
+      .where(eq(projectsTable.id, plan.projectId));
+    const [wallet] = await db.select().from(walletsTable).where(eq(walletsTable.id, plan.walletId));
+
+    // PREFETCH, STARTED FIRST. Measured on the 2026-09-15 21:00 GTD: the burst waits
+    // 230-1200ms for OpenSea to flip, and only THEN did the fire path ask the
+    // RPC for nonce+fees — at the one moment every other bot on the chain is
+    // hammering the same endpoint. `eth_getTransactionCount` exceeded its
+    // 800ms budget TWICE in a row and killed two whole attempts, costing 2.5
+    // seconds and the race. The RPC does not need to be asked at the fire
+    // instant at all: start it here, in parallel with the burst, so the nonce
+    // is already in hand the moment calldata arrives.
+    //
+    // Starting it "in parallel with the burst" was not enough. On the
+    // 2026-09-16 21:00 GTD the burst returned in 273ms and fees_nonce still
+    // cost 265.7ms, because SEVEN awaited reads — the idempotency gate's own
+    // RPC round-trip among them — ran between the claim and this point. A
+    // prefetch hidden behind something slow is not fast, it is just late. It
+    // now starts before all of them and overlaps every one.
+    let feesPrefetch: Promise<Awaited<ReturnType<typeof fetchFeeContext>>> | null = null;
+
+    // Are we AT the fire instant (operator fire_at, else stage open)? Then
+    // this pass is the race: burst-poll OpenSea for the signature instead of
+    // one paced call, and skip simulation downstream. Outside that window
+    // (coarse 30s re-tries, hopeless plans) stay cheap and paced.
+    const nearFire = await isNearFireInstant(db, plan, FIRE_BURST_WINDOW_MS);
+    // `wallet.encryptedSigningKey !== null` is the same condition that makes
+    // signerScheme managed_wallet_key further down, minus the signers read we
+    // have deliberately not done yet. It is a superset: an active
+    // custom_executor signer makes this one read wasted, a far cheaper
+    // mistake than paying for the nonce on the critical path.
+    if (nearFire && wallet?.encryptedSigningKey != null) {
+      // Warm every broadcast socket while the burst waits on OpenSea. Costs
+      // one trivial read per endpoint and removes a TCP+TLS handshake from
+      // the send at T.
+      void warmRpcConnections(fireUrls);
+      // Generous budget: this runs off the critical path, and a saturated RPC
+      // at the open is slow, not broken. Swallow the rejection here so an
+      // unsettled promise cannot crash the pass; the consumer re-fetches.
+      // Failover across every fire endpoint: a read that fails on one
+      // provider must not cost the mint, which is exactly what a single
+      // saturated endpoint did at 21:00.
+      feesPrefetch = withRpcFailover(
+        fireUrls,
+        (url) => fetchFeeContext(url, wallet.address, { timeoutMs: 4_000 }),
+        (url, error) =>
+          log.warn(
+            { planId: plan.id, rpc: redactRpc(url), err: error },
+            "fee/nonce prefetch failed on this endpoint — trying the next",
+          ),
+      );
+      feesPrefetch.catch(() => undefined);
+    }
+
     // IDEMPOTENCY GATE. A claim is not proof that nothing was sent: this pass
     // may be a re-claim after the lease expired because the previous worker
     // was killed between sendRawTransaction returning and the status write,
@@ -588,11 +647,6 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
       // transaction did not mint, so firing again is correct.
     }
 
-    const [project] = await db
-      .select()
-      .from(projectsTable)
-      .where(eq(projectsTable.id, plan.projectId));
-    const [wallet] = await db.select().from(walletsTable).where(eq(walletsTable.id, plan.walletId));
     if (project === undefined || wallet === undefined) {
       await record("failed", { errorCode: "missing_project_or_wallet" });
       return { expired, claimed: true, outcome: "missing_project_or_wallet", planId: plan.id };
@@ -651,43 +705,6 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     // cachedTxAt comes through claimArmedMintPlan's raw-SQL RETURNING, so
     // (like armedUntil above) it's a string at runtime despite the Date
     // type — coerceDate before any date math, same lesson as line ~121.
-    // PREFETCH. Measured on the 2026-09-15 21:00 GTD: the burst waits
-    // 230-1200ms for OpenSea to flip, and only THEN did the fire path ask the
-    // RPC for nonce+fees — at the one moment every other bot on the chain is
-    // hammering the same endpoint. `eth_getTransactionCount` exceeded its
-    // 800ms budget TWICE in a row and killed two whole attempts, costing 2.5
-    // seconds and the race. The RPC does not need to be asked at the fire
-    // instant at all: start it here, in parallel with the burst, so the nonce
-    // is already in hand the moment calldata arrives.
-    let feesPrefetch: Promise<Awaited<ReturnType<typeof fetchFeeContext>>> | null = null;
-
-    // Are we AT the fire instant (operator fire_at, else stage open)? Then
-    // this pass is the race: burst-poll OpenSea for the signature instead of
-    // one paced call, and skip simulation downstream. Outside that window
-    // (coarse 30s re-tries, hopeless plans) stay cheap and paced.
-    const nearFire = await isNearFireInstant(db, plan, FIRE_BURST_WINDOW_MS);
-    if (nearFire && signerScheme === "managed_wallet_key") {
-      // Warm every broadcast socket while the burst waits on OpenSea. Costs
-      // one trivial read per endpoint and removes a TCP+TLS handshake from
-      // the send at T.
-      void warmRpcConnections(fireUrls);
-      // Generous budget: this runs off the critical path, and a saturated RPC
-      // at the open is slow, not broken. Swallow the rejection here so an
-      // unsettled promise cannot crash the pass; the consumer re-fetches.
-      // Failover across every fire endpoint: a read that fails on one
-      // provider must not cost the mint, which is exactly what a single
-      // saturated endpoint did at 21:00.
-      feesPrefetch = withRpcFailover(
-        fireUrls,
-        (url) => fetchFeeContext(url, wallet.address, { timeoutMs: 4_000 }),
-        (url, error) =>
-          log.warn(
-            { planId: plan.id, rpc: redactRpc(url), err: error },
-            "fee/nonce prefetch failed on this endpoint — trying the next",
-          ),
-      );
-      feesPrefetch.catch(() => undefined);
-    }
     // ── SELF-SERVED PUBLIC MINT ──────────────────────────────────────────
     // A `public` stage is `mintPublic` on SeaDrop: no signature, no allowlist
     // proof, nothing OpenSea has to grant us. Verified on chain 4663 —

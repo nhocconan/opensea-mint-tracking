@@ -105,8 +105,14 @@ hot loop (200 ms, completion-scheduled)
 ```
 
 ### RPC routing
-- **Mint path:** `ALCHEMY_ROBINHOOD_RPC` → `CHAINSTACK_ROBINHOOD_RPC` → registry/public.
-  Sequential failover for reads, `Promise.any` race for broadcast.
+- **Mint path:** `ALCHEMY_ROBINHOOD_RPC` → `CHAINSTACK_ROBINHOOD_RPC` →
+  `DRPC_ROBINHOOD_RPC` → registry/public. Sequential failover for reads,
+  `Promise.any` race for broadcast.
+- Order is set by `eth_getTransactionCount`, **not** `eth_chainId` — see §5.11.
+- Only the Robinhood URL of each provider is configured. Base/ETH URLs are
+  derived from it (`packages/core/src/rpc-derive.ts`). "Derivable" and "serves
+  this chain" are separate questions; conflating them silently dropped
+  Chainstack from Robinhood itself.
 - **Background jobs:** registry only (public RPC). Premium endpoints are
   deliberately **not** in `rpc_endpoints` — see §5.6.
 
@@ -220,6 +226,52 @@ were wrong: they used the same endpoint and landed at ≈T+0.2 s. The wrong
 conclusion nearly sent a day of work in the wrong direction.
 **Lesson:** decode the transaction before theorising about it.
 
+### 5.11 Benchmarking the wrong method, then ordering by it
+
+Provider order was chosen from `eth_chainId`: dRPC 66 ms, Chainstack 68 ms,
+Alchemy 133 ms — so dRPC went first. The fire path does not call `eth_chainId`.
+It calls `eth_getTransactionCount(…, "pending")`, and on that call the ranking
+**reverses**: dRPC 528 ms, Chainstack 195 ms, Alchemy 130 ms. `eth_chainId` is
+answered from memory and measures only the network hop; a pending nonce needs a
+real state lookup. The cheap call put the slowest provider first, and that is
+most of the 265.7 ms `fees_nonce` on the 2026-09-16 21:00 GTD.
+**Lesson:** benchmark the method you depend on, at the concurrency you will
+have. A number from an adjacent call is not evidence about this one.
+
+### 5.12 A prefetch hidden behind something slow is just late
+
+`fees_nonce` was 0.1 ms on 2026-09-15 23:00 and 265.7 ms on 2026-09-16 21:00 —
+the prefetch looked fixed and then regressed with no code change. It never
+worked. It only ever *appeared* to: on the 15th the OpenSea burst took 521 ms
+and the prefetch finished inside that shadow; on the 16th the burst took 273 ms
+and the prefetch became the tail. Seven awaited reads — including the
+idempotency gate's own RPC round-trip — ran between the claim and the line that
+started it. Now it starts immediately after the claim and overlaps all of them.
+**Lesson:** a background task's latency is only hidden while something slower
+runs in front of it. Measure where it *starts*, not just that it is `void`ed.
+
+### 5.13 Dedupe keyed on a column nothing wrote
+
+Two scan-freshness filters read `drop_checked_at`. `markProjectDropChecked` was
+never called, so the column was always NULL and both filters passed everything —
+the dedupe saved zero API calls while reading as if it worked.
+**Lesson:** for any new "skip if already done" column, grep for its writer
+before trusting the reader.
+
+### 5.14 A refresh horizon narrower than the schedules it feeds
+
+`refreshArmedPlanDetails` only refreshed plans firing within 6 h. Stages armed
+the evening before never had their details fetched. Widened to 48 h with a
+15-minute staleness guard.
+**Lesson:** a horizon is a silent filter. State it in the name or the log.
+
+### 5.15 Preflight that checked a different system than the one that fires
+
+`preflight-mint.ts` reported "0 plans ready, 2 blocked" while the fire path was
+perfectly healthy: preflight read the registry endpoints, the fire path uses
+`mintRpcUrls`. A green/red check on the wrong list is worse than none.
+**Lesson:** a preflight must call the same function the hot path calls.
+
 ---
 
 ## 6. Defects fixed in the fire path (2026-09-15/16)
@@ -257,6 +309,10 @@ Eligibility and caps:
 
 ## 7. Operating checklist before a drop
 
+0. Deploy with `docker compose -p hoodmint-radar-prod -f docker-compose.prod.yml`.
+   A bare `docker compose` targets the *dev* project, tries to create a second
+   network, and fails — it does not touch prod, but the error reads like an
+   outage. Confirm with `docker ps` before believing anything is down.
 1. `scripts/preflight-mint.ts <slug>` — exits non-zero if anything blocks.
 2. Confirm the wallet has gas and a managed key (`has_key`).
 3. For a `public` stage, compare `getPublicDrop().startTime` against
