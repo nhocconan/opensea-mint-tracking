@@ -48,6 +48,7 @@ import {
   releaseMintPlanToArmed,
   savePresignedTx,
   signers as signersTable,
+  stageCapsForProject,
   wallets as walletsTable,
 } from "@hoodmint/db";
 import { runExecutionPipeline } from "@hoodmint/execution";
@@ -74,6 +75,7 @@ import {
   isPerWalletLimitError,
   isTerminalMintBuildError,
   mintedOutIsTerminal,
+  precheckAllowance,
 } from "../mint-tx.ts";
 import { releaseNonce, reserveNonce } from "../nonce-allocator.ts";
 import { buildSelfServedPublicMint, type SelfServedTx } from "../seadrop-public-mint.ts";
@@ -586,6 +588,18 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     // prefetch hidden behind something slow is not fast, it is just late. It
     // now starts before all of them and overlaps every one.
     let feesPrefetch: Promise<Awaited<ReturnType<typeof fetchFeeContext>>> | null = null;
+    // PRECHECK source, read in the SAME window as the fees so it costs no
+    // critical-path time. Two facts decide every contested mint and neither
+    // was ever read on the allowlist path before the burst: how many tokens
+    // this wallet may still mint, and whether the collection has supply.
+    // Without them the fire path could only learn its fate by failing at T+0
+    // and then guessing from an OpenSea error string that describes whichever
+    // phase OpenSea currently considers active. That is the whole bug class.
+    let mintStatsPrefetch: Promise<{
+      minterNumMinted: bigint;
+      currentTotalSupply: bigint;
+      maxSupply: bigint;
+    } | null> | null = null;
 
     // Are we AT the fire instant (operator fire_at, else stage open)? Then
     // this pass is the race: burst-poll OpenSea for the signature instead of
@@ -618,6 +632,18 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
           ),
       );
       feesPrefetch.catch(() => undefined);
+      if (mintStatsTarget !== null) {
+        const statsTarget = mintStatsTarget;
+        mintStatsPrefetch = withRpcFailover(fireUrls, (url) =>
+          readMintStats(url, statsTarget.contract, statsTarget.minter, 2_000),
+        ).catch((err: unknown) => {
+          log.warn(
+            { planId: plan.id, err },
+            "on-chain mint stats unreadable — PRECHECK will fall back to OpenSea's answer",
+          );
+          return null;
+        });
+      }
     }
 
     // IDEMPOTENCY GATE. A claim is not proof that nothing was sent: this pass
@@ -630,7 +656,7 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     // paid twice. Ask the chain before doing anything else.
     const priorBroadcast = await latestBroadcastAttempt(db, plan.id);
     if (priorBroadcast !== undefined) {
-      const priorOutcome = await resolveTxOutcome(rpcUrl, priorBroadcast.txHash);
+      const priorOutcome = await resolveTxOutcome(fireUrls, priorBroadcast.txHash);
       if (priorOutcome === "success") {
         log.info(
           { planId: plan.id, txHash: priorBroadcast.txHash },
@@ -835,6 +861,61 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
     // stages — a server signature that is not valid for the phase being
     // minted: a guaranteed revert at the one instant that matters. At the fire
     // instant always re-ask OpenSea; that is what burstBuildOpenSeaMintTx is for.
+    // ── PRECHECK ─────────────────────────────────────────────────────────
+    // Decide from the contract BEFORE asking OpenSea for anything. Allowlist
+    // stages only (the public path already does this in
+    // seadrop-public-mint.ts before it builds).
+    //
+    // 2026-09-16 projectcpu is the case this exists for: the wallet spent its
+    // cumulative cap of 3 on the 21:00 GTD, so the 21:30 FCFS plan was dead
+    // the moment the GTD receipt landed. The fire path did not know that,
+    // burst anyway, took a 422 about the GTD phase, and killed the plan for
+    // the wrong reason — while the operator still had thirty minutes to arm a
+    // second wallet and was never told.
+    let precheckQuantity = plan.quantity;
+    if (selfServedTx === undefined && mintStatsPrefetch !== null) {
+      const stats = await mintStatsPrefetch;
+      if (stats !== null) {
+        const caps = plan.stageId === null ? [] : await stageCapsForProject(db, plan.projectId);
+        const cap = caps.find((c) => c.stageId === plan.stageId)?.cap ?? null;
+        const verdict = precheckAllowance({ requested: plan.quantity, cap, ...stats });
+        const detail = {
+          planId: plan.id,
+          cap,
+          minterNumMinted: stats.minterNumMinted.toString(),
+          totalSupply: stats.currentTotalSupply.toString(),
+          maxSupply: stats.maxSupply.toString(),
+        };
+        if (verdict.verdict === "minted_out") {
+          log.warn(detail, "PRECHECK: collection is minted out on chain — plan failed (terminal)");
+          await record("failed", { errorCode: "precheck_minted_out" });
+          await failPlanAndNotify(db, plan);
+          return { expired, claimed: true, outcome: "precheck_minted_out", planId: plan.id };
+        }
+        if (verdict.verdict === "allowance_exhausted") {
+          log.warn(
+            detail,
+            "PRECHECK: wallet's cumulative allowance is spent — plan failed (terminal)",
+          );
+          await record("failed", { errorCode: `precheck_allowance_exhausted: cap=${verdict.cap}` });
+          await failPlanAndNotify(db, plan);
+          return {
+            expired,
+            claimed: true,
+            outcome: "precheck_allowance_exhausted",
+            planId: plan.id,
+          };
+        }
+        precheckQuantity = verdict.quantity;
+        if (precheckQuantity !== plan.quantity) {
+          log.warn(
+            { ...detail, requested: plan.quantity, using: precheckQuantity },
+            "PRECHECK: sized the request to the wallet's remaining allowance",
+          );
+        }
+      }
+    }
+
     const cacheIsFresh =
       !nearFire && cachedAt !== null && Date.now() - cachedAt.getTime() < CACHE_TTL_MS;
     const tx =
@@ -853,7 +934,7 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
                 slug: project.slug as string,
                 chainId: project.chainId,
                 minter: wallet.address,
-                quantity: plan.quantity,
+                quantity: precheckQuantity,
               };
               // Shared build helper (finding #8) — identical to what the
               // pre-build pass caches, so cache-hit and cache-miss can't drift.
@@ -866,21 +947,30 @@ export async function runMintExecutionPass(ctx: WorkerContext): Promise<MintExec
               // not indexed yet — this is the backstop that still gets the
               // operator the tokens they are entitled to instead of failing
               // the plan outright.
+              //
+              // ONE shared deadline across every descend attempt. Each
+              // attempt used to get a full MINT_SIGNATURE_BURST_MS of its own,
+              // so three attempts could burst for 36s against a 30s claim
+              // lease — long enough for a second worker to re-claim the row,
+              // find no broadcast hash because nothing had been sent yet, and
+              // sign a second transaction at the next nonce. The descend must
+              // fit inside the window the lease was sized for.
+              const burstDeadlineMs = Date.now() + config.MINT_SIGNATURE_BURST_MS;
               let built: Awaited<ReturnType<typeof buildOpenSeaMintTx>> | undefined;
               let lastLimitError: unknown;
-              for (let qty = plan.quantity; qty >= 1; qty -= 1) {
+              for (let qty = precheckQuantity; qty >= 1; qty -= 1) {
                 try {
                   built = nearFire
                     ? await burstBuildOpenSeaMintTx(
                         ctx,
                         { ...target, quantity: qty },
                         {
-                          maxMs: config.MINT_SIGNATURE_BURST_MS,
+                          maxMs: Math.max(0, burstDeadlineMs - Date.now()),
                           cadenceMs: config.MINT_SIGNATURE_BURST_CADENCE_MS,
                         },
                       )
                     : await buildOpenSeaMintTx(ctx, { ...target, quantity: qty });
-                  if (qty !== plan.quantity) {
+                  if (qty !== precheckQuantity) {
                     log.warn(
                       { planId: plan.id, requested: plan.quantity, using: qty },
                       "OpenSea refused the requested quantity for this wallet — rebuilt at the remaining allowance",
@@ -1477,7 +1567,7 @@ async function runManagedFire(
       // second NFT at nonce+1 and pays twice, so resolve it against the
       // chain instead of guessing from the error string.
       if (fresh.presignedTxHash !== null) {
-        const landed = await resolveTxOutcome(rpcUrl, fresh.presignedTxHash);
+        const landed = await resolveTxOutcome(mode.fireUrls ?? [rpcUrl], fresh.presignedTxHash);
         if (landed === "success") {
           log.info(
             { planId: plan.id, txHash: fresh.presignedTxHash },
@@ -1696,7 +1786,7 @@ async function runManagedFire(
     // A signed transaction may have reached the sequencer even though every
     // endpoint reported failure. Ask the chain before deciding it did not.
     if (liveSignedTxHash !== null) {
-      const landed = await resolveTxOutcome(rpcUrl, liveSignedTxHash);
+      const landed = await resolveTxOutcome(mode.fireUrls ?? [rpcUrl], liveSignedTxHash);
       if (landed === "success") {
         log.info(
           { planId: plan.id, txHash: liveSignedTxHash },

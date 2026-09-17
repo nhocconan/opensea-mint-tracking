@@ -234,3 +234,54 @@ export function mintedOutIsTerminal(input: {
   }
   return input.nowMs >= input.fireTargetMs + (input.graceMs ?? MINTED_OUT_CLOCK_LAG_GRACE_MS);
 }
+
+/**
+ * What the CONTRACT says a plan may still do, before OpenSea is asked anything.
+ *
+ * Two facts decide every contested allowlist mint and neither was read before
+ * the burst: how many tokens this wallet may still mint, and whether the
+ * collection has supply. Without them the fire path could only learn its fate
+ * by failing at T+0 and then guessing from an OpenSea error string — and that
+ * string describes whichever phase OpenSea currently considers active, not the
+ * one the plan targets. Every failure of the last few days is that guess.
+ *
+ * `cap` is the stage's cumulative `maxTotalMintableByWallet` (from
+ * eligibility_checks); null means unknown, in which case the wallet's
+ * allowance cannot be argued about and the request is left at full size.
+ */
+export type PrecheckVerdict =
+  | { verdict: "ok"; quantity: number }
+  | { verdict: "minted_out" }
+  | { verdict: "allowance_exhausted"; cap: number };
+
+export function precheckAllowance(input: {
+  requested: number;
+  cap: number | null;
+  minterNumMinted: bigint;
+  currentTotalSupply: bigint;
+  maxSupply: bigint;
+}): PrecheckVerdict {
+  // maxSupply 0 means the contract does not publish a cap; treat supply as
+  // unbounded rather than as exhausted.
+  const supplyLeft =
+    input.maxSupply > 0n
+      ? Number(input.maxSupply - input.currentTotalSupply)
+      : Number.MAX_SAFE_INTEGER;
+  if (supplyLeft <= 0) {
+    return { verdict: "minted_out" };
+  }
+  if (input.cap !== null) {
+    const remaining = input.cap - Number(input.minterNumMinted);
+    if (remaining <= 0) {
+      // Terminal from a contract fact, not a string: the cumulative cap is
+      // spent, so no signature OpenSea could issue would pass
+      // _checkMintQuantity. Retrying is pure API spend.
+      return { verdict: "allowance_exhausted", cap: input.cap };
+    }
+    return {
+      verdict: "ok",
+      quantity: Math.max(1, Math.min(input.requested, remaining, supplyLeft)),
+    };
+  }
+  return { verdict: "ok", quantity: Math.max(1, Math.min(input.requested, supplyLeft)) };
+}

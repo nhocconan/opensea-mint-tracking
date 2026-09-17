@@ -47,6 +47,8 @@ export interface PreBuildSummary {
   readonly candidates: number;
   readonly built: number;
   readonly skippedQuota: number;
+  /** Held back by the per-plan failure backoff rather than attempted. */
+  readonly skippedBackoff: number;
   readonly failed: number;
 }
 
@@ -68,16 +70,47 @@ async function loadQuotaWindow(db: Db): Promise<WriteQuotaWindow> {
   return currentWriteQuotaWindow(stored, Date.now());
 }
 
+/**
+ * Backoff for a plan whose pre-build keeps failing the same way.
+ *
+ * 2026-09-16 projectcpu: the FCFS plan's pre-build took an identical
+ * HTTP 422 "Drop is fully minted out" — about the still-active GTD phase —
+ * every 30s from 21:22 until the plan died, a dozen billed calls that could
+ * not have succeeded. Nothing backed off, because a failed build never
+ * stamps cached_tx_at and so is re-selected by plansNeedingPreBuild on the
+ * very next tick.
+ *
+ * Doubling from one tick, capped at five minutes. A plan that might yet
+ * become mintable is never abandoned — the delay only thins the attempts,
+ * and the claim-time path is what actually mints.
+ */
+export const PRE_BUILD_BACKOFF_BASE_MS = 30_000;
+export const PRE_BUILD_BACKOFF_MAX_MS = 5 * 60_000;
+
+export function preBuildBackoffMs(consecutiveFailures: number): number {
+  const doubled = PRE_BUILD_BACKOFF_BASE_MS * 2 ** Math.max(0, consecutiveFailures - 1);
+  return Math.min(doubled, PRE_BUILD_BACKOFF_MAX_MS);
+}
+
+/** planId -> when it may be attempted again, and how many times it has failed. */
+const backoff = new Map<string, { until: number; failures: number }>();
+
+/** Test seam: the map is process-local and would otherwise leak across cases. */
+export function resetPreBuildBackoff(): void {
+  backoff.clear();
+}
+
 export async function runSpeculativePreBuild(ctx: WorkerContext): Promise<PreBuildSummary> {
   const { db, log } = ctx;
   const candidates = await plansNeedingPreBuild(db, new Date(), CACHE_TTL_MS);
   if (candidates.length === 0) {
-    return { candidates: 0, built: 0, skippedQuota: 0, failed: 0 };
+    return { candidates: 0, built: 0, skippedQuota: 0, skippedBackoff: 0, failed: 0 };
   }
 
   let quotaWindow = await loadQuotaWindow(db);
   let built = 0;
   let skippedQuota = 0;
+  let skippedBackoff = 0;
   let failed = 0;
 
   for (const plan of candidates) {
@@ -86,6 +119,11 @@ export async function runSpeculativePreBuild(ctx: WorkerContext): Promise<PreBui
     // the window — a later candidate in the same pass must see that.
     if (!shouldAttemptSpeculativeWrite(quotaWindow, OPENSEA_WRITE_QUOTA_PER_HOUR)) {
       skippedQuota += 1;
+      continue;
+    }
+    const held = backoff.get(plan.id);
+    if (held !== undefined && Date.now() < held.until) {
+      skippedBackoff += 1;
       continue;
     }
     try {
@@ -106,6 +144,13 @@ export async function runSpeculativePreBuild(ctx: WorkerContext): Promise<PreBui
       // Shared build helper (finding #8) — the exact sequence the claim-time
       // execution pass uses, so the calldata cached here can't drift from
       // what would be rebuilt at fire time.
+      // Meter BEFORE the attempt. OpenSea charges for a 422 exactly as it
+      // charges for a 200, but this only counted successes, so a plan failing
+      // every 30s spent write quota that the tracker never saw — the reserve
+      // the mint depends on could be drained by calls it did not know about.
+      quotaWindow = recordWriteQuotaCall(quotaWindow);
+      await setSetting(db, WRITE_QUOTA_SETTING_KEY, quotaWindow);
+
       const tx = await buildOpenSeaMintTx(ctx, {
         slug: project.slug,
         chainId: project.chainId,
@@ -113,8 +158,7 @@ export async function runSpeculativePreBuild(ctx: WorkerContext): Promise<PreBui
         quantity: plan.quantity,
       });
 
-      quotaWindow = recordWriteQuotaCall(quotaWindow);
-      await setSetting(db, WRITE_QUOTA_SETTING_KEY, quotaWindow);
+      backoff.delete(plan.id);
       await cacheMintPlanTx(db, plan.id, {
         to: tx.to,
         data: tx.data,
@@ -124,15 +168,20 @@ export async function runSpeculativePreBuild(ctx: WorkerContext): Promise<PreBui
       built += 1;
     } catch (error) {
       failed += 1;
+      const failures = (backoff.get(plan.id)?.failures ?? 0) + 1;
+      const waitMs = preBuildBackoffMs(failures);
+      backoff.set(plan.id, { until: Date.now() + waitMs, failures });
       log.warn(
         {
           planId: plan.id,
           errorCode: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+          consecutiveFailures: failures,
+          retryInMs: waitMs,
         },
         "speculative pre-build failed (non-fatal — claim-time build still runs as fallback)",
       );
     }
   }
 
-  return { candidates: candidates.length, built, skippedQuota, failed };
+  return { candidates: candidates.length, built, skippedQuota, skippedBackoff, failed };
 }

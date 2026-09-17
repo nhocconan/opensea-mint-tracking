@@ -71,9 +71,41 @@ export async function waitForMintReceipt(
  * pays twice, so the ambiguity has to be resolved against the chain rather
  * than guessed from the error string.
  */
-export async function resolveTxOutcome(rpcUrl: string, txHash: string): Promise<ReceiptOutcome> {
+/**
+ * Budget for the idempotency gate specifically. This read does NOT run in the
+ * fire window — it runs once per claim, before anything is built — and its
+ * answer decides whether a transaction that may already be MINED gets sent a
+ * second time. An 800ms budget turned a slow endpoint into "unknown", and
+ * past PRIOR_BROADCAST_GRACE_MS "unknown" means fire again: an Alchemy 429
+ * storm (observed 2026-09-15 22:00) is therefore a double-mint path. Correct
+ * answers matter more here than milliseconds.
+ */
+const OUTCOME_RPC_TIMEOUT_MS = 2_500;
+
+/**
+ * Resolve a broadcast transaction's fate, asking every endpoint before
+ * admitting "unknown". `rpcUrls` is tried in order; a definite answer from
+ * any endpoint wins, and only an exhausted list returns "unknown".
+ */
+export async function resolveTxOutcome(
+  rpcUrls: string | readonly string[],
+  txHash: string,
+): Promise<ReceiptOutcome> {
+  const urls = typeof rpcUrls === "string" ? [rpcUrls] : rpcUrls;
+  for (const url of urls) {
+    const outcome = await resolveTxOutcomeOnce(url, txHash);
+    if (outcome !== "unknown") {
+      return outcome;
+    }
+  }
+  return "unknown";
+}
+
+async function resolveTxOutcomeOnce(rpcUrl: string, txHash: string): Promise<ReceiptOutcome> {
   try {
-    const receipt = await client(rpcUrl).getTransactionReceipt({
+    const receipt = await createPublicClient({
+      transport: http(rpcUrl, { retryCount: 0, timeout: OUTCOME_RPC_TIMEOUT_MS }),
+    }).getTransactionReceipt({
       hash: txHash as `0x${string}`,
     });
     if (receipt === null || receipt === undefined) {
